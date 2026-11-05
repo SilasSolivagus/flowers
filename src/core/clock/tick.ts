@@ -22,6 +22,8 @@ const STATE_LABEL: Partial<Record<State, string>> = {
   ready: '待开发', dev: '开发中', test: '测试中',
 };
 
+const stateLabel = (state: State) => STATE_LABEL[state] ?? state;
+
 /** 三条 clock 转移：源状态 → 目标状态 + 判定用的那一列。 */
 const NEXT: Record<'ready' | 'dev' | 'test', { to: State; field: DeadlineField }> = {
   ready: { to: 'dev', field: 'window_start' },
@@ -60,7 +62,7 @@ export function deadlineDay(
   ctx: { requirementId: string; state: State; field: DeadlineField },
 ): number {
   const label = FIELD_LABEL[ctx.field];
-  const state = STATE_LABEL[ctx.state] ?? ctx.state;
+  const state = stateLabel(ctx.state);
   if (raw === null) {
     throw new AppError(
       'clock_missing_deadline',
@@ -76,6 +78,26 @@ export function deadlineDay(
   }
   return day;
 }
+
+/**
+ * 三个时钟状态都必须挂在版本上。
+ *
+ * 单看开工日会漏掉一格：`dev` / `test` 行不看 `window_start`，所以 `release_id = null`
+ * 的 dev 行会一路被推到 test、再到 live —— 没有开工日就意味着没有版本，这一类行是
+ * 损坏数据，不是「还不到点」。所以版本先查，三个状态一视同仁地报出来。
+ */
+function assertHasRelease(
+  releaseId: string | null,
+  ctx: { requirementId: string; state: State },
+): void {
+  if (releaseId === null) {
+    throw new AppError(
+      'clock_missing_deadline',
+      `需求 ${ctx.requirementId} 处于「${stateLabel(ctx.state)}」但没有排期版本，无法自动推进`,
+    );
+  }
+}
+
 
 /**
  * 时钟推进：把到了点的 ready / dev / test 各推进一步。
@@ -100,13 +122,15 @@ export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
   return db.transaction(async (tx) => {
     const moved: Moved[] = [];
 
-    // left join：没有 release_id 的 ready 行也要被取出来报错，
-    // inner join 会让它从结果里消失——正是「静默跳过」。
+    // left join + 把 rel.id 也取出来：没有 release_id 的行（三个状态都一样）必须
+    // 被取出来报错。inner join 会让它从结果里消失——正是「静默跳过」。
+    // 只看 rel.window_start 不够：dev / test 行不读 window_start，release_id 为 null
+    // 的 dev 行会被一路推到 live，连一声响都没有。
     const due = await tx.execute<{
-      id: string; state: State;
+      id: string; state: State; release_id: string | null;
       window_start: string | null; commit_test_at: string | null; commit_due_at: string | null;
     }>(sql`
-      select r.id, r.state, rel.window_start, r.commit_test_at, r.commit_due_at
+      select r.id, r.state, rel.id as release_id, rel.window_start, r.commit_test_at, r.commit_due_at
         from requirements r
         left join releases rel on rel.id = r.release_id
        where r.state in ('ready','dev','test')
@@ -114,6 +138,7 @@ export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
          for update of r`);
 
     for (const row of due.rows) {
+      assertHasRelease(row.release_id, { requirementId: row.id, state: row.state });
       const next = NEXT[row.state as 'ready' | 'dev' | 'test'];
       const day = deadlineDay(row[next.field], {
         requirementId: row.id, state: row.state, field: next.field,

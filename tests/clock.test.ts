@@ -5,7 +5,7 @@ import { tick, deadlineDay, shanghaiDayOf } from '../src/core/clock/tick.js';
 import { AppError } from '../src/core/errors.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { resetDb, seedPeople } from './helpers/db.js';
-import { makeQueued, makeReadyAt } from './helpers/factory.js';
+import { makeQueued, makeReadyAt, makeRelease } from './helpers/factory.js';
 
 beforeEach(async () => {
   await resetDb();
@@ -226,15 +226,21 @@ describe('tick — 事件与并发', () => {
     //
     // 为什么要这么写：直接 `Promise.all([tick, tick])` 时第一次 SELECT 未必重叠——
     // 实测把 for update 去掉后那条用例照样通过（一个跑完另一个才开始），
-    // 它证明不了锁。这里先制造确定的阻塞点，去掉 for update 就会看到两个 tick
-    // 都读到 ready、都写一条事件、把状态推成 test，用例立刻红。
+    // 它证明不了锁。这里先制造确定的阻塞点：去掉 for update 后，两个 tick 都不拿行锁、
+    // 都读到 ready，随后两条 update 排在 blocker 的行锁后面，锁一放先后都执行——
+    // 于是同一步被写两次、两条事件、state 仍是 dev，用例因为 moved 有两条而红。
     const blocker = await pool.connect();
     try {
       await blocker.query('begin');
       await blocker.query('select 1 from requirements where id = $1 for update', [id]);
 
+      // 先挂上拒绝处理再等锁：waitForLockWaiters 抛出时这两个 promise 还没 await，
+      // 它们的失败会变成 unhandled rejection 打在测试进程上，掩盖真正的失败。
       const p1 = tick(db, at);
+      p1.catch(() => {});
       const p2 = tick(db, at);
+      p2.catch(() => {});
+
       await waitForLockWaiters(2);
 
       await blocker.query('commit');
@@ -244,25 +250,66 @@ describe('tick — 事件与并发', () => {
       expect(await stateOf(id)).toBe('dev');
       expect(await autoEvents(id)).toHaveLength(1);
     } finally {
+      // 失败路径上 blocker 还开着事务、还锁着这一行；只 release() 会把「开着事务的连接」
+      // 还回池子，下一条用例的 resetDb() 的 truncate 就卡在这把行锁上直到超时——
+      // 一条红变成整片红。先 rollback 再还连接，rollback 失败也不能盖住原错误。
+      await blocker.query('rollback').catch(() => {});
       blocker.release();
     }
   });
 });
 
 describe('tick — 坏数据不静默跳过', () => {
-  it('待在待开发却没有版本（没有开工日）→ 报错，而不是永远不动', async () => {
+  it('待在待开发却没有版本 → 报错，而不是永远不动', async () => {
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = 'ready' where id = ${r.id}`);
 
     const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「待开发」但缺少开工日，无法自动推进`);
+    expect(e.message).toBe(`需求 ${r.id} 处于「待开发」但没有排期版本，无法自动推进`);
+  });
+
+  /**
+   * 版本检查必须对三个状态一视同仁：dev / test 行不读 window_start，若只在
+   * window_start 为空时报错，release_id 为 null 的 dev 行会被静默推成 test → live。
+   * 这类行没有版本就没有开工日，属于损坏数据，必须喊出来。
+   */
+  it('开发中却没有版本 → 报错（不会静默推进到测试中）', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+    await db.execute(sql`
+      update requirements
+         set state = 'dev', release_id = null, commit_test_at = '2026-12-01T00:00:00Z'
+       where id = ${r.id}`);
+
+    const e = await caught(tick(db, new Date('2026-12-02T00:00:00+08:00')));
+    expect(e).toBeInstanceOf(AppError);
+    expect(e.code).toBe('clock_missing_deadline');
+    expect(e.message).toBe(`需求 ${r.id} 处于「开发中」但没有排期版本，无法自动推进`);
+    expect(await stateOf(r.id)).toBe('dev');
+  });
+
+  it('测试中却没有版本 → 报错（不会静默推上线）', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+    await db.execute(sql`
+      update requirements
+         set state = 'test', release_id = null,
+             commit_test_at = '2026-12-01T00:00:00Z', commit_due_at = '2026-12-04T00:00:00Z'
+       where id = ${r.id}`);
+
+    const e = await caught(tick(db, new Date('2026-12-05T00:00:00+08:00')));
+    expect(e).toBeInstanceOf(AppError);
+    expect(e.code).toBe('clock_missing_deadline');
+    expect(e.message).toBe(`需求 ${r.id} 处于「测试中」但没有排期版本，无法自动推进`);
+    expect(await stateOf(r.id)).toBe('test');
   });
 
   it('开发中却没有提测日 → 报错', async () => {
+    // 版本要给：否则先撞「没有排期版本」，测不到提测日这一格。
+    const releaseId = await makeRelease('R-1', '2026-12-01', '2026-12-04');
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
-    await db.execute(sql`update requirements set state = 'dev' where id = ${r.id}`);
+    await db.execute(sql`
+      update requirements set state = 'dev', release_id = ${releaseId} where id = ${r.id}`);
 
     const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
     expect(e).toBeInstanceOf(AppError);
@@ -271,9 +318,12 @@ describe('tick — 坏数据不静默跳过', () => {
   });
 
   it('测试中却没有承诺完成日 → 报错', async () => {
+    const releaseId = await makeRelease('R-1', '2026-12-01', '2026-12-04');
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`
-      update requirements set state = 'test', commit_test_at = '2026-12-01T00:00:00Z' where id = ${r.id}`);
+      update requirements
+         set state = 'test', release_id = ${releaseId}, commit_test_at = '2026-12-01T00:00:00Z'
+       where id = ${r.id}`);
 
     const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
     expect(e).toBeInstanceOf(AppError);
@@ -287,7 +337,9 @@ describe('tick — 坏数据不静默跳过', () => {
     await db.execute(sql`update requirements set state = 'ready' where id = ${bad.id}`);
 
     const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
+    expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
+    expect(e.message).toBe(`需求 ${bad.id} 处于「待开发」但没有排期版本，无法自动推进`);
     expect(await stateOf(good.id)).toBe('ready');
     expect(await autoEvents(good.id)).toHaveLength(0);
   });
@@ -320,6 +372,17 @@ describe('deadlineDay / shanghaiDayOf — timestamptz 字符串按 Asia/Shanghai
     const beforeMidnight = shanghaiDayOf('2026-11-30T15:59:59.999Z'); // 北京 11-30 23:59:59
     const atMidnight = shanghaiDayOf('2026-11-30T16:00:00.000Z');     // 北京 12-01 00:00:00
     expect(atMidnight! - beforeMidnight!).toBe(1);
+  });
+
+  it('window_start 为空时的文案仍钉住（库里取不到该路径，只能对纯函数测）', () => {
+    // releases.window_start 是 not null，版本检查又先一步拦掉没有版本的行，
+    // 所以这条分支在真实数据上走不到；但它是 deadlineDay 的契约，照旧钉死文案。
+    const e = caughtSync(
+      () => deadlineDay(null, { requirementId: 'r-1', state: 'ready', field: 'window_start' }),
+    );
+    expect(e).toBeInstanceOf(AppError);
+    expect(e.code).toBe('clock_missing_deadline');
+    expect(e.message).toBe('需求 r-1 处于「待开发」但缺少开工日，无法自动推进');
   });
 
   it('解析不出来的字符串返回 null，交给调用方报错', () => {
