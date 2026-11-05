@@ -9,8 +9,8 @@
     "demo": "tsx scripts/demo.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "dev": "next dev -p 3000",
-    "build": "next build",
+    "dev": "next dev -p 3000 --webpack",
+    "build": "next build --webpack",
     "start": "next start -p 3000",
     "seed": "tsx scripts/seed.ts"
   },

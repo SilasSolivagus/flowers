@@ -3,18 +3,27 @@
 import { useRouter } from 'next/navigation';
 import { useState, type ChangeEvent } from 'react';
 
-/** 成员名单。Task 2 起改成 src/core/read/member.ts 的 listMembers() 真数据。 */
-export const MEMBERS = ['吕正豪', '赵越', '吕品', '房超', '王妍'] as const;
-export const DEFAULT_ACTOR = '吕正豪';
-
+/**
+ * 顶栏的成员切换。
+ *
+ * 名册与当前成员都由服务端给（`src/core/read/member.ts` 的 `listMembers()` /
+ * `currentMember()`）：这是 client component，不能连库，也不该自己维护第二份名单。
+ * 之前写死的五个名字已经从实现里删掉——加人只需要插一行 members表。
+ */
 interface MemberSwitchProps {
-  /** 服务端从 flowers_actor cookie 读到的当前成员；缺省是 DEFAULT_ACTOR。 */
-  current?: string;
+  /** 服务端从 flowers_actor cookie 读到的当前成员（缺省「吕品」）。 */
+  current: string;
+  /** 全部成员姓名，顺序由库里 created_at 决定（与派单取人的顺序一致）。 */
+  members: string[];
 }
 
-export function MemberSwitch({ current }: MemberSwitchProps) {
+export function MemberSwitch({ current, members }: MemberSwitchProps) {
   const router = useRouter();
-  const [actor, setActor] = useState<string>(current ?? DEFAULT_ACTOR);
+  const [actor, setActor] = useState<string>(current);
+
+  // 当前成员不在名册里（库里还没 seed、或 cookie 里是个已经离职的人）时，
+  // 仍然把它显示出来：一个对不上下拉框的身份会让顶栏看起来像坏了。
+  const options = members.includes(actor) ? members : [actor, ...members];
 
   function onChange(event: ChangeEvent<HTMLSelectElement>) {
     const next = event.target.value;
@@ -28,7 +37,7 @@ export function MemberSwitch({ current }: MemberSwitchProps) {
       <span className="dot" aria-hidden="true" />
       <span className="lbl">当前成员</span>
       <select value={actor} onChange={onChange} aria-label="切换当前成员">
-        {MEMBERS.map((name) => (
+        {options.map((name) => (
           <option key={name} value={name}>
             {name}
           </option>

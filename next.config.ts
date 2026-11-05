@@ -7,6 +7,14 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ['pg'],
   // 本地验证用 127.0.0.1 打开时不至于被 dev 资源跨源策略挡掉 HMR。
   allowedDevOrigins: ['127.0.0.1'],
+  experimental: {
+    // 领域层（src/core）用的是 NodeNext 风格的相对导入：`import ... from './errors.js'`。
+    // 这是 Node 直接跑 .ts（tsx / vitest）时唯一正确的写法，也是 P1 全仓的统一风格。
+    // Turbopack 不做 extensionAlias（Next 16 把它列在「Turbopack 不支持」里），
+    // 于是 server component 一 import 领域层就 500：Can't resolve './errors.js'。
+    // 这里补上 webpack 的别名，dev/build 都用 --webpack 跑（见 package.json）。
+    extensionAlias: { '.js': ['.ts', '.tsx', '.js'] },
+  },
 };
 
 export default nextConfig;

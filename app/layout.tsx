@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
-import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 
+import { currentMember, listMembers } from '../src/core/read/member';
 import { MemberSwitch } from './components/MemberSwitch';
 import { RailNav } from './components/RailNav';
 import './globals.css';
@@ -11,19 +11,10 @@ export const metadata: Metadata = {
   description: '123云盘 · 产品研发需求门禁',
 };
 
-/** cookie 里写的是 encodeURIComponent 后的值，读回来要解码；坏值退回 undefined。 */
-function readActor(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  // D2：身份就是一个 cookie，没有登录。布局读一次，MemberSwitch 用它做初始值。
-  const actor = readActor((await cookies()).get('flowers_actor')?.value);
+  // D2：身份就是一个 cookie，没有登录。名册与当前成员都从读模型来（一个来源），
+  // 布局不再自己解码 cookie——解码规则只该写在 src/core/read/member.ts 里一份。
+  const [members, actor] = await Promise.all([listMembers(), currentMember()]);
 
   return (
     <html lang="zh-CN">
@@ -37,7 +28,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           <div className="main">
             <header className="topbar">
               <span className="sp" />
-              <MemberSwitch current={actor} />
+              <MemberSwitch current={actor} members={members.map((m) => m.name)} />
             </header>
             {children}
           </div>
