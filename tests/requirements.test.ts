@@ -6,9 +6,11 @@ import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
+import { bounce } from '../src/core/requirements/bounce.js';
 import { AppError } from '../src/core/errors.js';
+import { tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
-import { makeQueued, makeRelease, reviewerOf } from './helpers/factory.js';
+import { makeQueued, makeReadyAt, makeRelease, reviewerOf } from './helpers/factory.js';
 
 beforeEach(async () => {
   await resetDb();
@@ -806,5 +808,225 @@ describe('排期（三个日期）', () => {
       requirementId: id, releaseId: '00000000-0000-0000-0000-000000000000',
       commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
     } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
+  });
+});
+
+describe('打回（测试中 → 开发中，必须重填完成日）', () => {
+  /**
+   * 造一条停在 test 的需求：12-01 开工 → 12-03 时提测日（12-01）已过。
+   *
+   * 刻意让提测日早于「今天」：这正是 R17 的场景——打回只有一种写法，没有特例分支，
+   * 所以用例必须覆盖「提测日已经过去」这个真实情况，而不是拿一个还没到点的提测日
+   * 绕开它。
+   */
+  async function inTest() {
+    const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
+    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    await tick(db, new Date('2026-12-03T00:00:00+08:00'));
+    expect(await stateOfRow(id)).toBe('test');
+    return id;
+  }
+
+  async function stateOfRow(id: string): Promise<string> {
+    const r = await db.execute<{ state: string }>(sql`select state from requirements where id = ${id}`);
+    return r.rows[0]!.state;
+  }
+
+  /** 打回只碰这几列，单独读一份，不从服务返回值推断落库结果。 */
+  async function datesOf(id: string) {
+    const r = await db.execute<{
+      state: string; commit_test_at: string | null; commit_due_at: string | null;
+    }>(sql`select state, commit_test_at, commit_due_at from requirements where id = ${id}`);
+    return r.rows[0]!;
+  }
+
+  /** 最后一条 requirement.bounced 事件；没有就返回 null。 */
+  async function bouncedEventOf(id: string) {
+    const r = await db.execute<{ actor: string; payload: string }>(sql`
+      select actor, payload from events
+       where requirement_id = ${id} and type = 'requirement.bounced'
+       order by seq desc limit 1`);
+    const row = r.rows[0];
+    if (!row) return null;
+    return { actor: row.actor, payload: JSON.parse(row.payload) as Record<string, unknown> };
+  }
+
+  it.each(['', '   ', undefined])('新承诺完成日缺失或空白就拒绝：%j', async (newCommitDueAt) => {
+    const id = await inTest();
+    const before = await eventCountOf(id);
+
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt,
+    } as never))).toMatchObject({
+      code: 'missing_new_due', message: '打回必须重填承诺完成日',
+    });
+
+    expect(await stateOfRow(id)).toBe('test');
+    expect(await eventCountOf(id)).toBe(before);
+  });
+
+  it.each(['', '   ', undefined])('原因缺失或空白就拒绝：%j', async (reason) => {
+    const id = await inTest();
+    const before = await eventCountOf(id);
+
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason, newCommitDueAt: '2026-12-10',
+    } as never))).toMatchObject({ code: 'missing_reason', message: '打回必须写原因' });
+
+    expect(await stateOfRow(id)).toBe('test');
+    expect(await eventCountOf(id)).toBe(before);
+  });
+
+  it('原因和新完成日都空白时，先报 missing_new_due', async () => {
+    // 声明的优先级：先看新承诺完成日，再看待填原因（与 brief 的检查顺序一致）。
+    // 两个都缺时只报第一条错误，不聚合——控制器只展示一个 message。
+    const id = await inTest();
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason: '  ', newCommitDueAt: '',
+    }))).toMatchObject({ code: 'missing_new_due', message: '打回必须重填承诺完成日' });
+  });
+
+  it('校验全部在开事务之前：需求不存在也先报缺失字段', async () => {
+    // 「校验先于查行」与 evaluate / submitReview / reviewReject / schedule 一致，
+    // 也让这条规则可以被单独钉住：不存在的 id + 空白原因 → missing_reason，而不是 not_found。
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: '00000000-0000-0000-0000-000000000000',
+      reason: ' ', newCommitDueAt: '2026-12-10',
+    }))).toMatchObject({ code: 'missing_reason', message: '打回必须写原因' });
+  });
+
+  it('打回后回开发中，完成日换成新的，提测日原样不动', async () => {
+    const id = await inTest();
+    await backdate(id);
+    const before = await eventCountOf(id);
+
+    // 前后各留空白：落库与事件里都应该是 trim 后的值。
+    const out = await bounce(db, '王妍', {
+      requirementId: id, reason: '  自测没过  ', newCommitDueAt: '2026-12-10',
+    });
+    expect(out.state).toBe('dev');
+
+    const row = await datesOf(id);
+    expect(row.state).toBe('dev');
+    expect(iso(row.commit_due_at)).toBe('2026-12-10T00:00:00.000Z');
+    // 提测日不动是刻意的：它决定「什么时候算进测试」，不是「什么时候上线」。
+    expect(iso(row.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');
+    // 打回是状态迁移，必须刷新 state_entered_at，否则前端时间轴停在进测试那天。
+    expect(new Date((await rowOf(id)).state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+
+    expect(await eventCountOf(id)).toBe(before + 1);
+    expect(await bouncedEventOf(id)).toMatchObject({
+      actor: '王妍',
+      payload: { from: 'test', to: 'dev', reason: '自测没过', newCommitDueAt: '2026-12-10' },
+    });
+  });
+
+  it('新承诺完成日不是有效日期就报错，不把 Invalid Date 写进库', async () => {
+    // 不校验日期的话 Invalid Date 会一路走到 toISOString()，抛的是 RangeError：
+    // 控制器按 e.code 分支时只能当未知错误，前端看到的是 500 而不是中文提示。
+    const id = await inTest();
+    const before = await eventCountOf(id);
+
+    for (const bad of ['不是日期', '2026-13-45']) {
+      expect(await caught(bounce(db, '王妍', {
+        requirementId: id, reason: '自测没过', newCommitDueAt: bad,
+      }))).toMatchObject({ code: 'bad_new_due', message: '打回必须填有效的承诺完成日' });
+    }
+
+    const row = await datesOf(id);
+    expect(row.state).toBe('test');
+    expect(iso(row.commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
+    expect(await eventCountOf(id)).toBe(before);
+  });
+
+  it.each(['dev', 'design', 'inbox'])('从「%s」打回报 illegal_transition，行不动', async (from) => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await db.execute(sql`update requirements set state = ${from} where id = ${r.id}`);
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: r.id, reason: '自测没过', newCommitDueAt: '2026-12-10',
+    }))).toMatchObject({
+      code: 'illegal_transition', message: `不能从「${from}」直接到「dev」`,
+    });
+
+    const row = await datesOf(r.id);
+    expect(row.state).toBe(from);
+    expect(row.commit_due_at).toBeNull();
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('从「待开发」打回也拒绝：ready → dev 是时钟的路子，不是打回', async () => {
+    // assertTransition 只按 from/to 配对，而 ready → dev 是合法的配对（trigger='clock'）。
+    // 不钉 trigger 的话，对一条还没开工的需求调 bounce 会一路成功、把状态写成 dev，
+    // 等于让「打回」替时钟推了第一步，window_start 那段窗口被静默跳过。
+    const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
+    const before = await eventCountOf(id);
+
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
+    }))).toMatchObject({
+      code: 'illegal_transition', message: '不能从「ready」直接到「dev」',
+    });
+
+    const row = await datesOf(id);
+    expect(row.state).toBe('ready');
+    expect(iso(row.commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
+    expect(await eventCountOf(id)).toBe(before);
+  });
+
+  it('需求不存在时给中文 not_found', async () => {
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: '00000000-0000-0000-0000-000000000000',
+      reason: '自测没过', newCommitDueAt: '2026-12-10',
+    }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+  });
+
+  it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(bounce(db, '王妍', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
+  it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
+    } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
+  });
+
+  /**
+   * R17：打回后 tick 立刻把需求推回测试中——**有意保留**，不特判。
+   *
+   * bounce 不动 commit_test_at，所以对 12-03 的 tick 来说 12-01 的提测日「已到点」。
+   * 语义上它确实还在测试窗内，真正的上线门槛是新的承诺完成日；guard 一旦加进 tick
+   * （或 bounce 里改提测日），这条用例先挂。
+   */
+  it('打回后一次 tick 就回到测试中，上线仍等新的承诺完成日（R17）', async () => {
+    const id = await inTest();
+
+    await bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-20',
+    });
+    const bounced = await datesOf(id);
+    expect(bounced.state).toBe('dev');
+    expect(iso(bounced.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');
+    expect(iso(bounced.commit_due_at)).toBe('2026-12-20T00:00:00.000Z');
+
+    // 一次 tick 就推回 test（提测日早于今天），不需要人工干预。
+    const back = await tick(db, new Date('2026-12-03T00:10:00+08:00'));
+    expect(back.moved).toContainEqual({ id, from: 'dev', to: 'test' });
+    expect(await stateOfRow(id)).toBe('test');
+
+    // 旧的完成日（12-04）已经过去也不会被推上线：门槛是新的 12-20。
+    expect((await tick(db, new Date('2026-12-05T00:00:00+08:00'))).moved).toHaveLength(0);
+    expect((await tick(db, new Date('2026-12-19T23:59:59+08:00'))).moved).toHaveLength(0);
+    expect(await stateOfRow(id)).toBe('test');
+
+    // 新的承诺完成日当天才上线。
+    const live = await tick(db, new Date('2026-12-20T00:00:00+08:00'));
+    expect(live.moved).toContainEqual({ id, from: 'test', to: 'live' });
+    expect(await stateOfRow(id)).toBe('live');
   });
 });
