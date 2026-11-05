@@ -2,6 +2,8 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { createRequirement } from '../src/core/requirements/create.js';
+import { evaluate } from '../src/core/requirements/evaluate.js';
+import { submitReview } from '../src/core/requirements/submit-review.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 
@@ -159,5 +161,175 @@ describe('createRequirement', () => {
       await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
       await db.execute(sql`drop function if exists flowers_test_boom()`);
     }
+  });
+});
+
+/** 直接读一行需求，避免经由服务自身的返回值判断落库结果。 */
+async function rowOf(id: string) {
+  const res = await db.execute<{
+    state: string; state_entered_at: string; prd_url: string | null; skip_reason: string | null;
+  }>(sql`select state, state_entered_at, prd_url, skip_reason from requirements where id = ${id}`);
+  return res.rows[0]!;
+}
+
+/** 把 state_entered_at 推到过去，用来证明迁移确实刷新了它。 */
+async function backdate(id: string) {
+  await db.execute(sql`update requirements set state_entered_at = '2020-01-01T00:00:00Z' where id = ${id}`);
+}
+
+async function eventCountOf(id: string): Promise<number> {
+  const res = await db.execute<{ n: number }>(
+    sql`select count(*)::int as n from events where requirement_id = ${id}`);
+  return Number(res.rows[0]!.n);
+}
+
+describe('evaluate', () => {
+  it('评估后从 inbox 进 design，并刷新 state_entered_at', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await backdate(r.id);
+
+    const out = await evaluate(db, '吕品', { requirementId: r.id });
+    expect(out.state).toBe('design');
+
+    const row = await rowOf(r.id);
+    expect(row.state).toBe('design');
+    expect(new Date(row.state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+  });
+
+  it('评估写一条事件，payload 带 from / to', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+
+    const rows = await db.execute<{ type: string; actor: string; payload: string }>(
+      sql`select type, actor, payload from events where requirement_id = ${r.id} order by seq`,
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect(rows.rows[1]).toMatchObject({ type: 'requirement.evaluated', actor: '吕品' });
+    expect(JSON.parse(rows.rows[1]!.payload)).toMatchObject({ from: 'inbox', to: 'design' });
+  });
+
+  it('已经评估过的需求再评估，报 illegal_transition', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+
+    expect(await caught(evaluate(db, '吕品', { requirementId: r.id }))).toMatchObject({
+      code: 'illegal_transition', message: '不能从「design」直接到「design」',
+    });
+    expect((await rowOf(r.id)).state).toBe('design');
+  });
+
+  it('需求不存在时给中文 not_found', async () => {
+    expect(await caught(evaluate(db, '吕品', {
+      requirementId: '00000000-0000-0000-0000-000000000000',
+    }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+  });
+});
+
+describe('submitReview', () => {
+  const SKIP_REASON = '跳过评估，直接提交 PRD';
+
+  it('PRD 链接为空就直接拒绝，不动状态也不写事件', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(submitReview(db, '吕品', { requirementId: r.id, prdUrl: '' })))
+      .toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
+    expect(await caught(submitReview(db, '吕品', { requirementId: r.id, prdUrl: '   ' })))
+      .toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
+
+    expect((await rowOf(r.id)).state).toBe('design');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('URL 校验在开事务之前，需求不存在也先报 missing_prd', async () => {
+    expect(await caught(submitReview(db, '吕品', {
+      requirementId: '00000000-0000-0000-0000-000000000000', prdUrl: ' ',
+    }))).toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
+  });
+
+  it('设计完成后提交：design → review，落 prd_url 且不写 skip_reason', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+    await backdate(r.id);
+
+    const out = await submitReview(db, '吕品', { requirementId: r.id, prdUrl: '  https://x/prd  ' });
+    expect(out).toMatchObject({ state: 'review', skippedEvaluation: false });
+
+    const row = await rowOf(r.id);
+    expect(row).toMatchObject({ state: 'review', prd_url: 'https://x/prd', skip_reason: null });
+    expect(new Date(row.state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+
+    const events = await db.execute<{ type: string; payload: string }>(
+      sql`select type, payload from events where requirement_id = ${r.id} order by seq`);
+    expect(events.rows[2]).toMatchObject({ type: 'requirement.review_requested' });
+    expect(JSON.parse(events.rows[2]!.payload)).toMatchObject({
+      from: 'design', to: 'review', prdUrl: 'https://x/prd', skippedEvaluation: false,
+    });
+  });
+
+  it('跳过评估直提：inbox → review，写死 skip_reason 并回报 skippedEvaluation', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await backdate(r.id);
+
+    const out = await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x/prd' });
+    expect(out).toMatchObject({ state: 'review', skippedEvaluation: true });
+
+    const row = await rowOf(r.id);
+    expect(row).toMatchObject({ state: 'review', prd_url: 'https://x/prd', skip_reason: SKIP_REASON });
+    expect(new Date(row.state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+
+    const events = await db.execute<{ type: string; payload: string }>(
+      sql`select type, payload from events where requirement_id = ${r.id} order by seq`);
+    expect(JSON.parse(events.rows[1]!.payload)).toMatchObject({
+      from: 'inbox', to: 'review', skippedEvaluation: true,
+    });
+  });
+
+  it('已在待评审再提交，报 illegal_transition', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+    await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x/prd' });
+
+    expect(await caught(submitReview(db, '吕品', {
+      requirementId: r.id, prdUrl: 'https://y/prd',
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「review」直接到「review」' });
+    expect((await rowOf(r.id)).prd_url).toBe('https://x/prd');
+  });
+
+  it('并发双提交只有一次成功，另一次被行锁挡住', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+
+    const results = await Promise.allSettled([
+      submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://a/prd' }),
+      submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://b/prd' }),
+    ]);
+    const ok = results.filter((x) => x.status === 'fulfilled');
+    const bad = results.filter((x) => x.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(bad).toHaveLength(1);
+
+    const reason = (bad[0] as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(AppError);
+    expect(reason).toMatchObject({
+      code: 'illegal_transition', message: '不能从「review」直接到「review」',
+    });
+
+    const winner = ok[0] as PromiseFulfilledResult<{ state: string; skippedEvaluation: boolean }>;
+    expect(winner.value).toMatchObject({ state: 'review', skippedEvaluation: false });
+    expect((await rowOf(r.id)).state).toBe('review');
+  });
+
+  it('需求不存在时（URL 合法）给中文 not_found', async () => {
+    expect(await caught(submitReview(db, '吕品', {
+      requirementId: '00000000-0000-0000-0000-000000000000', prdUrl: 'https://x/prd',
+    }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
   });
 });
