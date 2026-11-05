@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
+import { isPlainObject } from '../validate.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
 // 而对外错误只暴露 issues[0].message，前端会看到英文。
@@ -21,10 +22,6 @@ export const CreateInput = z.object({
 });
 
 export type CreateInput = z.infer<typeof CreateInput>;
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 export async function createRequirement(db: Db, actor: string, raw: unknown) {
   // 非对象 body（null / 数组 / 字符串）zod 只给英文 'Expected object, received …'，

@@ -225,6 +225,18 @@ describe('evaluate', () => {
       requirementId: '00000000-0000-0000-0000-000000000000',
     }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
   });
+
+  it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(evaluate(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
+  it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
+    expect(await caught(evaluate(db, '吕品', { requirementId: id } as never))).toMatchObject({
+      code: 'invalid', message: '需求 ID 格式不正确',
+    });
+  });
 });
 
 describe('submitReview', () => {
@@ -334,5 +346,17 @@ describe('submitReview', () => {
     expect(await caught(submitReview(db, '吕品', {
       requirementId: '00000000-0000-0000-0000-000000000000', prdUrl: 'https://x/prd',
     }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+  });
+
+  it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(submitReview(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
+  it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
+    expect(await caught(submitReview(db, '吕品', {
+      requirementId: id, prdUrl: 'https://x/prd',
+    } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
   });
 });
