@@ -7,6 +7,9 @@ import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { bounce } from '../src/core/requirements/bounce.js';
+import {
+  rejectRequirement, restoreRequirement, shelveRequirement,
+} from '../src/core/requirements/terminal.js';
 import { AppError } from '../src/core/errors.js';
 import { tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
@@ -1082,5 +1085,328 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const live = await tick(db, new Date('2026-12-20T00:00:00+08:00'));
     expect(live.moved).toContainEqual({ id, from: 'test', to: 'live' });
     expect(await stateOfRow(id)).toBe('live');
+  });
+});
+
+describe('拒绝 / 搁置 / 恢复', () => {
+  /** 直接改状态，用来造「不该允许的那一步」的起点。 */
+  async function forceState(id: string, state: string) {
+    await db.execute(sql`update requirements set state = ${state} where id = ${id}`);
+  }
+
+  async function stateOf(id: string): Promise<string> {
+    const r = await db.execute<{ state: string }>(sql`select state from requirements where id = ${id}`);
+    return r.rows[0]!.state;
+  }
+
+  /** 这条需求最新的一条事件（拒绝 / 搁置 / 恢复都要写，且必须能读到）。 */
+  async function lastEventOf(id: string) {
+    const r = await db.execute<{ actor: string; type: string; payload: string }>(sql`
+      select actor, type, payload from events
+       where requirement_id = ${id} order by seq desc limit 1`);
+    const row = r.rows[0];
+    if (!row) return null;
+    return { actor: row.actor, type: row.type, payload: JSON.parse(row.payload) as Record<string, unknown> };
+  }
+
+  /**
+   * 拒绝 / 搁置 / 恢复只该碰 state（和 state_entered_at）。
+   * 排期相关的四列单独读一份：吞掉版本和日期是这几步最容易犯的隐性破坏。
+   */
+  async function planColumnsOf(id: string) {
+    const r = await db.execute<{
+      state: string; number: number; prd_url: string | null; release_id: string | null;
+      commit_test_at: string | null; commit_due_at: string | null;
+    }>(sql`
+      select state, number, prd_url, release_id, commit_test_at, commit_due_at
+        from requirements where id = ${id}`);
+    return r.rows[0]!;
+  }
+
+  /** 建 → 评估 → 提交 PRD：停在 review，带一条 handed 派单。 */
+  async function inReview() {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+    await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
+    return r;
+  }
+
+  /** 停在开发中的需求：12-01 开工，承诺 12-04 完成。 */
+  async function inDev() {
+    const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
+    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    expect(await stateOf(id)).toBe('dev');
+    return id;
+  }
+
+  it('只有 inbox 能拒绝', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await evaluate(db, '吕品', { requirementId: r.id });
+
+    expect(await caught(rejectRequirement(db, '吕品', { requirementId: r.id, reason: '不做' })))
+      .toMatchObject({ code: 'illegal_transition', message: '只有收集状态的需求可以拒绝' });
+
+    expect(await stateOf(r.id)).toBe('design');
+    expect(await eventCountOf(r.id)).toBe(2);
+  });
+
+  it('从 inbox 拒绝：进 rejected，刷新进入时间，事件带 from / to / reason', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await backdate(r.id);
+
+    // reason 去首尾空白后再落库：库里和事件里都只留用户写的内容。
+    const out = await rejectRequirement(db, '吕品', { requirementId: r.id, reason: '  不做  ' });
+    expect(out.state).toBe('rejected');
+
+    const row = await rowOf(r.id);
+    expect(row.state).toBe('rejected');
+    expect(new Date(row.state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+    expect(await lastEventOf(r.id)).toMatchObject({
+      actor: '吕品',
+      type: 'requirement.rejected',
+      payload: { from: 'inbox', to: 'rejected', reason: '不做' },
+    });
+  });
+
+  it.each(['design', 'review', 'queue', 'ready', 'dev', 'test', 'live', 'shelved', 'rejected'])(
+    '从「%s」拒绝都是 illegal_transition，行不动、不写事件', async (from) => {
+      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      await forceState(r.id, from);
+      const before = await eventCountOf(r.id);
+
+      // 状态机里只有 inbox → rejected 这一对通向 rejected，报错也统一成这一句：
+      // 用户看到的是「只有收集状态的需求可以拒绝」，而不是干巴巴的迁移编号。
+      expect(await caught(rejectRequirement(db, '吕品', { requirementId: r.id, reason: '不做' })))
+        .toMatchObject({ code: 'illegal_transition', message: '只有收集状态的需求可以拒绝' });
+
+      expect(await stateOf(r.id)).toBe(from);
+      expect(await eventCountOf(r.id)).toBe(before);
+    },
+  );
+
+  it.each(['', '   ', undefined, null, 42])('拒绝必须写原因：%j', async (reason) => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(rejectRequirement(db, '吕品', {
+      requirementId: r.id, reason,
+    } as never))).toMatchObject({ code: 'missing_reason', message: '拒绝必须写原因' });
+
+    expect(await stateOf(r.id)).toBe('inbox');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('拒绝的原因先于查行校验：需求不存在也先报 missing_reason', async () => {
+    expect(await caught(rejectRequirement(db, '吕品', {
+      requirementId: '00000000-0000-0000-0000-000000000000', reason: ' ',
+    }))).toMatchObject({ code: 'missing_reason', message: '拒绝必须写原因' });
+  });
+
+  it('从 inbox 搁置：进 shelved，刷新进入时间，事件带 from / to / reason', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await backdate(r.id);
+
+    const out = await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+    expect(out.state).toBe('shelved');
+
+    const row = await rowOf(r.id);
+    expect(row.state).toBe('shelved');
+    expect(new Date(row.state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+    expect(await lastEventOf(r.id)).toMatchObject({
+      actor: '吕品',
+      type: 'requirement.shelved',
+      payload: { from: 'inbox', to: 'shelved', reason: '本期不做' },
+    });
+  });
+
+  /**
+   * 搁置的口径是「任何非终态」，不是「只有 inbox」：需求做到一半被业务叫停是常态，
+   * 而状态机只登记了 inbox → shelved 一条（表是单步迁移表，表达不了 8 条）。
+   */
+  it.each(['design', 'review', 'queue', 'ready', 'dev', 'test', 'live'])(
+    '从「%s」搁置都合法', async (from) => {
+      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      await forceState(r.id, from);
+
+      const out = await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+      expect(out.state).toBe('shelved');
+
+      expect(await stateOf(r.id)).toBe('shelved');
+      expect(await lastEventOf(r.id)).toMatchObject({
+        type: 'requirement.shelved',
+        payload: { from, to: 'shelved', reason: '本期不做' },
+      });
+    },
+  );
+
+  it('开发中搁置再恢复回到 inbox，不回 dev（计划的刻意选择）', async () => {
+    const id = await inDev();
+    const before = await planColumnsOf(id);
+
+    await shelveRequirement(db, '吕品', { requirementId: id, reason: '本期不做' });
+    expect(await stateOf(id)).toBe('shelved');
+
+    const out = await restoreRequirement(db, '吕品', { requirementId: id });
+    expect(out.state).toBe('inbox');
+
+    const after = await planColumnsOf(id);
+    expect(after.state).toBe('inbox');
+    // 恢复是「重新走一遍流程」，不是「回到原来那一步」：编号、PRD、版本、两个日期都不动。
+    expect(after.number).toBe(before.number);
+    expect(after.prd_url).toBe('https://x');
+    expect(after.release_id).toBe(before.release_id);
+    expect(iso(after.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');
+    expect(iso(after.commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
+
+    // 保留日期不等于「还在排期里」：状态是 inbox，时钟不再看它，所以不会被推着走。
+    expect((await tick(db, new Date('2026-12-04T00:10:00+08:00'))).moved).toHaveLength(0);
+    expect(await stateOf(id)).toBe('inbox');
+  });
+
+  it('搁置后恢复回 inbox', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+
+    const out = await restoreRequirement(db, '吕品', { requirementId: r.id });
+    expect(out.state).toBe('inbox');
+    expect(await stateOf(r.id)).toBe('inbox');
+    expect(await lastEventOf(r.id)).toMatchObject({
+      type: 'requirement.restored',
+      payload: { from: 'shelved', to: 'inbox' },
+    });
+  });
+
+  it('恢复清掉上一轮的「跳过评估」标记，历史仍留在事件流里', async () => {
+    // skip_reason 描述的是**这一轮**提交流程：恢复等于重新走一遍，旧标记必须清掉，
+    // 否则报表会把一条正常评估过的需求算成「跳过评估」。当初跳过的事实不会丢——
+    // requirement.review_requested 的 payload 里有 skippedEvaluation。
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
+    expect((await rowOf(r.id)).skip_reason).not.toBeNull();
+
+    await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+    await restoreRequirement(db, '吕品', { requirementId: r.id });
+
+    const row = await rowOf(r.id);
+    expect(row.state).toBe('inbox');
+    expect(row.skip_reason).toBeNull();
+    // PRD 链接是身份信息，不跟着流程标记一起清。
+    expect(row.prd_url).toBe('https://x');
+  });
+
+  it.each(['', '   ', undefined, null])('搁置必须写原因：%j', async (reason) => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(shelveRequirement(db, '吕品', {
+      requirementId: r.id, reason,
+    } as never))).toMatchObject({ code: 'missing_reason', message: '搁置必须写原因' });
+
+    expect(await stateOf(r.id)).toBe('inbox');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it.each(['shelved', 'rejected'])('从终态「%s」不能再搁置', async (from) => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await forceState(r.id, from);
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(shelveRequirement(db, '吕品', {
+      requirementId: r.id, reason: '本期不做',
+    }))).toMatchObject({ code: 'illegal_transition', message: '终态不能再搁置' });
+
+    expect(await stateOf(r.id)).toBe(from);
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it.each(['inbox', 'design', 'queue', 'dev', 'live', 'rejected'])(
+    '从「%s」恢复都是 illegal_transition，行不动', async (from) => {
+      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      await forceState(r.id, from);
+      const before = await eventCountOf(r.id);
+
+      // 状态机里只有 shelved → inbox 这一对通向 inbox，所以报错沿用状态机的措辞：
+      // 「不能从「dev」直接到「inbox」」——恢复不是回退到某一步，是从搁置里出来。
+      expect(await caught(restoreRequirement(db, '吕品', { requirementId: r.id })))
+        .toMatchObject({ code: 'illegal_transition', message: `不能从「${from}」直接到「inbox」` });
+
+      expect(await stateOf(r.id)).toBe(from);
+      expect(await eventCountOf(r.id)).toBe(before);
+    },
+  );
+
+  it('被拒绝的需求不再接受任何终态 / 恢复动作', async () => {
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await rejectRequirement(db, '吕品', { requirementId: r.id, reason: '不做' });
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(rejectRequirement(db, '吕品', { requirementId: r.id, reason: '再拒一次' })))
+      .toMatchObject({ code: 'illegal_transition', message: '只有收集状态的需求可以拒绝' });
+    expect(await caught(shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' })))
+      .toMatchObject({ code: 'illegal_transition', message: '终态不能再搁置' });
+    expect(await caught(restoreRequirement(db, '吕品', { requirementId: r.id })))
+      .toMatchObject({ code: 'illegal_transition', message: '不能从「rejected」直接到「inbox」' });
+
+    expect(await stateOf(r.id)).toBe('rejected');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('评审中搁置会把 handed 派单作废，恢复后重新提交会重新派单', async () => {
+    // 搁置不清理派单的话，「handed」会挂在一条已经不在评审里的需求上，
+    // 而 assignReviewer 的 `where not exists (handed)` 会让重新提交时**不再**派单：
+    // 一条搁置过的需求恢复后永远拿不到新派单。
+    const r = await inReview();
+    expect(await assignmentsOf(r.id)).toMatchObject([{ name: '吕正豪', verdict: 'handed' }]);
+
+    await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+    const voided = await assignmentsOf(r.id);
+    expect(voided).toHaveLength(1);
+    expect(voided[0]).toMatchObject({ name: '吕正豪', verdict: 'voided', reason: '本期不做' });
+    expect(voided[0]!.decided_at).not.toBeNull();
+
+    await restoreRequirement(db, '吕品', { requirementId: r.id });
+    await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
+
+    const rows = await assignmentsOf(r.id);
+    expect(rows.filter((x) => x.verdict === 'handed')).toHaveLength(1);
+    expect(rows.filter((x) => x.verdict === 'voided')).toHaveLength(1);
+    expect(await reviewerOf(r.id)).toBe('吕正豪');
+  });
+
+  it('需求不存在时三条服务都给中文 not_found', async () => {
+    const missing = '00000000-0000-0000-0000-000000000000';
+    expect(await caught(rejectRequirement(db, '吕品', { requirementId: missing, reason: '不做' })))
+      .toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+    expect(await caught(shelveRequirement(db, '吕品', { requirementId: missing, reason: '本期不做' })))
+      .toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+    expect(await caught(restoreRequirement(db, '吕品', { requirementId: missing })))
+      .toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+  });
+
+  it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(rejectRequirement(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+    expect(await caught(shelveRequirement(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+    expect(await caught(restoreRequirement(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
+  it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
+    expect(await caught(rejectRequirement(db, '吕品', {
+      requirementId: id, reason: '不做',
+    } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
+    expect(await caught(shelveRequirement(db, '吕品', {
+      requirementId: id, reason: '本期不做',
+    } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
+    expect(await caught(restoreRequirement(db, '吕品', { requirementId: id } as never)))
+      .toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
   });
 });
