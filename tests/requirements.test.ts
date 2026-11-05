@@ -840,6 +840,23 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     return r.rows[0]!;
   }
 
+  /**
+   * 北京时间的「今天」偏移 offsetDays 天，形如 '2026-11-06'。
+   *
+   * 服务端是按 Asia/Shanghai 的**日历日**判「今天」的，用例必须用同一口径生成边界值：
+   * 直接写死 '2026-11-05' / '2026-11-06' 会在第二天变成「两天前 / 昨天」，用例自己就烂掉；
+   * 而拿时刻（Date.now() - 86400000）当边界会让「今天」随运行的小时数漂移。
+   */
+  function todayInShanghai(offsetDays: number): string {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date());
+    const part = (type: string) => parts.find((p) => p.type === type)!.value;
+    const day = new Date(`${part('year')}-${part('month')}-${part('day')}T00:00:00Z`);
+    day.setUTCDate(day.getUTCDate() + offsetDays);
+    return day.toISOString().slice(0, 10);
+  }
+
   /** 最后一条 requirement.bounced 事件；没有就返回 null。 */
   async function bouncedEventOf(id: string) {
     const r = await db.execute<{ actor: string; payload: string }>(sql`
@@ -939,6 +956,27 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     expect(row.state).toBe('test');
     expect(iso(row.commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
     expect(await eventCountOf(id)).toBe(before);
+  });
+
+  it('新承诺完成日早于今天就直接拒绝，今天本身合法（R23）', async () => {
+    // 日期打错一年（'2020-12-10' 写成 '2026-12-10' 的反面）会把「没做出来」变成「已上线」：
+    // 这类需求的 commit_test_at 也已经过去，下一次 tick 会连推两步 dev → test → live，
+    // 全程没有一个人工动作。所以新完成日不能落在今天之前。
+    const id = await inTest();
+    const before = await eventCountOf(id);
+
+    expect(await caught(bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt: todayInShanghai(-1),
+    }))).toMatchObject({ code: 'bad_new_due', message: '承诺完成日不能早于今天' });
+    expect(await stateOfRow(id)).toBe('test');
+    expect(await eventCountOf(id)).toBe(before);
+
+    // 今天当天合法：承诺「今天就上线」是真实的（虽然乐观），它不能被自己的日期挡在门外。
+    const out = await bounce(db, '王妍', {
+      requirementId: id, reason: '自测没过', newCommitDueAt: todayInShanghai(0),
+    });
+    expect(out.state).toBe('dev');
+    expect(iso((await datesOf(id)).commit_due_at)).toBe(`${todayInShanghai(0)}T00:00:00.000Z`);
   });
 
   it.each(['dev', 'design', 'inbox'])('从「%s」打回报 illegal_transition，行不动', async (from) => {
