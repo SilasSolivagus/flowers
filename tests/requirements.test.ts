@@ -98,6 +98,22 @@ describe('createRequirement', () => {
     }))).toMatchObject({ code: 'invalid', message: '提出人不能为空' });
   });
 
+  it('负责人 ID 不是 uuid 就给中文消息', async () => {
+    expect(await caught(createRequirement(db, '吕品', {
+      title: 'x', type: 'feature', requester: 'y', ownerMemberId: 'abc',
+    }))).toMatchObject({ code: 'invalid', message: '负责人 ID 格式不正确' });
+
+    expect(await caught(createRequirement(db, '吕品', {
+      title: 'x', type: 'feature', requester: 'y', ownerMemberId: 123,
+    }))).toMatchObject({ code: 'invalid', message: '负责人 ID 格式不正确' });
+  });
+
+  it.each([null, [], 'str'])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(createRequirement(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
   it('编号取 max(number)+1，不复用空洞', async () => {
     await db.execute(sql`
       insert into requirements (number, title, type, state, requester)
@@ -113,6 +129,9 @@ describe('createRequirement', () => {
 
   it('事件写失败时需求也回滚（同一事务）', async () => {
     // 用临时触发器让 events 插入抛错：若需求插入不在同一事务里，它就会留下来。
+    // 先 drop：resetDb 只 truncate，被 kill 的旧进程会把触发器留在库里，
+    // 之后所有写事件的用例都会撞上 'boom'。
+    await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
     await db.execute(sql`
       create or replace function flowers_test_boom() returns trigger as $$
       begin raise exception 'boom'; end $$ language plpgsql`);
@@ -126,14 +145,19 @@ describe('createRequirement', () => {
       } catch (e) {
         thrown = e;
       }
-      expect(thrown).toBeDefined();
+      // 钉住抛出源：触发器 raise exception 的 P0001 / 'boom'。
+      // 不是 AppError 才说明它是从 DB 层穿透出来的——若 createRequirement 提前
+      // 校验失败、或 insert 挪到 recordEvent 之后，两个计数同样是 0，这条断言会挂。
+      expect(thrown).toMatchObject({ code: 'P0001', message: 'boom' });
+      expect(thrown).not.toBeInstanceOf(AppError);
 
       const reqs = await db.execute<{ n: number }>(sql`select count(*)::int as n from requirements`);
       const events = await db.execute<{ n: number }>(sql`select count(*)::int as n from events`);
       expect(Number(reqs.rows[0]!.n)).toBe(0);
       expect(Number(events.rows[0]!.n)).toBe(0);
     } finally {
-      await db.execute(sql`drop function if exists flowers_test_boom() cascade`);
+      await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
+      await db.execute(sql`drop function if exists flowers_test_boom()`);
     }
   });
 });

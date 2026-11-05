@@ -11,16 +11,26 @@ const NOT_BLANK = (message: string) => ({
   invalid_type_error: message,
 });
 
+const BAD_OWNER = '负责人 ID 格式不正确';
+
 export const CreateInput = z.object({
   title: z.string(NOT_BLANK('标题不能为空')).trim().min(1, '标题不能为空'),
   type: z.enum(['commercial', 'feature'], { message: '必须选择类型：商业或功能' }),
   requester: z.string(NOT_BLANK('提出人不能为空')).trim().min(1, '提出人不能为空'),
-  ownerMemberId: z.string().uuid().nullish(),
+  ownerMemberId: z.string(NOT_BLANK(BAD_OWNER)).uuid(BAD_OWNER).nullish(),
 });
 
 export type CreateInput = z.infer<typeof CreateInput>;
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export async function createRequirement(db: Db, actor: string, raw: unknown) {
+  // 非对象 body（null / 数组 / 字符串）zod 只给英文 'Expected object, received …'，
+  // 这里的错误消息是唯一对外出口，统一换成本项目的中文文案。
+  if (!isPlainObject(raw)) throw new AppError('invalid', '参数不合法');
+
   const parsed = CreateInput.safeParse(raw);
   if (!parsed.success) {
     throw new AppError('invalid', parsed.error.issues[0]?.message ?? '参数不合法');
