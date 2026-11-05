@@ -4,8 +4,7 @@ import { AppError } from '../errors.js';
 import { assertTransition } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
-
-type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+import { lockRequirement, moveTo, type Tx } from './lock.js';
 
 /**
  * 需求类型 → 评审人角色（members.role 的取值就是这两个字符串）。模块私有：
@@ -52,15 +51,6 @@ export async function assignReviewer(tx: Tx, requirementId: string, type: string
   return reviewer.id;
 }
 
-/** 取行用 `for update`：并发通过 / 打回时后来者会等前者提交，再基于新状态判断。 */
-async function lockRequirement(tx: Tx, requirementId: string) {
-  const cur = await tx.execute<{ state: string; type: string | null; prd_url: string | null }>(
-    sql`select state, type, prd_url from requirements where id = ${requirementId} for update`);
-  const row = cur.rows[0];
-  if (!row) throw new AppError('not_found', '找不到这条需求');
-  return row;
-}
-
 /**
  * 评审这一步的迁移校验。
  *
@@ -93,9 +83,7 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
       hasPrd: !!row.prd_url, hasType: !!row.type,
     });
 
-    await tx.execute(sql`
-      update requirements set state = 'queue', state_entered_at = now()
-       where id = ${requirementId}`);
+    await moveTo(tx, requirementId, 'queue');
     await tx.execute(sql`
       update review_assignments set verdict = 'passed', decided_at = now()
        where requirement_id = ${requirementId} and verdict = 'handed'`);
@@ -129,9 +117,7 @@ export async function reviewReject(db: Db, actor: string, raw: unknown) {
       hasPrd: !!row.prd_url, hasType: !!row.type,
     });
 
-    await tx.execute(sql`
-      update requirements set state = 'design', state_entered_at = now()
-       where id = ${requirementId}`);
+    await moveTo(tx, requirementId, 'design');
     await tx.execute(sql`
       update review_assignments set verdict = 'rejected', reason = ${reason}, decided_at = now()
        where requirement_id = ${requirementId} and verdict = 'handed'`);

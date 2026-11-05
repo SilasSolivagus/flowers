@@ -4,6 +4,7 @@ import { assertTransition } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { lockRequirement, moveTo } from './lock.js';
 
 const MISSING_DATES = '排期必须填版本、提测日和承诺完成日';
 const BAD_DATE = '提测日和承诺完成日必须是有效日期';
@@ -31,7 +32,7 @@ function parseDateOrThrow(text: string): Date {
  * 三个日期缺失或自相矛盾是最常见的用户错误，没必要占一条连接、开一个事务再回滚；
  * 也让「校验先于查行」可以被单独测试（需求不存在时也先报 missing_dates / bad_dates）。
  *
- * 取行用 `for update`：并发双排期时后来者会等前者提交，看到 state 已变成 ready，
+ * 锁行语义见 lock.ts：并发双排期时后来者会等前者提交，看到 state 已变成 ready，
  * 于是撞 illegal_transition，而不是后一次静默覆盖前一次的排期。
  */
 export async function schedule(db: Db, actor: string, raw: unknown) {
@@ -54,16 +55,13 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
   }
 
   return db.transaction(async (tx) => {
-    const cur = await tx.execute<{ state: string }>(
-      sql`select state from requirements where id = ${requirementId} for update`);
-    const row = cur.rows[0];
-    if (!row) throw new AppError('not_found', '找不到这条需求');
+    const row = await lockRequirement(tx, requirementId);
 
     // queue → ready 是唯一通向 ready 的迁移，所以只按 from/to 配对判断就够：
     // 没经过评审就排期（inbox / design / review）、或重复排期（已在 ready），
     // 都会在这里撞 illegal_transition。prd / type 两个标志只对 prd / type guard 有意义，
     // 而这条迁移的 guard 是 dates（日期已在事务之前校验完），给 true 只为满足签名。
-    assertTransition(row.state as never, 'ready', { hasPrd: true, hasType: true });
+    assertTransition(row.state, 'ready', { hasPrd: true, hasType: true });
 
     // releases.release_date 是 timestamptz，经 pg 的文本协议回来是**字符串**
     // （'2026-12-04 00:00:00+00'），不是 Date。必须先 new Date(...) 再比：
@@ -78,14 +76,10 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
     }
 
     // 日期按 ISO 写回，避免把解析出来的本地时区偏移带进 timestamptz。
-    await tx.execute(sql`
-      update requirements
-         set state = 'ready',
-             release_id = ${releaseId},
-             commit_test_at = ${testAt.toISOString()},
-             commit_due_at = ${dueAt.toISOString()},
-             state_entered_at = now()
-       where id = ${requirementId}`);
+    await moveTo(tx, requirementId, 'ready', sql`
+      release_id = ${releaseId},
+      commit_test_at = ${testAt.toISOString()},
+      commit_due_at = ${dueAt.toISOString()}`);
 
     // 事件里记用户填的那两个日期（'2026-12-01' 这种写法），报表要按天读，
     // 落库用的 ISO 串只在库里出现。
