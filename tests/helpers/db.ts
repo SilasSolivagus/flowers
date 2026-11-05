@@ -1,12 +1,11 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../src/db/client.js';
 
-export async function resetDb() {
-  // 原子性用例会建这个触发器；进程被 kill 时它会留在库里，而 truncate 清不掉
-  // 触发器，之后每个写事件的用例都会撞 'boom'。先 drop 再 truncate。
-  await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
-  await db.execute(sql`truncate requirements, review_assignments, events, releases, members restart identity cascade`);
-}
+/**
+ * resetDb 现在住在 `src/db/reset.ts`：`scripts/demo.ts` 也要用它，而脚本不该反向
+ * 依赖测试助手。这里 re-export 一次，测试里的 import 路径不用动。
+ */
+export { resetDb } from '../../src/db/reset.js';
 
 export async function seedPeople() {
   const rows = await db.execute(sql`

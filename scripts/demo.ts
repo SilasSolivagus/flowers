@@ -18,7 +18,8 @@ import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
-import { resetDb, seedPeople } from '../tests/helpers/db.js';
+import { assertSafeToReset, resetDb } from '../src/db/reset.js';
+import { seedPeople } from '../tests/helpers/db.js';
 
 // ─── 剧本参数 ────────────────────────────────────────────────────────────────
 
@@ -125,9 +126,15 @@ async function main() {
 
   head('准备');
 
-  // 1. 重置 + 种人。测试助手是普通函数，脚本里复用，避免两套种子数据分叉。
+  // 1. 重置 + 种人。种子数据复用测试助手，避免两套种子分叉。
+  //
+  // resetDb 是 truncate 五张表的硬操作，而本脚本尊重 DATABASE_URL：先问库要它自己的
+  // 名字（current_database()，不是环境变量字符串），不是 flowers 就只有显式
+  // FLOWERS_ALLOW_RESET=1 才放行。否则「跑个冒烟」就能清空一套生产库。
+  const database = await assertSafeToReset();
   await resetDb();
   const people = await seedPeople();
+  log(`current_database() = ${database}（守卫已放行）`);
   log(`resetDb()  已清空 5 张表`);
   log(`seedPeople() 建了 ${people.length} 个人：${people.map((p) => `${p.name}/${p.role}`).join('、')}`);
 
