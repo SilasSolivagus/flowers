@@ -522,7 +522,7 @@ describe('评审派单、通过与打回', () => {
 
     expect(await caught(submitReview(db, '吕品', {
       requirementId: r.id, prdUrl: 'https://x',
-    }))).toMatchObject({ code: 'no_reviewer' });
+    }))).toMatchObject({ code: 'no_reviewer', message: '这个类型还没有配评审人' });
 
     // 派单失败必须连状态推进和事件一起回滚：不能停在 review 却没人接。
     expect((await rowOf(r.id)).state).toBe('design');

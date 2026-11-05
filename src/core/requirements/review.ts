@@ -8,11 +8,11 @@ import { parseRequirementId, requirePlainObject } from '../validate.js';
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /**
- * 需求类型 → 评审人角色。只在这一处维护：submitReview 派单（assignReviewer）和
- * 测试里读派单共用同一套枚举，避免两处各写一遍然后漂移（members.role 的取值
- * 也是这两个字符串）。
+ * 需求类型 → 评审人角色（members.role 的取值就是这两个字符串）。模块私有：
+ * 唯一消费者是本文件的 assignReviewer。用例里刻意写死评审人姓名（'赵越' / '吕正豪'），
+ * 不从这里反查——否则实现改错映射时，测试会跟着错，等于自己给自己盖章。
  */
-export const REVIEWER_ROLE = {
+const REVIEWER_ROLE = {
   commercial: 'commercial_reviewer',
   feature: 'feature_reviewer',
 } as const;
