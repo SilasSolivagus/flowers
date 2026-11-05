@@ -536,6 +536,24 @@ describe('评审派单、通过与打回', () => {
     });
   });
 
+  /**
+   * I1 的同一类洞，落在 evaluate 上：`review → design` 是**合法**的一对（那是评审打回），
+   * 所以只按配对判断时，对一条待评审的需求点「评估」会一路成功、把状态写回待设计——
+   * 打回被一次误点顶掉，而没有人签字。
+   *
+   * 修复前的实测：before=review evaluate threw=none after=design。
+   */
+  it('对一条待评审的需求点评估：不能骑着 review → design 回到待设计', async () => {
+    const r = await inReview();
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(evaluate(db, '吕品', { requirementId: r.id }))).toMatchObject({
+      code: 'illegal_transition', message: '这条需求当前在「待评审」，不能执行这一步',
+    });
+    expect((await rowOf(r.id)).state).toBe('review');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
   it('不在待评审状态时通过 / 打回都报 illegal_transition', async () => {
     const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: fresh.id }))).toMatchObject({
