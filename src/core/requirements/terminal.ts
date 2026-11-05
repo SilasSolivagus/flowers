@@ -68,7 +68,8 @@ export async function rejectRequirement(db: Db, actor: string, raw: unknown) {
     const row = await lockRequirement(tx, requirementId);
     if (row.state !== 'inbox') throw new AppError('illegal_transition', ONLY_INBOX_REJECT);
 
-    assertTransition(row.state, 'rejected', { hasPrd: !!row.prd_url, hasType: !!row.type });
+    // 这条迁移没有 guard（拒绝不需要 PRD / 类型），所以不传 ctx。
+    assertTransition(row.state, 'rejected');
 
     await moveTo(tx, requirementId, 'rejected');
 
@@ -107,7 +108,7 @@ export async function shelveRequirement(db: Db, actor: string, raw: unknown) {
     // 表里登记的那一条（inbox → shelved）仍然过一遍状态机：删掉它，实现会立刻炸。
     // 其余状态在表里没有对应行（刻意），只由上面的 isShelvable 判定。
     if (row.state === 'inbox') {
-      assertTransition(row.state, 'shelved', { hasPrd: !!row.prd_url, hasType: !!row.type });
+      assertTransition(row.state, 'shelved');
     }
 
     await moveTo(tx, requirementId, 'shelved');
@@ -145,7 +146,7 @@ export async function restoreRequirement(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
-    assertTransition(row.state, 'inbox', { hasPrd: !!row.prd_url, hasType: !!row.type });
+    assertTransition(row.state, 'inbox');
 
     // skip_reason 描述的是**这一轮**提交流程（报表按它统计「跳过评估」的捷径），
     // 恢复等于重新走一遍，旧标记必须清掉；当初跳过的事实留在

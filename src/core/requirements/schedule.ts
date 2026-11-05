@@ -59,9 +59,10 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
 
     // queue → ready 是唯一通向 ready 的迁移，所以只按 from/to 配对判断就够：
     // 没经过评审就排期（inbox / design / review）、或重复排期（已在 ready），
-    // 都会在这里撞 illegal_transition。prd / type 两个标志只对 prd / type guard 有意义，
-    // 而这条迁移的 guard 是 dates（日期已在事务之前校验完），给 true 只为满足签名。
-    assertTransition(row.state, 'ready', { hasPrd: true, hasType: true });
+    // 都会在这里撞 illegal_transition。
+    // 不传 ctx：这条迁移没有 prd / type 门。日期那道门（dates）不归状态机管，
+    // 上面已经逐条校验完了（顺序、发版日、可解析性）。
+    assertTransition(row.state, 'ready');
 
     // releases.release_date 是 timestamptz，经 pg 的文本协议回来是**字符串**
     // （'2026-12-04 00:00:00+00'），不是 Date。必须先 new Date(...) 再比：

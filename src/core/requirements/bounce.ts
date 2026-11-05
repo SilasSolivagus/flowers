@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { assertTransition, type State } from '../state-machine.js';
+import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
@@ -46,27 +46,11 @@ function assertNotBeforeToday(dueAt: Date, now: Date): void {
 }
 
 /**
- * 打回这一步的迁移校验。
+ * 打回：test → dev，并且必须重填承诺完成日。
  *
- * `assertTransition` 只按 from/to 配对：ready → dev 也是合法配对（那是 clock 的路子），
- * 所以光靠它，对一条还没开工的需求调 bounce 会成功执行、替时钟推掉第一步，
- * window_start 那段窗口被静默跳过。这里再钉住 trigger，保证打回确实是 test → dev
- * 这一步的操作，且错误消息与状态机保持一致。
- */
-function assertBounceTransition(
-  from: State, to: 'dev', ctx: { hasPrd: boolean; hasType: boolean },
-) {
-  const t = assertTransition(from, to, ctx);
-  if (t.trigger !== 'bounce') {
-    throw new AppError('illegal_transition', `不能从「${from}」直接到「${to}」`);
-  }
-}
-
-/**
- * 打回：test → dev，并且必须重填承诺完成日（状态机上这条迁移的 guard 是 new_due）。
- *
- * `assertTransition` 的 ctx 只有 hasPrd / hasType，new_due 那条 guard 它不执行，
- * 所以「必须填新完成日」由本服务自己保证——这也是唯一执行它的地方。
+ * 「必须填新完成日」不是状态机的 guard：状态机只执行 prd / type 两条门（见
+ * state-machine.ts 的 Guard），日期类门由拥有这些列的服务自己保证——这里就是
+ * 唯一执行它的地方，而且它还要和「今天」比较（R23），状态机拿不到注入的时钟。
  *
  * 校验顺序（全部在开事务之前）：对象 → 新完成日 → 原因 → 需求 ID → 日期可解析
  * → 日期不早于今天（R23）。
@@ -98,7 +82,9 @@ export async function bounce(
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
-    assertBounceTransition(row.state, 'dev', { hasPrd: true, hasType: true });
+    // 只按配对判断不够：ready → dev 也是合法配对（那是时钟的路子），光看配对
+    // 会让「打回」替时钟推掉第一步、把 window_start 那段窗口静默跳过。
+    assertTrigger(row.state, 'dev', 'bounce');
 
     // 只换承诺完成日：commit_test_at 不动（R17 —— 打回后的需求仍处在测试窗内，
     // 下一次 tick 会把它推回 test 是刻意的行为）。

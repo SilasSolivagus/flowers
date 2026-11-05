@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
-import { assertTransition } from '../state-machine.js';
+import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
 import { lockRequirement, moveTo, type Tx } from './lock.js';
@@ -52,24 +52,6 @@ export async function assignReviewer(tx: Tx, requirementId: string, type: string
 }
 
 /**
- * 评审这一步的迁移校验。
- *
- * `assertTransition` 只按 from/to 配对：inbox → design 是合法的配对（那是 evaluate
- * 的路子），所以光靠它，对一条还在 inbox 的需求调 reviewReject 会静默把它推进到
- * design，等于白送一次评估。这里再钉住 trigger，保证通过 / 打回确实是 review
- * 这一步的操作，且错误消息与状态机保持一致。
- */
-function assertReviewTransition(
-  from: string, to: 'queue' | 'design', ctx: { hasPrd: boolean; hasType: boolean },
-) {
-  const t = assertTransition(from as never, to, ctx);
-  const expected = to === 'queue' ? 'review_pass' : 'review_reject';
-  if (t.trigger !== expected) {
-    throw new AppError('illegal_transition', `不能从「${from}」直接到「${to}」`);
-  }
-}
-
-/**
  * 通过：review → queue（进待排期），并把这条需求的 handed 派单收口成 passed。
  */
 export async function reviewPass(db: Db, actor: string, raw: unknown) {
@@ -79,9 +61,9 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
-    assertReviewTransition(row.state, 'queue', {
-      hasPrd: !!row.prd_url, hasType: !!row.type,
-    });
+    // 只按配对判断是不够的：inbox → design 是合法的一对（那是评估的路子），
+    // 所以光看配对，对一条还在 inbox 的需求点「通过」会骑着它走到别处。
+    assertTrigger(row.state, 'queue', 'review_pass');
 
     await moveTo(tx, requirementId, 'queue');
     await tx.execute(sql`
@@ -113,9 +95,9 @@ export async function reviewReject(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
-    assertReviewTransition(row.state, 'design', {
-      hasPrd: !!row.prd_url, hasType: !!row.type,
-    });
+    // 同上：inbox → design 是合法配对，所以一条 inbox 的需求直接点打回会「成功」，
+    // 等于白送一次评估。钉住 trigger，措辞也因此变成「当前在「收集」，不能执行这一步」。
+    assertTrigger(row.state, 'design', 'review_reject');
 
     await moveTo(tx, requirementId, 'design');
     await tx.execute(sql`

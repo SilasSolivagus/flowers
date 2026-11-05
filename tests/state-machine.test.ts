@@ -3,7 +3,11 @@ import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { AppError } from '../src/core/errors.js';
 import { recordEvent } from '../src/core/events.js';
-import { assertTransition, isClockTransition, TRANSITIONS } from '../src/core/state-machine.js';
+import {
+  assertTransition, assertTrigger, clockTransitions,
+  STATE_LABEL, TRANSITIONS, type State, type Transition,
+} from '../src/core/state-machine.js';
+import { clockEdges } from '../src/core/clock/tick.js';
 import { resetDb } from './helpers/db.js';
 
 describe('AppError', () => {
@@ -111,11 +115,11 @@ describe('state machine', () => {
       { from: 'design', to: 'review', trigger: 'submit_review', guard: 'prd' },
       { from: 'review', to: 'queue', trigger: 'review_pass' },
       { from: 'review', to: 'design', trigger: 'review_reject' },
-      { from: 'queue', to: 'ready', trigger: 'schedule', guard: 'dates' },
+      { from: 'queue', to: 'ready', trigger: 'schedule' },
       { from: 'ready', to: 'dev', trigger: 'clock', clock: true },
       { from: 'dev', to: 'test', trigger: 'clock', clock: true },
       { from: 'test', to: 'live', trigger: 'clock', clock: true },
-      { from: 'test', to: 'dev', trigger: 'bounce', guard: 'new_due' },
+      { from: 'test', to: 'dev', trigger: 'bounce' },
       { from: 'shelved', to: 'inbox', trigger: 'restore' },
     ]);
   });
@@ -135,9 +139,114 @@ describe('state machine', () => {
       .toMatchObject({ code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步' });
   });
 
-  it('isClockTransition 只认 3 条时钟转移', () => {
-    expect(TRANSITIONS.filter((t) => isClockTransition(t.from, t.to)).map((t) => `${t.from}>${t.to}`))
-      .toEqual(['ready>dev', 'dev>test', 'test>live']);
-    expect(isClockTransition('inbox', 'design')).toBe(false);
+  it('TRANSITIONS 在类型上是只读的（表就是口径，运行期不许往里写）', () => {
+    // 类型层断言：@ts-expect-error 在没有报错时会自己变成错误，所以这行既是文档
+    // 也是检查——`npx tsc --noEmit` 是它的执行者。
+    // @ts-expect-error readonly 数组不能赋给可变数组
+    const mutable: Transition[] = TRANSITIONS;
+    expect(mutable).toBe(TRANSITIONS);
+  });
+
+  it('STATE_LABEL 覆盖全部 10 个状态', () => {
+    expect(Object.keys(STATE_LABEL).sort()).toEqual([
+      'design', 'dev', 'inbox', 'live', 'queue',
+      'ready', 'rejected', 'review', 'shelved', 'test',
+    ]);
+    expect(STATE_LABEL.review).toBe('待评审');
+  });
+});
+
+/**
+ * I1：时钟的边必须来自 TRANSITIONS。这个文件曾经自己 re-list 了三条 clock 边，
+ * 于是把 `ready → dev` 从表里删掉之后时钟照跑、197 条用例全绿——表失去了权威性。
+ * 下面的等式就是那个 diverged 版本的报警器：手抄一份、或者派生逻辑跑偏，都会红。
+ */
+describe('tick 的边与 TRANSITIONS 同源', () => {
+  it('tick 的 clock 边 === TRANSITIONS 里 clock 的行（顺序与目标状态都一致）', () => {
+    const fromTable = clockTransitions().map((t) => `${t.from}>${t.to}`);
+    expect(fromTable).toEqual(['ready>dev', 'dev>test', 'test>live']);
+    expect(clockEdges().map((e) => `${e.from}>${e.to}`)).toEqual(fromTable);
+  });
+
+  it('每条 clock 边都钉住「哪一列」是它的判定依据', () => {
+    expect(clockEdges()).toEqual([
+      { from: 'ready', to: 'dev', field: 'window_start' },
+      { from: 'dev', to: 'test', field: 'commit_test_at' },
+      { from: 'test', to: 'live', field: 'commit_due_at' },
+    ]);
+  });
+});
+
+/**
+ * I2：同一对 from/to 可能有多条路，只有 trigger 能区分。
+ *
+ * 这里钉住的是**措辞**：配对存在、动作不对时，报的必须是「当前在某个状态，不能执行
+ * 这一步」，不能报「不能从「inbox」直接到「design」」——后者是合法迁移，用户会以为
+ * 状态机坏了。
+ */
+describe('assertTrigger — 配对合法但动作不对', () => {
+  it('inbox 上点打回（配对 inbox → design 合法）报动作，不报配对', () => {
+    const e = caught(() => assertTrigger('inbox', 'design', 'review_reject'));
+    expect(e).toMatchObject({
+      code: 'illegal_transition',
+      message: '这条需求当前在「收集」，不能执行这一步',
+    });
+  });
+
+  it('待开发上点打回（配对 ready → dev 合法，但那是时钟）报动作', () => {
+    expect(caught(() => assertTrigger('ready', 'dev', 'bounce'))).toMatchObject({
+      code: 'illegal_transition',
+      message: '这条需求当前在「待开发」，不能执行这一步',
+    });
+  });
+
+  it('待评审上点通过 / 评估都报动作', () => {
+    // review → queue 是 review_pass 的路，用 evaluate 撞上去
+    expect(caught(() => assertTrigger('review', 'queue', 'evaluate'))).toMatchObject({
+      message: '这条需求当前在「待评审」，不能执行这一步',
+    });
+    // review → design 是 review_reject 的路，用 evaluate 撞上去
+    expect(caught(() => assertTrigger('review', 'design', 'evaluate'))).toMatchObject({
+      message: '这条需求当前在「待评审」，不能执行这一步',
+    });
+  });
+
+  it('动作对得上就放行，并返回那一行', () => {
+    expect(assertTrigger('review', 'design', 'review_reject'))
+      .toEqual({ from: 'review', to: 'design', trigger: 'review_reject' });
+    expect(assertTrigger('test', 'dev', 'bounce'))
+      .toEqual({ from: 'test', to: 'dev', trigger: 'bounce' });
+    expect(assertTrigger('ready', 'dev', 'clock')).toEqual(TRANSITIONS[8]);
+  });
+
+  it('配对本身不存在时报的是配对（两条消息各管一件事）', () => {
+    expect(caught(() => assertTrigger('inbox' as State, 'dev' as State, 'evaluate')))
+      .toMatchObject({
+        code: 'illegal_transition', message: '不能从「inbox」直接到「dev」',
+      });
+  });
+});
+
+/**
+ * I1：ctx 可选，且门禁 fail-closed。给一条带着 prd / type 门的迁移不传 ctx，
+ * 等于「没检查过」，必须拒绝——而不是安静放行。
+ */
+describe('assertTransition — ctx 可选，门禁 fail-closed', () => {
+  it('prd 门不传 ctx 就拒绝', () => {
+    expect(caught(() => assertTransition('inbox', 'review'))).toMatchObject({
+      code: 'missing_prd', message: '直接提交评审必须有正式 PRD 链接',
+    });
+  });
+
+  it('type 门不传 ctx 就拒绝', () => {
+    expect(caught(() => assertTransition('inbox', 'design'))).toMatchObject({
+      code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步',
+    });
+  });
+
+  it('没有 guard 的迁移不传 ctx 也放行', () => {
+    for (const t of TRANSITIONS.filter((x) => !x.guard)) {
+      expect(() => assertTransition(t.from, t.to)).not.toThrow();
+    }
   });
 });

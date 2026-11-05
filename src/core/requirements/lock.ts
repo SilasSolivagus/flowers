@@ -40,13 +40,20 @@ export async function lockRequirement(tx: Tx, requirementId: string): Promise<Lo
  * （submit-review 的 prd_url / skip_reason、schedule 的三个日期、bounce 的
  * commit_due_at）。值仍然走参数绑定：调用方只提供片段，不提供列名以外的拼接。
  *
- * 状态列由本函数写，调用方不必重复写 `state = ...`，也就不会漏掉 state_entered_at。
+ * `at` 只给时钟用：tick 的 state_entered_at 必须落在它自己的 `now` 上（时间轴要对
+ * 得上被注入的 tick 时刻），而不是事务提交时的 `now()`。其余调用方不传，走 now()。
+ *
+ * 状态列与 state_entered_at 由本函数写，调用方不必重复写 `state = ...`，也就不会
+ * 漏掉那条不变量（「进当前状态的时刻」永远和状态一起变）。
  */
 export async function moveTo(
-  tx: Tx, requirementId: string, to: State, extraSet?: SQL,
+  tx: Tx, requirementId: string, to: State, extraSet?: SQL, at?: string,
 ): Promise<void> {
+  const entered = at === undefined
+    ? sql`state_entered_at = now()`
+    : sql`state_entered_at = ${at}::timestamptz`;
   const set = extraSet
-    ? sql`state = ${to}, ${extraSet}, state_entered_at = now()`
-    : sql`state = ${to}, state_entered_at = now()`;
+    ? sql.join([sql`state = ${to}`, extraSet, entered], sql`, `)
+    : sql.join([sql`state = ${to}`, entered], sql`, `);
   await tx.execute(sql`update requirements set ${set} where id = ${requirementId}`);
 }

@@ -491,10 +491,13 @@ describe('评审派单、通过与打回', () => {
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: fresh.id }))).toMatchObject({
       code: 'illegal_transition', message: '不能从「inbox」直接到「queue」',
     });
+    // 打回的措辞（I2）：inbox → design 是**合法**的一对（评估的路子），所以这里
+    // 报的是「当前在收集状态，不能执行这一步」——说「不能从 inbox 到 design」会让
+    // 用户以为状态机坏了。
     expect(await caught(reviewReject(db, '吕正豪', {
       requirementId: fresh.id, reason: '不行',
     }))).toMatchObject({
-      code: 'illegal_transition', message: '不能从「inbox」直接到「design」',
+      code: 'illegal_transition', message: '这条需求当前在「收集」，不能执行这一步',
     });
     expect((await rowOf(fresh.id)).state).toBe('inbox');
 
@@ -1020,16 +1023,18 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   });
 
   it('从「待开发」打回也拒绝：ready → dev 是时钟的路子，不是打回', async () => {
-    // assertTransition 只按 from/to 配对，而 ready → dev 是合法的配对（trigger='clock'）。
-    // 不钉 trigger 的话，对一条还没开工的需求调 bounce 会一路成功、把状态写成 dev，
-    // 等于让「打回」替时钟推了第一步，window_start 那段窗口被静默跳过。
+    // 只按 from/to 配对，ready → dev 是合法的配对（trigger='clock'）。不钉 trigger
+    // 的话，对一条还没开工的需求调 bounce 会一路成功、把状态写成 dev，等于让「打回」
+    // 替时钟推了第一步，window_start 那段窗口被静默跳过。
+    //
+    // 措辞（I2）：配对合法、动作不对 → 说的是动作，不是配对。
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
     const before = await eventCountOf(id);
 
     expect(await caught(bounce(db, '王妍', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
     }, NOW))).toMatchObject({
-      code: 'illegal_transition', message: '不能从「ready」直接到「dev」',
+      code: 'illegal_transition', message: '这条需求当前在「待开发」，不能执行这一步',
     });
 
     const row = await datesOf(id);
