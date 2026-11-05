@@ -3,7 +3,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
-import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { lockRequirement, moveTo, type Tx } from './lock.js';
 
 /**
@@ -86,9 +86,7 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
  */
 export async function reviewReject(db: Db, actor: string, raw: unknown) {
   const input = requirePlainObject(raw);
-  // 类型上是 string，运行时可能整个字段缺失：先归一成字符串，否则 .trim() 抛 TypeError。
-  const rawReason = typeof input.reason === 'string' ? input.reason : '';
-  const reason = rawReason.trim();
+  const reason = asText(input.reason);
   if (!reason) throw new AppError('missing_reason', '打回必须写原因');
 
   const requirementId = parseRequirementId(input);

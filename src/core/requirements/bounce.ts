@@ -3,7 +3,7 @@ import type { Db } from '../../db/client.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
-import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { shanghaiDayOf } from '../clock/tick.js';
 import { lockRequirement, moveTo } from './lock.js';
 
@@ -27,8 +27,8 @@ function parseNewDueOrThrow(text: string): Date {
  * R23：新承诺完成日不能落在「今天」之前（Asia/Shanghai 的日历日）。
  *
  * 按「天」比较，不按时刻：'2026-11-06' 是日历日，按时刻比会让「今天」取决于现在几点。
- * 折算天数复用 tick 里的 shanghaiDayOf——全库只有那一处把时刻折成北京时间的第几天，
- * 打回与时钟对「今天」的理解因此不可能分叉（同一个 instant ⇒ 同一个整数天）。
+ * 折算天数复用时钟模块的 shanghaiDayOf：实现只有一处，调用方有两处（这里与 tick），
+ * 所以打回与时钟对「今天」的理解不可能分叉（同一个 instant ⇒ 同一个整数天）。
  *
  * 今天本身合法：承诺「今天就上线」是真实的（虽然乐观）。
  *
@@ -66,14 +66,10 @@ export async function bounce(
   // 入参先挡住：非对象会抛 TypeError，非 uuid 会让 PG 抛 22P02，两者都不是 AppError。
   const input = requirePlainObject(raw);
 
-  // 类型上是 string，运行时可能整个字段缺失：先归一成字符串，否则 .trim() 抛 TypeError，
-  // 前端拿到的是 500 而不是中文错误。
-  const rawDue = typeof input.newCommitDueAt === 'string' ? input.newCommitDueAt : '';
-  const newCommitDueAt = rawDue.trim();
+  const newCommitDueAt = asText(input.newCommitDueAt);
   if (!newCommitDueAt) throw new AppError('missing_new_due', MISSING_NEW_DUE);
 
-  const rawReason = typeof input.reason === 'string' ? input.reason : '';
-  const reason = rawReason.trim();
+  const reason = asText(input.reason);
   if (!reason) throw new AppError('missing_reason', MISSING_REASON);
 
   const requirementId = parseRequirementId(input);

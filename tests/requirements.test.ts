@@ -11,7 +11,7 @@ import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal.js';
 import { AppError } from '../src/core/errors.js';
-import { tick } from '../src/core/clock/tick.js';
+import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { makeQueued, makeReadyAt, makeRelease, reviewerOf } from './helpers/factory.js';
 
@@ -789,6 +789,28 @@ describe('排期（三个日期）', () => {
     expect(await eventCountOf(r.id)).toBe(before);
   });
 
+  /**
+   * I5：releaseId 不是 uuid 时，PG 抛的是 22P02（invalid_text_representation），
+   * 那不是 AppError —— 控制器按 `e.code` 分支时只能把它当未知错误，用户看到 500。
+   * 与 requirementId 在 Task 5 得到的处理对齐：入口先校验成 uuid。
+   */
+  it('版本 ID 不是 uuid 就给中文消息，不让 22P02 漏成 500', async () => {
+    const r = await makeQueued();
+    const before = await eventCountOf(r.id);
+
+    for (const releaseId of ['abc', 'not-a-uuid', '123']) {
+      expect(await caught(schedule(db, '吕品', {
+        requirementId: r.id, releaseId, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+      }))).toMatchObject({ code: 'invalid', message: '版本 ID 格式不正确' });
+    }
+
+    // 校验在开事务之前：行不动、不写事件。
+    expect(await scheduledColumnsOf(r.id)).toMatchObject({
+      state: 'queue', release_id: null, commit_test_at: null, commit_due_at: null,
+    });
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
   it('需求不存在时给中文 not_found', async () => {
     const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
     expect(await caught(schedule(db, '吕品', {
@@ -833,8 +855,8 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
    */
   async function inTest() {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
-    await tick(db, new Date('2026-12-03T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+    await tick(db, startOfShanghaiDay('2026-12-03'));
     expect(await stateOfRow(id)).toBe('test');
     return id;
   }
@@ -860,7 +882,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
    * bounce 接受注入的 now，这里传一个早于 12-10 / 12-20 的时刻，叙事原样保留。
    * 生产调用方不传这个参数（见下面「不传 now」那条用例）。
    */
-  const NOW = new Date('2026-12-03T00:00:00+08:00');
+  const NOW = startOfShanghaiDay('2026-12-03');
 
   /** 最后一条 requirement.bounced 事件；没有就返回 null。 */
   async function bouncedEventOf(id: string) {
@@ -1088,12 +1110,12 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     expect(await stateOfRow(id)).toBe('test');
 
     // 旧的完成日（12-04）已经过去也不会被推上线：门槛是新的 12-20。
-    expect((await tick(db, new Date('2026-12-05T00:00:00+08:00'))).moved).toHaveLength(0);
+    expect((await tick(db, startOfShanghaiDay('2026-12-05'))).moved).toHaveLength(0);
     expect((await tick(db, new Date('2026-12-19T23:59:59+08:00'))).moved).toHaveLength(0);
     expect(await stateOfRow(id)).toBe('test');
 
     // 新的承诺完成日当天才上线。
-    const live = await tick(db, new Date('2026-12-20T00:00:00+08:00'));
+    const live = await tick(db, startOfShanghaiDay('2026-12-20'));
     expect(live.moved).toContainEqual({ id, from: 'test', to: 'live' });
     expect(await stateOfRow(id)).toBe('live');
   });
@@ -1145,7 +1167,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   /** 停在开发中的需求：12-01 开工，承诺 12-04 完成。 */
   async function inDev() {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
     expect(await stateOf(id)).toBe('dev');
     return id;
   }

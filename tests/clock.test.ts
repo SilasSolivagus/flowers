@@ -1,7 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
-import { tick, deadlineDay, shanghaiDayOf } from '../src/core/clock/tick.js';
+import {
+  tick, deadlineDay, shanghaiDayOf, startOfShanghaiDay,
+} from '../src/core/clock/tick.js';
 import { AppError } from '../src/core/errors.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { resetDb, seedPeople } from './helpers/db.js';
@@ -75,24 +77,24 @@ async function autoEvents(id: string) {  const r = await db.execute<{ type: stri
 describe('tick — 三条自动转移', () => {
   it('到开工日，待开发 → 开发中', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    const out = await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
     expect(out.moved).toContainEqual({ id, from: 'ready', to: 'dev' });
     expect(await stateOf(id)).toBe('dev');
   });
 
   it('到提测日，开发中 → 测试中', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
-    const out = await tick(db, new Date('2026-12-03T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+    const out = await tick(db, startOfShanghaiDay('2026-12-03'));
     expect(out.moved).toContainEqual({ id, from: 'dev', to: 'test' });
     expect(await stateOf(id)).toBe('test');
   });
 
   it('到承诺完成日，测试中 → 已上线', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
-    await tick(db, new Date('2026-12-03T00:00:00+08:00'));
-    const out = await tick(db, new Date('2026-12-04T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+    await tick(db, startOfShanghaiDay('2026-12-03'));
+    const out = await tick(db, startOfShanghaiDay('2026-12-04'));
     expect(out.moved).toContainEqual({ id, from: 'test', to: 'live' });
     expect(await stateOf(id)).toBe('live');
   });
@@ -107,7 +109,7 @@ describe('tick — 幂等', () => {
    */
   it('重复 tick 不会重复推进', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
-    const first = await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    const first = await tick(db, startOfShanghaiDay('2026-12-01'));
     expect(first.moved).toEqual([{ id, from: 'ready', to: 'dev' }]);
 
     const again = await tick(db, new Date('2026-12-01T01:00:00+08:00'));
@@ -131,14 +133,14 @@ describe('tick — 幂等', () => {
     expect(before.moved).toHaveLength(0);
     expect(await stateOf(id)).toBe('ready');
 
-    const at = await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    const at = await tick(db, startOfShanghaiDay('2026-12-01'));
     expect(at.moved).toContainEqual({ id, from: 'ready', to: 'dev' });
   });
 
   it('一次 tick 推进所有到点的行，没到点的不动', async () => {
     const due = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
     const later = await makeReadyAt('2026-12-05', '2026-12-08', '2026-12-09');
-    const out = await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
     expect(out.moved).toEqual([{ id: due.id, from: 'ready', to: 'dev' }]);
     expect(await stateOf(later.id)).toBe('ready');
   });
@@ -146,7 +148,7 @@ describe('tick — 幂等', () => {
   it('非时钟状态既不动，也不因为没排期/没日期报错', async () => {
     const queued = await makeQueued();
     const inbox = await createRequirement(db, '吕品', { title: 'i', type: 'feature', requester: 'b' });
-    const out = await tick(db, new Date('2027-01-01T00:00:00+08:00'));
+    const out = await tick(db, startOfShanghaiDay('2027-01-01'));
     expect(out.moved).toHaveLength(0);
     expect(await stateOf(queued.id)).toBe('queue');
     expect(await stateOf(inbox.id)).toBe('inbox');
@@ -162,8 +164,8 @@ describe('tick — R17：打回后仍在测试窗内的交互（保留，不特�
    */
   it('打回后的 dev 行，commit_test_at 已过 → 下次 tick 直接回 test，上线仍等新完成日', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
-    await tick(db, new Date('2026-12-03T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+    await tick(db, startOfShanghaiDay('2026-12-03'));
     expect(await stateOf(id)).toBe('test');
 
     // 模拟 Task 9 的 bounce：回 dev、只换承诺完成日，提测日原样不动。
@@ -180,9 +182,9 @@ describe('tick — R17：打回后仍在测试窗内的交互（保留，不特�
     expect(await stateOf(id)).toBe('test');
 
     // 新的承诺完成日才是上线门槛：12-09 不动，12-10 当天上线。
-    expect((await tick(db, new Date('2026-12-09T00:00:00+08:00'))).moved).toHaveLength(0);
+    expect((await tick(db, startOfShanghaiDay('2026-12-09'))).moved).toHaveLength(0);
     expect(await stateOf(id)).toBe('test');
-    expect((await tick(db, new Date('2026-12-10T00:00:00+08:00'))).moved)
+    expect((await tick(db, startOfShanghaiDay('2026-12-10'))).moved)
       .toContainEqual({ id, from: 'test', to: 'live' });
   });
 });
@@ -190,7 +192,7 @@ describe('tick — R17：打回后仍在测试窗内的交互（保留，不特�
 describe('tick — 事件与并发', () => {
   it('每次推进写一条 system 事件，payload 记录 from / to / tick 时刻', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
 
     const rows = await autoEvents(id);
     expect(rows).toHaveLength(1);
@@ -202,9 +204,9 @@ describe('tick — 事件与并发', () => {
 
   it('走完整条链，三条事件类型依次是 auto_dev / auto_test / auto_live', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
-    await tick(db, new Date('2026-12-01T00:00:00+08:00'));
-    await tick(db, new Date('2026-12-03T00:00:00+08:00'));
-    await tick(db, new Date('2026-12-04T00:00:00+08:00'));
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+    await tick(db, startOfShanghaiDay('2026-12-03'));
+    await tick(db, startOfShanghaiDay('2026-12-04'));
 
     expect((await autoEvents(id)).map((e) => e.type)).toEqual([
       'requirement.auto_dev', 'requirement.auto_test', 'requirement.auto_live',
@@ -218,7 +220,7 @@ describe('tick — 事件与并发', () => {
 
   it('两个 tick 并发时同一行只推进一步（for update 生效）', async () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
-    const at = new Date('2026-12-01T00:00:00+08:00');
+    const at = startOfShanghaiDay('2026-12-01');
 
     // 直接从外部把这一行锁住，再放两个 tick 进去：两个 tick 都会卡在取行的语句上
     // （wait_event_type='Lock'），锁一放，一个先拿到、推一步并提交，另一个重新读到的
@@ -264,7 +266,7 @@ describe('tick — 坏数据不静默跳过', () => {
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = 'ready' where id = ${r.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${r.id} 处于「待开发」但没有排期版本，无法自动推进`);
@@ -282,7 +284,7 @@ describe('tick — 坏数据不静默跳过', () => {
          set state = 'dev', release_id = null, commit_test_at = '2026-12-01T00:00:00Z'
        where id = ${r.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-02T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-02')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${r.id} 处于「开发中」但没有排期版本，无法自动推进`);
@@ -297,7 +299,7 @@ describe('tick — 坏数据不静默跳过', () => {
              commit_test_at = '2026-12-01T00:00:00Z', commit_due_at = '2026-12-04T00:00:00Z'
        where id = ${r.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-05T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-05')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${r.id} 处于「测试中」但没有排期版本，无法自动推进`);
@@ -311,7 +313,7 @@ describe('tick — 坏数据不静默跳过', () => {
     await db.execute(sql`
       update requirements set state = 'dev', release_id = ${releaseId} where id = ${r.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${r.id} 处于「开发中」但缺少提测日，无法自动推进`);
@@ -325,7 +327,7 @@ describe('tick — 坏数据不静默跳过', () => {
          set state = 'test', release_id = ${releaseId}, commit_test_at = '2026-12-01T00:00:00Z'
        where id = ${r.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${r.id} 处于「测试中」但缺少承诺完成日，无法自动推进`);
@@ -336,7 +338,7 @@ describe('tick — 坏数据不静默跳过', () => {
     const bad = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = 'ready' where id = ${bad.id}`);
 
-    const e = await caught(tick(db, new Date('2026-12-01T00:00:00+08:00')));
+    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('clock_missing_deadline');
     expect(e.message).toBe(`需求 ${bad.id} 处于「待开发」但没有排期版本，无法自动推进`);

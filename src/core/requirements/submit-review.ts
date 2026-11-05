@@ -3,7 +3,7 @@ import type { Db } from '../../db/client.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
-import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { lockRequirement, moveTo } from './lock.js';
 import { assignReviewer } from './review.js';
 
@@ -24,10 +24,8 @@ export async function submitReview(db: Db, actor: string, raw: unknown) {
   // 那不是 AppError，控制器按 code 分支时只能当未知错误。
   const input = requirePlainObject(raw);
 
-  // 类型上是 string，但运行时可能整个字段缺失（控制器直接透传 body）。
-  // 先归一成字符串，否则 .trim() 会抛 TypeError，前端拿到的是 500 而不是中文错误。
-  const rawUrl = typeof input.prdUrl === 'string' ? input.prdUrl : '';
-  const url = rawUrl.trim();
+  // 字段整个缺失（运行时 undefined）也要落到同一个中文错误，而不是 TypeError。
+  const url = asText(input.prdUrl);
   if (!url) throw new AppError('missing_prd', '提交评审必须填正式 PRD 链接');
 
   const requirementId = parseRequirementId(input);

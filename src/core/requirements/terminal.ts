@@ -3,18 +3,13 @@ import type { Db } from '../../db/client.js';
 import { assertTransition, type State } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
-import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { lockRequirement, moveTo } from './lock.js';
 
 const MISSING_REASON_REJECT = '拒绝必须写原因';
 const MISSING_REASON_SHELVE = '搁置必须写原因';
 const ONLY_INBOX_REJECT = '只有收集状态的需求可以拒绝';
 const TERMINAL_SHELVE = '终态不能再搁置';
-
-/** 表单字段运行时可能是 undefined / null / 非字符串，先归一成去掉首尾空白的字符串。 */
-function asText(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
 
 /**
  * 搁置的口径：任何**非终态**都能搁置。

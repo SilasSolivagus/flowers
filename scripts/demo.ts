@@ -17,7 +17,7 @@ import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
-import { tick } from '../src/core/clock/tick.js';
+import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from '../tests/helpers/db.js';
 
 // ─── 剧本参数 ────────────────────────────────────────────────────────────────
@@ -206,7 +206,8 @@ async function main() {
 
   async function tickAt(day: string) {
     // 北京时间零点：tick 按 Asia/Shanghai 的「天」比较，给 UTC 零点会差 8 小时。
-    const moved = await tick(db, new Date(`${day}T00:00:00+08:00`));
+    // 这个换算只在时钟模块里实现一次（startOfShanghaiDay），脚本不再自带 +08:00。
+    const moved = await tick(db, startOfShanghaiDay(day));
     const label = moved.moved.map((m) => `${m.from}→${m.to}`).join(', ') || '无移动';
     log(`         → tick moved: ${moved.moved.length}（${label}）`);
   }

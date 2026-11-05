@@ -3,16 +3,13 @@ import type { Db } from '../../db/client.js';
 import { assertTransition } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
-import { parseRequirementId, requirePlainObject } from '../validate.js';
+import {
+  asText, parseReleaseId, parseRequirementId, requirePlainObject,
+} from '../validate.js';
 import { lockRequirement, moveTo } from './lock.js';
 
 const MISSING_DATES = '排期必须填版本、提测日和承诺完成日';
 const BAD_DATE = '提测日和承诺完成日必须是有效日期';
-
-/** 表单字段运行时可能是 undefined / null / 非字符串，先归一成去掉首尾空白的字符串。 */
-function asText(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
 
 /**
  * 'YYYY-MM-DD' 按 UTC 零点解析（与 releases.window_start / release_date 的写入方式一致）。
@@ -47,6 +44,9 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
   if (!releaseId || !commitTestAt || !commitDueAt) {
     throw new AppError('missing_dates', MISSING_DATES);
   }
+  // 缺字段先报 missing_dates（上面的判断），**格式**不对才报 invalid：非 uuid 的
+  // releaseId 会被 PG 以 22P02 拒绝，那不是 AppError，到控制器就是 500。
+  const release = parseReleaseId(releaseId);
 
   const testAt = parseDateOrThrow(commitTestAt);
   const dueAt = parseDateOrThrow(commitDueAt);
@@ -69,16 +69,16 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
     // `new Date('2026-12-05') > '2026-12-04 00:00:00+00'` 这种 Date 与字符串的比较
     // 会退化成 NaN 比较、恒为 false，「晚于发版日」这条约束就会静默失效。
     const rel = await tx.execute<{ release_date: string }>(
-      sql`select release_date from releases where id = ${releaseId}`);
-    const release = rel.rows[0];
-    if (!release) throw new AppError('not_found', '找不到这个版本');
-    if (dueAt.getTime() > new Date(release.release_date).getTime()) {
+      sql`select release_date from releases where id = ${release}`);
+    const releaseRow = rel.rows[0];
+    if (!releaseRow) throw new AppError('not_found', '找不到这个版本');
+    if (dueAt.getTime() > new Date(releaseRow.release_date).getTime()) {
       throw new AppError('bad_dates', '承诺完成日不能晚于版本发版日');
     }
 
     // 日期按 ISO 写回，避免把解析出来的本地时区偏移带进 timestamptz。
     await moveTo(tx, requirementId, 'ready', sql`
-      release_id = ${releaseId},
+      release_id = ${release},
       commit_test_at = ${testAt.toISOString()},
       commit_due_at = ${dueAt.toISOString()}`);
 

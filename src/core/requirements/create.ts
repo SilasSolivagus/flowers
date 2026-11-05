@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { AppError, withPgErrors } from '../errors.js';
-import { isPlainObject } from '../validate.js';
+import { requirePlainObject } from '../validate.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
 // 而对外错误只暴露 issues[0].message，前端会看到英文。
@@ -25,10 +25,8 @@ export type CreateInput = z.infer<typeof CreateInput>;
 
 export async function createRequirement(db: Db, actor: string, raw: unknown) {
   // 非对象 body（null / 数组 / 字符串）zod 只给英文 'Expected object, received …'，
-  // 这里的错误消息是唯一对外出口，统一换成本项目的中文文案。
-  if (!isPlainObject(raw)) throw new AppError('invalid', '参数不合法');
-
-  const parsed = CreateInput.safeParse(raw);
+  // 这里的错误消息是唯一对外出口，统一走 validate.ts 的同一句中文。
+  const parsed = CreateInput.safeParse(requirePlainObject(raw));
   if (!parsed.success) {
     throw new AppError('invalid', parsed.error.issues[0]?.message ?? '参数不合法');
   }
