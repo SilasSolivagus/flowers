@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Node ≥ 22，TypeScript `strict: true`，不开 `any`
-- Postgres 17（`docker compose up -d` 拉起来，宿主机端口 **54329**，避免撞现有 5432）
+- Postgres 17（`docker compose up -d` 拉起来，宿主机端口 **54330**，避免撞现有 5432）
 - 状态值只能是：`inbox | design | review | queue | ready | dev | test | live | rejected | shelved`
 - 需求类型只能是：`commercial | feature`，**必填**
 - 状态变更**只能**走 `TRANSITIONS` 里列出的 13 条；任何其他组合抛 `AppError('illegal_transition')`
@@ -29,7 +29,7 @@
 
 ```
 flowers/
-├── docker-compose.yml           Postgres 17，端口 54329
+├── docker-compose.yml           Postgres 17，端口 54330
 ├── package.json
 ├── tsconfig.json
 ├── vitest.config.ts
@@ -82,7 +82,7 @@ flowers/
 services:
   db:
     image: postgres:17-alpine
-    ports: ["54329:5432"]
+    ports: ["54330:5432"]
     environment:
       POSTGRES_PASSWORD: flowers
       POSTGRES_DB: flowers
@@ -142,7 +142,7 @@ export default defineConfig({ test: { fileParallelism: false, testTimeout: 20000
 
 ```ts
 // drizzle.config.ts
-export default { dialect: 'postgresql', schema: './src/db/schema.ts', out: './drizzle' } as const;
+export default { dialect: 'postgresql', schema: './src/db/schema.ts', out: './src/db/migrations' } as const;
 ```
 
 - [ ] **Step 4: 建 schema.ts —— 5 张表**
@@ -210,7 +210,7 @@ import { Pool } from 'pg';
 import * as schema from './schema.js';
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:flowers@localhost:54329/flowers',
+  connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:flowers@localhost:54330/flowers',
 });
 export const db = drizzle(pool, { schema });
 export type Db = typeof db;
@@ -221,7 +221,7 @@ export type Db = typeof db;
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { db, pool } from './client.js';
 
-await migrate(db, { migrationsFolder: './drizzle' });
+await migrate(db, { migrationsFolder: './src/db/migrations' });
 await pool.end();
 ```
 
