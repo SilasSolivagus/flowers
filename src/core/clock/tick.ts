@@ -33,14 +33,13 @@ const DEADLINE_FIELD: Partial<Record<State, DeadlineField>> = {
   test: 'commit_due_at',
 };
 
-const stateLabel = (state: State) => STATE_LABEL[state] ?? state;
-
 /**
  * 时钟推进的边（源状态 → 目标状态 + 判定用的那一列），全部来自 TRANSITIONS。
  *
  * 从表里派生而不是另写一份：这个文件曾经自己 re-list 了三条边，于是把
- * `ready → dev` 从状态机里删掉之后，时钟照跑、测试全绿——表失去了权威性。
- * test/state-machine.test.ts 里有一条用例把这个等式钉住。
+ * `ready → dev` 从状态机里删掉之后，时钟照跑、24 条时钟用例全绿——表失去了权威性
+ * （被删行只让三条「逐行钉住表」的用例变红，没有一条用例说得出「时钟不认表」）。
+ * test/state-machine.test.ts 里的等式用例把这一层关系钉住。
  *
  * 表里新增一条没有对应日期列的 clock 边会在这里抛错，而不是被静默跳过
  * （跳过 = 这条需求永远不推进，而没有任何人会被提醒）。
@@ -51,7 +50,7 @@ export function clockEdges(): Array<{ from: State; to: State; field: DeadlineFie
     if (!field) {
       throw new AppError(
         'clock_missing_deadline',
-        `状态「${stateLabel(t.from)}」没有对应的期限列，时钟无法推进它`,
+        `状态「${STATE_LABEL[t.from]}」没有对应的期限列，时钟无法推进它`,
       );
     }
     return { from: t.from, to: t.to, field };
@@ -105,7 +104,7 @@ export function deadlineDay(
   ctx: { requirementId: string; state: State; field: DeadlineField },
 ): number {
   const label = FIELD_LABEL[ctx.field];
-  const state = stateLabel(ctx.state);
+  const state = STATE_LABEL[ctx.state];
   if (raw === null) {
     throw new AppError(
       'clock_missing_deadline',
@@ -136,7 +135,7 @@ function assertHasRelease(
   if (releaseId === null) {
     throw new AppError(
       'clock_missing_deadline',
-      `需求 ${ctx.requirementId} 处于「${stateLabel(ctx.state)}」但没有排期版本，无法自动推进`,
+      `需求 ${ctx.requirementId} 处于「${STATE_LABEL[ctx.state]}」但没有排期版本，无法自动推进`,
     );
   }
 }
