@@ -75,6 +75,25 @@ describe('recordEvent', () => {
   });
 });
 
+/**
+ * 抓取断言抛出的 AppError，让调用方同时断言 instance、code、message。
+ *
+ * 不要退回 `expect(fn).toThrowError(new AppError('code', '消息'))`：vitest 只在
+ * 传构造器（`toThrowError(AppError)`）时走 instanceof 分支，传实例时只比较
+ * `.message`。这样 `throw new Error('同样的消息')` 和
+ * `new AppError('别的 code', '同样的消息')` 都会算通过，而下游服务是按
+ * `e.code` 分支的，测试就失去了防线。
+ */
+function caught(fn: () => unknown): AppError {
+  try {
+    fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(AppError);
+    return e as AppError;
+  }
+  throw new Error('expected AppError, nothing thrown');
+}
+
 describe('state machine', () => {
   it('13 条合法转移都能过', () => {
     expect(TRANSITIONS).toHaveLength(13);
@@ -107,13 +126,13 @@ describe('state machine', () => {
   });
 
   it('inbox → review 必须有 PRD', () => {
-    expect(() => assertTransition('inbox', 'review', { hasPrd: false, hasType: true }))
-      .toThrowError(new AppError('missing_prd', '直接提交评审必须有正式 PRD 链接'));
+    expect(caught(() => assertTransition('inbox', 'review', { hasPrd: false, hasType: true })))
+      .toMatchObject({ code: 'missing_prd', message: '直接提交评审必须有正式 PRD 链接' });
   });
 
   it('inbox → design 必须有类型', () => {
-    expect(() => assertTransition('inbox', 'design', { hasPrd: true, hasType: false }))
-      .toThrowError(new AppError('missing_type', '需求必须有类型（商业 / 功能）才能进入下一步'));
+    expect(caught(() => assertTransition('inbox', 'design', { hasPrd: true, hasType: false })))
+      .toMatchObject({ code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步' });
   });
 
   it('isClockTransition 只认 3 条时钟转移', () => {
