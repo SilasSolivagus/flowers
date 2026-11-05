@@ -4,6 +4,7 @@ import { assertTransition } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { assignReviewer } from './review.js';
 
 /** 跳过评估直提评审时写进 skip_reason 的固定文案（报表按它识别这条捷径）。 */
 export const SKIP_EVALUATION_REASON = '跳过评估，直接提交 PRD';
@@ -52,7 +53,10 @@ export async function submitReview(db: Db, actor: string, raw: unknown) {
       payload: { from: row.state, to: 'review', prdUrl: url, skippedEvaluation: skipped },
     });
 
-    // Task 6 在此处派单（按 type 选评审人、写 review_assignments）；本任务只留缝。
+    // 派单：按 type 选评审人、写 review_assignments（verdict='handed'）。
+    // 必须留在同一个事务里：类型没配评审人时抛 no_reviewer，状态推进要跟着回滚，
+    // 否则需求会停在「待评审」却没人接。review.ts 不反向 import 本文件，没有循环。
+    await assignReviewer(tx, requirementId, row.type ?? '');
 
     return { state: 'review' as const, skippedEvaluation: skipped };
   });
