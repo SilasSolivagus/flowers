@@ -1,0 +1,136 @@
+@import './tokens.css';
+
+/* Flower · 应用外壳与看板样式
+   来源：~/Flower/docs/ux/gate-console/views.css（已评审版本，逐组移植）
+   铁律：本文件所有颜色一律取 var(--c-*)，不写字面色值。
+   移植清单：shell / rail / topbar / board(.gband/.gcols) / col / colhd / card / drawer / sheet / btn / gantt
+   为配合 layout.tsx 的 markup 只做必要的选择器适配（.app→.shell、.nav button→.rail a、.brand→.rail h1+.sub），
+   其余声明原样保留。 */
+
+/* ── 基础 ───────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--c-bg);color:var(--c-text-1);font:400 var(--t-body) var(--f-sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+::selection{background:var(--c-accent-weak)}
+
+/* ── 外壳：左轨 + 主区 ─────────────────────────────── */
+.shell{display:grid;grid-template-columns:184px minmax(0,1fr);height:100vh;overflow:hidden}
+
+.rail{background:var(--c-surface);border-right:1px solid var(--c-line);display:flex;flex-direction:column;padding:16px 0 12px}
+/* 原 .brand b / .brand span —— markup 用 h1 + .sub */
+.rail h1{margin:0;padding:0 16px;font:600 var(--t-section) var(--f-sans);letter-spacing:.02em}
+.rail .sub{margin-top:4px;padding:0 16px 20px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+/* 原 .nav / .nav button —— markup 用裸 <a> */
+.rail > a{display:flex;align-items:center;justify-content:space-between;height:var(--h-row);margin:0 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-body) var(--f-sans);color:var(--c-text-2);text-decoration:none}
+.rail > a:hover{background:var(--c-surface-2)}
+.rail > a[aria-current="true"]{background:var(--c-accent-weak);color:var(--c-accent);font-weight:600}
+.rail .sp{flex:1}
+
+.main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.topbar{height:var(--h-topbar);flex:0 0 var(--h-topbar);display:flex;align-items:center;gap:12px;padding:0 24px;background:var(--c-surface);border-bottom:1px solid var(--c-line)}
+.topbar h1{margin:0;font:600 var(--t-title-2) var(--f-sans)}
+.topbar .sp{margin-left:auto}
+.view{flex:1;min-height:0;overflow:auto;background:var(--c-bg)}
+.view.pad{padding:16px 24px 32px}
+
+/* 顶栏成员切换（新增，视图 CSS 里没有对应件；只用 tokens） */
+.member{display:inline-flex;align-items:center;gap:8px;height:var(--h-control);padding:0 4px 0 10px;border:1px solid var(--c-line-strong);border-radius:var(--r-xs);background:var(--c-surface)}
+.member .lbl{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.member select{height:calc(var(--h-control) - 2px);border:0;background:transparent;color:var(--c-text-1);font:500 var(--t-body-s) var(--f-sans);padding:0 4px;cursor:pointer;outline:none}
+.member select:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px;border-radius:var(--r-xs)}
+.member .dot{width:6px;height:6px;border-radius:var(--r-pill);background:var(--c-accent)}
+
+/* ── 按钮 ──────────────────────────────────────────── */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:var(--h-control);padding:0 16px;border-radius:var(--r-xs);font:500 var(--t-body-s) var(--f-sans);border:1px solid var(--c-line-strong);background:var(--c-surface);white-space:nowrap;transition:background var(--d-fast) var(--e-standard)}
+.btn:hover{background:var(--c-surface-2)}
+.btn.primary{background:var(--c-accent);border-color:var(--c-accent);color:var(--c-on-accent)}
+.btn.primary:hover{opacity:.92}
+.btn.ghost{border-color:transparent;color:var(--c-text-3)}
+.btn.sm{height:28px;padding:0 12px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+
+/* ── 看板 ──────────────────────────────────────────── */
+.board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto}
+.gband{display:grid;grid-template-columns:repeat(11,minmax(132px,1fr));gap:8px;padding:0 0 6px}
+.gb{font:600 11px/16px var(--f-sans);letter-spacing:.08em;color:var(--c-text-4);padding-left:2px}
+.gcols{display:grid;grid-template-columns:repeat(11,minmax(132px,1fr));gap:8px;flex:1;min-height:0}
+
+.col{display:flex;flex-direction:column;min-width:0;min-height:0;
+     border:0.5px solid var(--c-line);border-radius:12px;
+     background:color-mix(in srgb, var(--c-text-1) 3%, var(--c-bg))}
+.colhd{display:flex;align-items:center;gap:6px;min-height:34px;padding:4px 10px 0}
+.colhd b{font:600 12px/16px var(--f-sans);letter-spacing:.02em;color:var(--c-text-1);white-space:nowrap}
+.colhd .pill2{margin-left:auto;min-width:18px;height:18px;padding:0 5px;display:inline-grid;place-items:center;
+              border-radius:99px;background:color-mix(in srgb, var(--c-text-1) 6%, transparent);
+              color:var(--c-text-3);font:600 11px/1 var(--f-num);font-variant-numeric:tabular-nums}
+.colbody{display:flex;flex-direction:column;gap:8px;padding:8px 8px 8px;overflow-y:auto;flex:1;min-height:0}
+
+.card{display:flex;flex-direction:column;gap:6px;padding:10px;border:0.5px solid var(--c-line-strong);
+      border-radius:10px;background:var(--c-surface);cursor:pointer;
+      transition:background var(--d-fast) var(--e-standard),border-color var(--d-fast) var(--e-standard)}
+.card:hover{background:color-mix(in srgb, var(--c-text-1) 1.5%, var(--c-surface))}
+.card .t{font:400 var(--t-body-s) var(--f-sans);line-height:17px;color:var(--c-text-1)}
+.card .m{display:flex;align-items:center;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
+.card .m .k{flex:0 0 auto;font-family:var(--f-mono)}
+.card .m .d{margin-left:auto;flex:0 0 auto;font-family:var(--f-num)}
+.card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .w.neg{color:var(--c-negative)}
+
+.card.mine{border-color:var(--c-accent);box-shadow:inset 2px 0 0 var(--c-accent);
+           background:color-mix(in srgb, var(--c-accent) 4%, var(--c-surface))}
+.card.mine .w{color:var(--c-accent)}
+
+/* ── 抽屉 ──────────────────────────────────────────── */
+.scrim{position:fixed;inset:0;background:var(--c-scrim);opacity:0;pointer-events:none;transition:opacity var(--d-base) var(--e-standard);z-index:40}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:560px;max-width:92vw;background:var(--c-surface);border-left:1px solid var(--c-line-strong);transform:translateX(100%);visibility:hidden;transition:transform var(--d-base) var(--e-standard),visibility 0s linear var(--d-base);z-index:41;display:grid;grid-template-rows:auto minmax(0,1fr) auto}
+.drawer.on{transform:none;visibility:visible;transition:transform var(--d-base) var(--e-standard),visibility 0s}
+.dh{position:relative;padding:16px 24px 12px;border-bottom:1px solid var(--c-line)}
+.dh .k{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
+.dh h2{margin:4px 0 8px;font:600 var(--t-title-1) var(--f-sans);padding-right:32px}
+.dh .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dh .x{position:absolute;top:16px;right:20px;color:var(--c-text-4);font-size:12px}
+.chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-caption) var(--f-sans);background:var(--c-surface-2);color:var(--c-text-2)}
+.chip.dev{background:var(--c-accent-weak);color:var(--c-accent)}
+.chip.tst{background:var(--c-positive-weak);color:var(--c-positive)}
+.chip.wait{background:var(--c-warning-weak);color:var(--c-warning)}
+.dbody{overflow:auto}
+.dsec{padding:16px 24px;border-bottom:1px solid var(--c-line)}
+.dsec h3{margin:0 0 12px;font:600 var(--t-caption) var(--f-sans);letter-spacing:.06em;color:var(--c-text-3)}
+.db{display:flex;align-items:center;gap:8px;padding:12px 24px;border-top:1px solid var(--c-line-strong)}
+.db .sp{margin-left:auto}
+.db .hint{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4)}
+
+/* ── sheet ─────────────────────────────────────────── */
+.sheet{position:fixed;inset:0;display:none;place-items:center;z-index:50;background:var(--c-scrim)}
+.sheet.on{display:grid}
+.sheet .box{width:480px;background:var(--c-surface);border-radius:var(--r-md);box-shadow:var(--sh-overlay);overflow:hidden}
+.sheet .h{padding:16px 20px 12px;border-bottom:1px solid var(--c-line);font:600 var(--t-title-2) var(--f-sans)}
+.sheet .b{padding:16px 20px}
+.sheet .f{display:flex;gap:8px;padding:12px 20px;border-top:1px solid var(--c-line);justify-content:flex-end}
+.fld{margin-bottom:12px}
+.fld label{display:block;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);margin-bottom:4px}
+.fld input,.fld select{width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 10px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
+.fld .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* ── 甘特（views.css 里没有 .gantt 这个类名，这一组就是甘特组） ── */
+.ghead{display:grid;grid-template-columns:200px repeat(6,1fr);height:32px;border-bottom:1px solid var(--c-line-strong)}
+.ghead .lbl{display:flex;align-items:center;padding:0 12px;font:600 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.ghead .wk{display:flex;align-items:center;padding:0 8px;border-left:1px solid var(--c-line);font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
+.gbody{position:relative}
+.glines{position:absolute;left:200px;right:0;top:0;bottom:0;display:grid;grid-template-columns:repeat(6,1fr);pointer-events:none}
+.glines span{border-left:1px solid var(--c-line)}
+.glines span:first-child{border-left:0}
+.grel{position:absolute;top:0;bottom:0;border-left:1px dashed var(--c-text-2);pointer-events:none;z-index:1}
+.grow{display:grid;grid-template-columns:200px repeat(6,1fr);align-items:center;height:var(--h-row);border-bottom:1px solid var(--c-line);cursor:pointer}
+.grow:hover{background:var(--c-surface-2)}
+.glbl{display:flex;align-items:center;gap:8px;padding:0 12px;min-width:0;white-space:nowrap;overflow:hidden}
+.glbl .k{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
+.glbl .t{font:400 var(--t-body-s) var(--f-sans);overflow:hidden;text-overflow:ellipsis}
+.barx{grid-row:1;height:16px;border-radius:var(--r-xs);position:relative;z-index:2;display:flex;align-items:center;justify-content:flex-end}
+.barx span{font:600 var(--t-caption) var(--f-sans);color:var(--c-on-accent);padding-right:4px;line-height:1}
+.barx.dev{background:var(--c-accent)}
+.barx.tst{background:var(--c-positive)}
+.barx.neg{background:var(--c-negative)}
+.barx.pool{background:var(--c-line-strong)}

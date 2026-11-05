@@ -1,0 +1,76 @@
+/* silas-UX 设计变量 v1.0.0 · 由 tokens.json 生成，勿手改 */
+:root {
+  --c-bg: #F3F5F7;
+  --c-surface: #FFFFFF;
+  --c-surface-2: #F8F9FA;
+  --c-sunken: #ECEFF2;
+  --c-line: #E3E7EC;
+  --c-line-strong: #CCD3DB;
+  --c-text-1: #161A21;
+  --c-text-2: #3A4250;
+  --c-text-3: #5E6776;
+  --c-text-4: #8A92A0;
+  --c-accent: #2448D0;
+  --c-accent-weak: #EAEFFC;
+  --c-on-accent: #FFFFFF;
+  --c-positive: #07773F;
+  --c-positive-weak: #E3F3EA;
+  --c-negative: #B4232B;
+  --c-negative-weak: #FCECEC;
+  --c-warning: #8F5B00;
+  --c-warning-weak: #FBF1DC;
+  --c-scrim: rgba(22,26,33,0.40);
+
+  --f-sans: PingFang SC, HarmonyOS Sans SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans SC, system-ui, sans-serif;
+  --f-num: SF Pro Text, -apple-system, system-ui, sans-serif;
+  --f-mono: SF Mono, JetBrains Mono, Menlo, Consolas, monospace;
+
+  --t-display: 32px/38px;
+  --t-title-1: 20px/28px;
+  --t-title-2: 16px/24px;
+  --t-section: 15px/22px;
+  --t-body: 13px/20px;
+  --t-body-s: 12px/18px;
+  --t-caption: 11px/16px;
+
+  --s-0: 0;  --s-1: 4px;  --s-2: 8px;  --s-3: 12px;
+  --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+
+  --r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-pill: 999px;
+
+  --sh-overlay: 0 8px 24px rgba(22,26,33,0.12);
+  --d-fast: 120ms; --d-base: 200ms; --d-slow: 320ms;
+  --e-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  --h-control: 32px; --h-control-phone: 44px;
+  --h-row: 40px; --h-row-dense: 32px; --h-topbar: 56px;
+  --h-nav-phone: 44px; --h-status-phone: 24px; --h-btn-phone: 44px;
+  --h-device-phone-min: 680px; --h-table-head: 32px;
+
+  /* 布局断点（媒体查询里写数值，这里只作记录与 JS 读取） */
+  --bp-phone: 768px;
+  --bp-tablet: 1024px;
+  --bp-three-col-phone: 1271px;
+  --bp-three-col-wide: 1586px;
+  --bp-laptop: 1440px;
+  --bp-desktop: 1920px;
+}
+
+[data-theme="dark"] {
+  --c-bg: #000000;
+  --c-surface: #141416;
+  --c-surface-2: #1F1F23;
+  --c-sunken: #2A2A2F;
+  --c-line: #2C2C31;
+  --c-line-strong: #3A3A41;
+  --c-text-1: #F2F2F4;
+  --c-text-2: #A1A1AA;
+  --c-text-3: #8B8B95;
+  --c-text-4: #6E6E78;
+  --c-accent: #F5A524;
+  --c-accent-weak: rgba(245,165,36,.14);
+  --c-on-accent: #000000;
+  --c-positive: #3DD68C;
+  --c-negative: #FF6369;
+  --c-warning: #F5A524;
+}
