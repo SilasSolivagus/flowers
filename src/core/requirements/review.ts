@@ -11,6 +11,8 @@ import { lockRequirement, moveTo, type Tx } from './lock.js';
  * 唯一消费者是本文件的 assignReviewer。用例里刻意写死评审人姓名（'赵越' / '吕正豪'），
  * 不从这里反查——否则实现改错映射时，测试会跟着错，等于自己给自己盖章。
  */
+const NOT_REVIEWER = '签字人不是这条需求派单到的评审人';
+
 const REVIEWER_ROLE = {
   commercial: 'commercial_reviewer',
   feature: 'feature_reviewer',
@@ -52,6 +54,37 @@ export async function assignReviewer(tx: Tx, requirementId: string, type: string
 }
 
 /**
+ * 签字人必须是派单上的那个人（R29）。
+ *
+ * spec §2：「评审人由需求的类型决定，不是由人挑。」派单（assignReviewer）只保证了
+ * 「派给谁」，签字这一步从前只把 actor 写进事件——谁都能签。这里把它闭合：
+ * actor（成员姓名，整套服务对外都用姓名标识人）必须等于这条需求 handed 派单上的
+ * reviewer_member_id。
+ *
+ * 三种不匹配一律 not_reviewer，用同一句话：
+ * - 姓名对不上派单上的评审人；
+ * - 这个名字在 members 里根本不存在；
+ * - 这条需求没有 handed 派单（不该发生，状态机保证 review 态一定有，但兜底）。
+ *
+ * 为什么不为「查无此人」单开一个错误码：那会变成一张「谁是成员」的探测器
+ * （拿任意名字试，凭错误码差异枚举出花名册），而用户能做的动作是一样的——找对的人来签。
+ * 顺序在 assertTrigger 之后：先回答「这一步能不能做」，再回答「你能不能做」。
+ */
+async function assertReviewer(tx: Tx, requirementId: string, actor: string): Promise<void> {
+  const found = await tx.execute<{ reviewer_member_id: string; actor_id: string | null }>(sql`
+    select ra.reviewer_member_id,
+           (select m.id from members m where m.name = ${actor}) as actor_id
+      from review_assignments ra
+     where ra.requirement_id = ${requirementId} and ra.verdict = 'handed'
+     order by ra.id
+     limit 1`);
+  const row = found.rows[0];
+  if (!row || row.actor_id === null || row.actor_id !== row.reviewer_member_id) {
+    throw new AppError('not_reviewer', NOT_REVIEWER);
+  }
+}
+
+/**
  * 通过：review → queue（进待排期），并把这条需求的 handed 派单收口成 passed。
  */
 export async function reviewPass(db: Db, actor: string, raw: unknown) {
@@ -64,6 +97,7 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
     // 只按配对判断是不够的：inbox → design 是合法的一对（那是评估的路子），
     // 所以光看配对，对一条还在 inbox 的需求点「通过」会骑着它走到别处。
     assertTrigger(row.state, 'queue', 'review_pass');
+    await assertReviewer(tx, requirementId, actor);
 
     await moveTo(tx, requirementId, 'queue');
     await tx.execute(sql`
@@ -96,6 +130,7 @@ export async function reviewReject(db: Db, actor: string, raw: unknown) {
     // 同上：inbox → design 是合法配对，所以一条 inbox 的需求直接点打回会「成功」，
     // 等于白送一次评估。钉住 trigger，措辞也因此变成「当前在「收集」，不能执行这一步」。
     assertTrigger(row.state, 'design', 'review_reject');
+    await assertReviewer(tx, requirementId, actor);
 
     await moveTo(tx, requirementId, 'design');
     await tx.execute(sql`

@@ -486,6 +486,56 @@ describe('评审派单、通过与打回', () => {
     });
   });
 
+  /**
+   * R29：签字人必须是派单上的那个人。
+   *
+   * spec §2 说「评审人由类型决定，不是由人挑」——派单保证了「派给谁」，而签字这一步
+   * 从前只把 actor 写进事件，谁都能签。这组用例钉住它现在闭合在签字时刻。
+   */
+  it('非派单评审人点通过 / 打回都是 not_reviewer，行与派单都不动', async () => {
+    const r = await inReview();
+    const before = await eventCountOf(r.id);
+
+    // 吕品是 PM，不是这条需求的评审人。
+    expect(await caught(reviewPass(db, '吕品', { requirementId: r.id }))).toMatchObject({
+      code: 'not_reviewer', message: '签字人不是这条需求派单到的评审人',
+    });
+    expect(await caught(reviewReject(db, '吕品', {
+      requirementId: r.id, reason: '不行',
+    }))).toMatchObject({
+      code: 'not_reviewer', message: '签字人不是这条需求派单到的评审人',
+    });
+
+    expect((await rowOf(r.id)).state).toBe('review');
+    expect(await assignmentsOf(r.id)).toMatchObject([{ name: '吕正豪', verdict: 'handed' }]);
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('商业类的需求，功能线评审人也签不了（类型决定评审人，签字时刻同样成立）', async () => {
+    const c = await inReview('commercial', 'https://y');
+    expect(await reviewerOf(c.id)).toBe('赵越');
+
+    expect(await caught(reviewPass(db, '吕正豪', { requirementId: c.id }))).toMatchObject({
+      code: 'not_reviewer', message: '签字人不是这条需求派单到的评审人',
+    });
+    // 派单上的那个人可以签。
+    expect((await reviewPass(db, '赵越', { requirementId: c.id })).state).toBe('queue');
+  });
+
+  it('花名册里没有的名字也是 not_reviewer（不单开错误码，不给花名册探测器）', async () => {
+    const r = await inReview();
+
+    // 「查无此人」与「不是这个人」用同一句话：如果分开，拿任意名字试就能枚举出成员。
+    expect(await caught(reviewPass(db, '张三', { requirementId: r.id }))).toMatchObject({
+      code: 'not_reviewer', message: '签字人不是这条需求派单到的评审人',
+    });
+    expect((await rowOf(r.id)).state).toBe('review');
+    // 空串同理：不是成员，不是派单评审人。
+    expect(await caught(reviewPass(db, '', { requirementId: r.id }))).toMatchObject({
+      code: 'not_reviewer',
+    });
+  });
+
   it('不在待评审状态时通过 / 打回都报 illegal_transition', async () => {
     const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: fresh.id }))).toMatchObject({
