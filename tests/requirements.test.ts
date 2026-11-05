@@ -841,21 +841,14 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   }
 
   /**
-   * 北京时间的「今天」偏移 offsetDays 天，形如 '2026-11-06'。
+   * 冻结的「现在」。
    *
-   * 服务端是按 Asia/Shanghai 的**日历日**判「今天」的，用例必须用同一口径生成边界值：
-   * 直接写死 '2026-11-05' / '2026-11-06' 会在第二天变成「两天前 / 昨天」，用例自己就烂掉；
-   * 而拿时刻（Date.now() - 86400000）当边界会让「今天」随运行的小时数漂移。
+   * R23 的底线（新完成日不能早于今天）让 bounce 依赖「今天」，而这些用例的日期是
+   * 固定的 2026-12 叙事：不冻结时钟，它们在 2026-12-10 之后会逐条腐烂。R24 让
+   * bounce 接受注入的 now，这里传一个早于 12-10 / 12-20 的时刻，叙事原样保留。
+   * 生产调用方不传这个参数（见下面「不传 now」那条用例）。
    */
-  function todayInShanghai(offsetDays: number): string {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-    }).formatToParts(new Date());
-    const part = (type: string) => parts.find((p) => p.type === type)!.value;
-    const day = new Date(`${part('year')}-${part('month')}-${part('day')}T00:00:00Z`);
-    day.setUTCDate(day.getUTCDate() + offsetDays);
-    return day.toISOString().slice(0, 10);
-  }
+  const NOW = new Date('2026-12-03T00:00:00+08:00');
 
   /** 最后一条 requirement.bounced 事件；没有就返回 null。 */
   async function bouncedEventOf(id: string) {
@@ -920,7 +913,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     // 前后各留空白：落库与事件里都应该是 trim 后的值。
     const out = await bounce(db, '王妍', {
       requirementId: id, reason: '  自测没过  ', newCommitDueAt: '2026-12-10',
-    });
+    }, NOW);
     expect(out.state).toBe('dev');
 
     const row = await datesOf(id);
@@ -959,24 +952,45 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   });
 
   it('新承诺完成日早于今天就直接拒绝，今天本身合法（R23）', async () => {
-    // 日期打错一年（'2020-12-10' 写成 '2026-12-10' 的反面）会把「没做出来」变成「已上线」：
-    // 这类需求的 commit_test_at 也已经过去，下一次 tick 会连推两步 dev → test → live，
-    // 全程没有一个人工动作。所以新完成日不能落在今天之前。
+    // 日期打错一年会把「没做出来」变成「已上线」：这类需求的 commit_test_at 也已经过去，
+    // 下一次 tick 会连推两步 dev → test → live，全程没有一个人工动作。
+    //
+    // 「今天」由注入的 now 决定（R24），所以这里的边界是 2027-03-11，而不是跑用例的那天：
+    // 写死日期 + 冻结时刻，两条边界都不会随日历腐烂。两个 now 落在同一个北京日、不同钟点，
+    // 顺带钉住「按天比、不按时刻比」——按时刻比的话，'2027-03-11' 零点的承诺在 23:59 的
+    // 那次迭代里就会被判成过去。
+    for (const now of [
+      new Date('2027-03-10T16:30:00.000Z'),   // 北京 2027-03-11 00:30
+      new Date('2027-03-11T15:59:00.000Z'),   // 北京 2027-03-11 23:59
+    ]) {
+      const id = await inTest();
+      const before = await eventCountOf(id);
+
+      // '2027-03-10' 是北京的昨天，按 UTC 却还是「今天」：按时刻比会放过它。
+      expect(await caught(bounce(db, '王妍', {
+        requirementId: id, reason: '自测没过', newCommitDueAt: '2027-03-10',
+      }, now))).toMatchObject({ code: 'bad_new_due', message: '承诺完成日不能早于今天' });
+      expect(await stateOfRow(id)).toBe('test');
+      expect(await eventCountOf(id)).toBe(before);
+
+      // 今天当天合法：承诺「今天就上线」是真实的（虽然乐观），它不能被自己的日期挡在门外。
+      const out = await bounce(db, '王妍', {
+        requirementId: id, reason: '自测没过', newCommitDueAt: '2027-03-11',
+      }, now);
+      expect(out.state).toBe('dev');
+      expect(iso((await datesOf(id)).commit_due_at)).toBe('2027-03-11T00:00:00.000Z');
+    }
+  });
+
+  it('不传 now 时按真实时钟判断，远期日期照常通过（默认参数）', async () => {
+    // 生产调用方就是三个参数。用 2099 而不是 2026-12-10 之类的日期：这条用例一旦
+    // 自己带一个到期日，就会跟着日历腐烂，而它要证明的只是「不传 now 也能跑」。
     const id = await inTest();
-    const before = await eventCountOf(id);
-
-    expect(await caught(bounce(db, '王妍', {
-      requirementId: id, reason: '自测没过', newCommitDueAt: todayInShanghai(-1),
-    }))).toMatchObject({ code: 'bad_new_due', message: '承诺完成日不能早于今天' });
-    expect(await stateOfRow(id)).toBe('test');
-    expect(await eventCountOf(id)).toBe(before);
-
-    // 今天当天合法：承诺「今天就上线」是真实的（虽然乐观），它不能被自己的日期挡在门外。
     const out = await bounce(db, '王妍', {
-      requirementId: id, reason: '自测没过', newCommitDueAt: todayInShanghai(0),
+      requirementId: id, reason: '自测没过', newCommitDueAt: '2099-12-31',
     });
     expect(out.state).toBe('dev');
-    expect(iso((await datesOf(id)).commit_due_at)).toBe(`${todayInShanghai(0)}T00:00:00.000Z`);
+    expect(iso((await datesOf(id)).commit_due_at)).toBe('2099-12-31T00:00:00.000Z');
   });
 
   it.each(['dev', 'design', 'inbox'])('从「%s」打回报 illegal_transition，行不动', async (from) => {
@@ -986,7 +1000,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
 
     expect(await caught(bounce(db, '王妍', {
       requirementId: r.id, reason: '自测没过', newCommitDueAt: '2026-12-10',
-    }))).toMatchObject({
+    }, NOW))).toMatchObject({
       code: 'illegal_transition', message: `不能从「${from}」直接到「dev」`,
     });
 
@@ -1005,7 +1019,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
 
     expect(await caught(bounce(db, '王妍', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
-    }))).toMatchObject({
+    }, NOW))).toMatchObject({
       code: 'illegal_transition', message: '不能从「ready」直接到「dev」',
     });
 
@@ -1019,7 +1033,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     expect(await caught(bounce(db, '王妍', {
       requirementId: '00000000-0000-0000-0000-000000000000',
       reason: '自测没过', newCommitDueAt: '2026-12-10',
-    }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+    }, NOW))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
   });
 
   it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
@@ -1044,9 +1058,11 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   it('打回后一次 tick 就回到测试中，上线仍等新的承诺完成日（R17）', async () => {
     const id = await inTest();
 
+    // 注入的 now（NOW = 12-03）与下面第一个 tick 的时刻一致：tick 的 now 与 bounce 的
+    // now 对「今天」的口径必须相同，否则「12-20 是未来」这件事两边会各说一套。
     await bounce(db, '王妍', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-20',
-    });
+    }, NOW);
     const bounced = await datesOf(id);
     expect(bounced.state).toBe('dev');
     expect(iso(bounced.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');

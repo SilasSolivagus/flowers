@@ -28,7 +28,7 @@ function parseNewDueOrThrow(text: string): Date {
  *
  * 按「天」比较，不按时刻：'2026-11-06' 是日历日，按时刻比会让「今天」取决于现在几点。
  * 折算天数复用 tick 里的 shanghaiDayOf——全库只有那一处把时刻折成北京时间的第几天，
- * 打回与时钟对「今天」的理解因此不可能分叉。
+ * 打回与时钟对「今天」的理解因此不可能分叉（同一个 instant ⇒ 同一个整数天）。
  *
  * 今天本身合法：承诺「今天就上线」是真实的（虽然乐观）。
  *
@@ -36,9 +36,9 @@ function parseNewDueOrThrow(text: string): Date {
  * 会连推两步 dev → test → live，全程没有一个人工动作——日期打错一年（'2020-12-10'
  * 本该是 '2026-12-10'）就把「没做出来」直接写成「已上线」。
  */
-function assertNotBeforeToday(dueAt: Date): void {
+function assertNotBeforeToday(dueAt: Date, now: Date): void {
   const dueDay = shanghaiDayOf(dueAt.toISOString());
-  const today = shanghaiDayOf(new Date().toISOString());
+  const today = shanghaiDayOf(now.toISOString());
   // today 为 null 只可能来自系统时钟本身非法；那时比较会静默放行，宁可拦。
   if (dueDay === null || today === null || dueDay < today) {
     throw new AppError('bad_new_due', BEFORE_TODAY);
@@ -72,7 +72,13 @@ function assertBounceTransition(
  * → 日期不早于今天（R23）。
  * 两个字段都缺时先报 missing_new_due：日期是这条迁移的成立条件，原因只是记录。
  */
-export async function bounce(db: Db, actor: string, raw: unknown) {
+export async function bounce(
+  db: Db, actor: string, raw: unknown,
+  // R24：now 只为可测——这道底线要和「今天」比，而用例里的日期是固定的 2026-12 叙事，
+  // 不注入时钟就会在 2026-12-10 之后逐条腐烂。生产调用方不传，默认取真实时钟；
+  // 形状与 tick(db, now) 一致，两处对「今天」的口径因此可以直接对齐着测。
+  now: Date = new Date(),
+) {
   // 入参先挡住：非对象会抛 TypeError，非 uuid 会让 PG 抛 22P02，两者都不是 AppError。
   const input = requirePlainObject(raw);
 
@@ -88,7 +94,7 @@ export async function bounce(db: Db, actor: string, raw: unknown) {
 
   const requirementId = parseRequirementId(input);
   const dueAt = parseNewDueOrThrow(newCommitDueAt);
-  assertNotBeforeToday(dueAt);
+  assertNotBeforeToday(dueAt, now);
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
