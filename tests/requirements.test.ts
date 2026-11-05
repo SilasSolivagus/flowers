@@ -5,9 +5,10 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
+import { schedule } from '../src/core/requirements/schedule.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
-import { reviewerOf } from './helpers/factory.js';
+import { makeQueued, makeRelease, reviewerOf } from './helpers/factory.js';
 
 beforeEach(async () => {
   await resetDb();
@@ -555,6 +556,255 @@ describe('评审派单、通过与打回', () => {
     });
     expect(await caught(reviewReject(db, '吕正豪', {
       requirementId: id, reason: '不行',
+    } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
+  });
+});
+
+/** 读排期相关的列。timestamptz 经 pg 文本协议回来是字符串，比较前先过 Date。 */
+async function scheduledColumnsOf(id: string) {
+  const res = await db.execute<{
+    state: string; release_id: string | null; commit_test_at: string | null; commit_due_at: string | null;
+  }>(sql`select state, release_id, commit_test_at, commit_due_at from requirements where id = ${id}`);
+  return res.rows[0]!;
+}
+
+/** timestamptz 字符串（'2026-12-04 00:00:00+00'）→ 可比较的 ISO 串。 */
+const iso = (value: string | null) => (value === null ? null : new Date(value).toISOString());
+
+describe('排期（三个日期）', () => {
+  const MISSING_DATES = '排期必须填版本、提测日和承诺完成日';
+
+  it('三个日期齐全才能排期', async () => {
+    const r = await makeQueued();
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const before = await eventCountOf(r.id);
+
+    // 三个都缺
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: null, commitTestAt: null, commitDueAt: null,
+    }))).toMatchObject({ code: 'missing_dates', message: MISSING_DATES });
+    // 只缺承诺完成日
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01',
+    }))).toMatchObject({ code: 'missing_dates', message: MISSING_DATES });
+    // 只缺提测日（空白也算缺）
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '   ', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'missing_dates', message: MISSING_DATES });
+    // 只缺版本
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: '', commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'missing_dates', message: MISSING_DATES });
+
+    expect(await scheduledColumnsOf(r.id)).toMatchObject({
+      state: 'queue', release_id: null, commit_test_at: null, commit_due_at: null,
+    });
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('完成日早于提测日 或 晚于发版日 都拒绝', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-03', commitDueAt: '2026-12-02',
+    }))).toMatchObject({ code: 'bad_dates', message: '承诺完成日不能早于提测日' });
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-10',
+    }))).toMatchObject({ code: 'bad_dates', message: '承诺完成日不能晚于版本发版日' });
+
+    // 两条拒绝路径都不许留下半截写入，也不许写事件。
+    expect(await scheduledColumnsOf(r.id)).toMatchObject({
+      state: 'queue', release_id: null, commit_test_at: null, commit_due_at: null,
+    });
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('排期后进待开发', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    const out = await schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    });
+    expect(out.state).toBe('ready');
+  });
+
+  it('排期落库：state / 版本 / 两个日期都在，并刷新 state_entered_at', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    await backdate(r.id);
+
+    await schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    });
+
+    const row = await scheduledColumnsOf(r.id);
+    expect(row.state).toBe('ready');
+    expect(row.release_id).toBe(rel);
+    expect(iso(row.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');
+    expect(iso(row.commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
+    expect(new Date((await rowOf(r.id)).state_entered_at).getTime()).toBeGreaterThan(
+      new Date('2020-01-01T00:00:00Z').getTime(),
+    );
+  });
+
+  it('排期写一条事件，payload 带版本和两个日期', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    await schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    });
+
+    const rows = await db.execute<{ type: string; actor: string; payload: string }>(
+      sql`select type, actor, payload from events where requirement_id = ${r.id} order by seq`);
+    const last = rows.rows[rows.rows.length - 1]!;
+    expect(last).toMatchObject({ type: 'requirement.scheduled', actor: '吕品' });
+    expect(JSON.parse(last.payload)).toMatchObject({
+      from: 'queue', to: 'ready',
+      releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    });
+  });
+
+  it('边界：完成日等于提测日、也等于发版日都放行', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+
+    // 提测日 = 承诺完成日 = 发版日：两条不等式都取等号。
+    const same = await makeQueued();
+    expect((await schedule(db, '吕品', {
+      requirementId: same.id, releaseId: rel, commitTestAt: '2026-12-04', commitDueAt: '2026-12-04',
+    })).state).toBe('ready');
+    expect(iso((await scheduledColumnsOf(same.id)).commit_due_at)).toBe('2026-12-04T00:00:00.000Z');
+
+    // 提测日在前、承诺完成日正好压在发版日上：也放行。
+    const edge = await makeQueued();
+    expect((await schedule(db, '吕品', {
+      requirementId: edge.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    })).state).toBe('ready');
+  });
+
+  it('边界：承诺完成日晚发版日一天就拒绝（发版日是字符串，不能直接比）', async () => {
+    // release_date 经 pg 文本协议回来是 '2026-12-04 00:00:00+00' 这样的字符串。
+    // 若直接拿 Date 和它比大小，比较会退化成 NaN 比较、永远为 false，
+    // 「晚于发版日」这条约束会静默失效——这条用例就是钉住它必须真的拦住。
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    const before = await eventCountOf(r.id);
+
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-03', commitDueAt: '2026-12-05',
+    }))).toMatchObject({ code: 'bad_dates', message: '承诺完成日不能晚于版本发版日' });
+
+    expect(await scheduledColumnsOf(r.id)).toMatchObject({
+      state: 'queue', release_id: null, commit_test_at: null, commit_due_at: null,
+    });
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('不在待排期状态时排期报 illegal_transition，且不覆盖已有排期', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+
+    // inbox 直接排期
+    const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: fresh.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「inbox」直接到「ready」' });
+    expect((await scheduledColumnsOf(fresh.id)).state).toBe('inbox');
+
+    // 已经排过期的再排一次
+    const done = await makeQueued();
+    await schedule(db, '吕品', {
+      requirementId: done.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-03',
+    });
+    const before = await eventCountOf(done.id);
+    const other = await makeRelease('2027.01', '2027-01-01', '2027-01-08');
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: done.id, releaseId: other, commitTestAt: '2027-01-05', commitDueAt: '2027-01-06',
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「ready」直接到「ready」' });
+
+    const kept = await scheduledColumnsOf(done.id);
+    expect(kept.release_id).toBe(rel);
+    expect(iso(kept.commit_test_at)).toBe('2026-12-01T00:00:00.000Z');
+    expect(iso(kept.commit_due_at)).toBe('2026-12-03T00:00:00.000Z');
+    expect(await eventCountOf(done.id)).toBe(before);
+  });
+
+  it('并发双排期只有一次成功，另一次被行锁挡住', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    const before = await eventCountOf(r.id);
+
+    const results = await Promise.allSettled([
+      schedule(db, '吕品', {
+        requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-02',
+      }),
+      schedule(db, '吕品', {
+        requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-02', commitDueAt: '2026-12-03',
+      }),
+    ]);
+    const ok = results.filter((x) => x.status === 'fulfilled');
+    const bad = results.filter((x) => x.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(bad).toHaveLength(1);
+
+    const reason = (bad[0] as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(AppError);
+    expect(reason).toMatchObject({
+      code: 'illegal_transition', message: '不能从「ready」直接到「ready」',
+    });
+
+    // 只有一次写成功：一条事件，日期是两次提交里合法的那一个。
+    expect(await eventCountOf(r.id)).toBe(before + 1);
+    const row = await scheduledColumnsOf(r.id);
+    expect(row.state).toBe('ready');
+    expect([iso(row.commit_due_at)]).toEqual([
+      expect.stringMatching(/^2026-12-0(2|3)T00:00:00\.000Z$/),
+    ]);
+  });
+
+  it('版本不存在时给中文 not_found，需求留在待排期', async () => {
+    const r = await makeQueued();
+    const before = await eventCountOf(r.id);
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id,
+      releaseId: '00000000-0000-0000-0000-000000000000',
+      commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'not_found', message: '找不到这个版本' });
+
+    expect((await scheduledColumnsOf(r.id)).state).toBe('queue');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
+  it('需求不存在时给中文 not_found', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: '00000000-0000-0000-0000-000000000000',
+      releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
+  });
+
+  it('日期不是有效日期就报 bad_dates，不把 Invalid Date 写进库', async () => {
+    const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
+    const r = await makeQueued();
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '不是日期', commitDueAt: '2026-12-04',
+    }))).toMatchObject({ code: 'bad_dates', message: '提测日和承诺完成日必须是有效日期' });
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: r.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-13-45',
+    }))).toMatchObject({ code: 'bad_dates', message: '提测日和承诺完成日必须是有效日期' });
+    expect((await scheduledColumnsOf(r.id)).state).toBe('queue');
+  });
+
+  it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
+    expect(await caught(schedule(db, '吕品', body))).toMatchObject({
+      code: 'invalid', message: '参数不合法',
+    });
+  });
+
+  it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
+    expect(await caught(schedule(db, '吕品', {
+      requirementId: id, releaseId: '00000000-0000-0000-0000-000000000000',
+      commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
     } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
   });
 });
