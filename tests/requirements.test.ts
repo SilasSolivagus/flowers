@@ -239,6 +239,9 @@ describe('submitReview', () => {
       .toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
     expect(await caught(submitReview(db, '吕品', { requirementId: r.id, prdUrl: '   ' })))
       .toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
+    // 字段整个缺失（运行时 undefined）也必须落到同一个 AppError，而不是 TypeError。
+    expect(await caught(submitReview(db, '吕品', { requirementId: r.id } as never)))
+      .toMatchObject({ code: 'missing_prd', message: '提交评审必须填正式 PRD 链接' });
 
     expect((await rowOf(r.id)).state).toBe('design');
     expect(await eventCountOf(r.id)).toBe(before);

@@ -19,7 +19,10 @@ export const SKIP_EVALUATION_REASON = '跳过评估，直接提交 PRD';
 export async function submitReview(
   db: Db, actor: string, input: { requirementId: string; prdUrl: string },
 ) {
-  const url = input.prdUrl.trim();
+  // 类型上是 string，但运行时可能整个字段缺失（控制器直接透传 body）。
+  // 先归一成字符串，否则 .trim() 会抛 TypeError，前端拿到的是 500 而不是中文错误。
+  const rawUrl = typeof input.prdUrl === 'string' ? input.prdUrl : '';
+  const url = rawUrl.trim();
   if (!url) throw new AppError('missing_prd', '提交评审必须填正式 PRD 链接');
 
   return db.transaction(async (tx) => {
