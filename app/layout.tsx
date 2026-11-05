@@ -1,9 +1,9 @@
 import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
-import Link from 'next/link';
 import type { ReactNode } from 'react';
 
 import { MemberSwitch } from './components/MemberSwitch';
+import { RailNav } from './components/RailNav';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -32,12 +32,11 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
           <nav className="rail">
             <h1>Flower</h1>
             <div className="sub">123云盘 · 产品研发</div>
-            <Link href="/">需求</Link>
-            <Link href="/releases">版本</Link>
-            <Link href="/settings">设置</Link>
+            <RailNav />
           </nav>
           <div className="main">
             <header className="topbar">
+              <span className="sp" />
               <MemberSwitch current={actor} />
             </header>
             {children}
