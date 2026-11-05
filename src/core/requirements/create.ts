@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
-import { AppError } from '../errors.js';
+import { AppError, withPgErrors } from '../errors.js';
 import { isPlainObject } from '../validate.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
@@ -34,18 +34,20 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
   }
   const input = parsed.data;
 
-  return db.transaction(async (tx) => {
-    const next = await tx.execute<{ n: number }>(sql`select coalesce(max(number),0)+1 as n from requirements`);
-    const number = Number(next.rows[0]!.n);
-    const inserted = await tx.execute<{ id: string; state: string }>(sql`
-      insert into requirements (number, title, type, state, requester, owner_member_id)
-      values (${number}, ${input.title}, ${input.type}, 'inbox', ${input.requester}, ${input.ownerMemberId ?? null})
-      returning id, state`);
+  // `number` 由 requirements_number_seq 分配（列上有 default），这里**不写**它，
+  // 也不再扫 `max(number)+1`：并发建需求时两个事务会读到同一个 max，输的那个撞
+  // requirements_number_unique。序列的 nextval 是原子的，且不参与事务。
+  return withPgErrors(() => db.transaction(async (tx) => {
+    const inserted = await tx.execute<{ id: string; number: number; state: string }>(sql`
+      insert into requirements (title, type, state, requester, owner_member_id)
+      values (${input.title}, ${input.type}, 'inbox', ${input.requester}, ${input.ownerMemberId ?? null})
+      returning id, number, state`);
     const row = inserted.rows[0]!;
+    const number = Number(row.number);
     await recordEvent(tx, {
       requirementId: row.id, actor, type: 'requirement.created',
       payload: { number, title: input.title, type: input.type },
     });
     return { id: row.id, number, state: row.state as 'inbox' };
-  });
+  }));
 }

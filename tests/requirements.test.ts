@@ -124,17 +124,23 @@ describe('createRequirement', () => {
     });
   });
 
-  it('编号取 max(number)+1，不复用空洞', async () => {
-    await db.execute(sql`
-      insert into requirements (number, title, type, state, requester)
-      values (7, '历史需求', 'feature', 'inbox', '孙建宏')`);
-
+  /**
+   * C1 之后编号来自 requirements_number_seq，不再扫 `max(number)+1`。
+   * 语义差别就在这条用例里：序列**不回填空洞**（删掉的号不会被下一个需求捡走），
+   * 而 max+1 会把空洞填上——这正是它并发不安全的来源（两个事务读同一个 max）。
+   */
+  it('编号由序列分配，删掉的号不复用', async () => {
     const a = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     const b = await createRequirement(db, '吕品', { title: 'b', type: 'commercial', requester: 'c' });
-    expect([a.number, b.number]).toEqual([8, 9]);
+    expect([a.number, b.number]).toEqual([1, 2]);
+
+    // 删掉中间那条：3 号已经是历史，不回填。
+    await db.execute(sql`delete from requirements where id = ${b.id}`);
+    const c = await createRequirement(db, '吕品', { title: 'c', type: 'feature', requester: 'd' });
+    expect(c.number).toBe(3);
 
     const rows = await db.execute<{ number: number }>(sql`select number from requirements order by number`);
-    expect(rows.rows.map((r) => Number(r.number))).toEqual([7, 8, 9]);
+    expect(rows.rows.map((r) => Number(r.number))).toEqual([1, 3]);
   });
 
   it('事件写失败时需求也回滚（同一事务）', async () => {
