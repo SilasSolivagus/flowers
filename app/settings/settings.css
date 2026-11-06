@@ -31,7 +31,6 @@
 .sg .i .l{min-width:0}
 .sg .i .l b{display:block;font:500 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
 .sg .i .v{margin-left:auto;min-width:0;text-align:right;color:var(--c-text-2);font:400 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
-.sg .i .v.mono{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-3)}
 
 /* 工作流是**有序**列表，序号是信息（状态机的顺序），所以用 <ol>：
    屏幕阅读器念「10 项，第 1 项」比念十行并列的键值对更接近它本来是什么。

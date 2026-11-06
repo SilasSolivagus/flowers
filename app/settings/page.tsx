@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
@@ -15,7 +16,8 @@ import './settings.css';
  *
  * 数据只有两个来源，都从读模型来，页面不自己连库也不自己算：
  * - `listMembers()` / `currentMember()`（src/core/read/member.ts）；
- * - `STATE_LABEL`（src/core/state-machine.ts）——十个状态的中文名在整个仓库里只有这一份。
+ * - `BOARD_STATES`（src/core/read/board.ts）——十个状态**谁在前**的唯一契约；
+ *   中文名仍取自 `STATE_LABEL`（src/core/state-machine.ts），全仓库只有那一份。
  *
  * 两条来自评审的硬口径：
  * - **屏上不出现解释性文案**：没有「配置说明」「暂无更多设置」，只有行标签与值。
@@ -35,14 +37,16 @@ const TABS: ReadonlyArray<{ id: TabId; href: string; label: string }> = [
 /**
  * 工作流的十行，按状态机顺序。
  *
- * 顺序取自 `STATE_LABEL` 的**字面量书写顺序**（`inbox…shelved`，与 `State` 联合类型的
- * 顺序一致；JS 保证非数字字符串键按插入序枚举）。这样这一页既不抄第二份中文名，
- * 也不抄第二份顺序——状态机改了，这里跟着改，改错了会在同一次改动里暴露。
- * 反过来若在这里写死 `['inbox', 'design', …]`，它就是一张会慢慢走样的副本。
- * （P5 候选：core 导出 `STATE_ORDER`，把「顺序」也变成显式契约，别依赖对象键序。）
+ * 顺序取自 `BOARD_STATES`（src/core/read/board.ts）：那是仓库里唯一一处把「十个状态谁在前」
+ * 写成显式契约的地方，看板的列序也用它，用例独立钉住了它（tests/read.test.ts 抄的是
+ * spec 里的十个数）。那份常量自己的注释已经拒绝了「从 `STATE_LABEL` 的键派生」这条路：
+ * JS 对象的键序是**声明序**，今天恰好也是流程序，但那是没人维护的巧合。
+ *
+ * 所以这里一行顺序都不抄：顺序问 `BOARD_STATES`，中文名问 `STATE_LABEL`。
+ * 状态机改了它们跟着改，改错了会在同一次改动里暴露（而不是在这一页悄悄走样）。
  */
 const WORKFLOW: ReadonlyArray<{ state: State; label: string }> =
-  (Object.keys(STATE_LABEL) as State[]).map((state) => ({ state, label: STATE_LABEL[state] }));
+  BOARD_STATES.map((state) => ({ state, label: STATE_LABEL[state] }));
 
 export default async function SettingsPage({
   searchParams,
@@ -134,7 +138,14 @@ function ProjectPanel({ members }: { members: Member[] }) {
       </section>
 
       {/* 「评审人由类型决定」（spec §2）在界面上的那一半：
-          类型 → 覆盖它的角色 → 那个角色现在是谁。界面上不做派单，只把这条规则摊开。 */}
+          类型 → 覆盖它的角色 → 那个角色现在是谁。界面上不做派单，只把这条规则摊开。
+
+          值里带上**角色名**（评审 M1，`REVIEW_LINE[].role` 之前是个只写不读的字段）：
+          只写「赵越」的话，读者得滚回上面的成员表才能知道他是哪条线的评审人——
+          而这一节要说的恰恰是「哪个类型配哪条线」。角色名在前、人名在后，
+          顺序就是规则本身的顺序；同角色多人时仍全部列出（见 memberNamesOfRole）。
+          没人配这个角色时只说「未配置」：那时角色名也一样是空话。
+          `roleLabel` 与成员表共用同一份中文名（M2），两处不会说法不一。 */}
       <section className="sg">
         <div className="h">评审线</div>
         {REVIEW_LINE.map((line) => {
@@ -142,14 +153,16 @@ function ProjectPanel({ members }: { members: Member[] }) {
           return (
             <div className="i" key={line.type}>
               <div className="l"><b>{line.label}</b></div>
-              <div className="v">{names.length === 0 ? '未配置' : names.join('、')}</div>
+              <div className="v">
+                {names.length === 0 ? '未配置' : `${roleLabel(line.role)} · ${names.join('、')}`}
+              </div>
             </div>
           );
         })}
       </section>
 
       {/* 十个状态，按状态机顺序，只读。序号（01–10）就是顺序本身——它不来自数据库，
-          来自 STATE_LABEL 的书写顺序；这一列存在的理由只是让「这是有序的」看得见。 */}
+          来自 BOARD_STATES；这一列存在的理由只是让「这是有序的」看得见。 */}
       <section className="sg">
         <div className="h">工作流</div>
         <ol className="wf">

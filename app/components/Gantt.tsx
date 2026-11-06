@@ -77,6 +77,13 @@ export function Gantt({ release }: { release: Release }) {
     const test = item.commitTestAt === null ? null : shanghaiDayOf(item.commitTestAt);
     const due = item.commitDueAt === null ? null : shanghaiDayOf(item.commitDueAt);
     const from = Math.min(Math.max(test !== null && test > startDay ? test : startDay, startDay), releaseDay);
+    // 承诺完成日夹到轴上：晚了就压在发版日那一列，**早了就压在开工日那一列**（R45）。
+    // 早于窗口开始是排期允许的——`schedule()` 只门禁「提测 ≤ 承诺 ≤ 发版日」，
+    // 没有一条要求承诺 ≥ 窗口开始——所以这条分支是可达的，不是防御性代码。
+    // 夹到一列的条，`span` 因此**不是工期**（真实工期可能是零或负的），它只是
+    // 「这条在版本开始前就该完成」这个事实在轴上能占的最小宽度。别据此读时长：
+    // 那件事由色档说——`late` 会把这条画成延期档（`barTone` 的 `neg`），
+    // 一列宽的延期条就是这句话本身。反过来「不画」会把信号从最该看见迟到的那一页上删掉。
     const to = due === null ? null : Math.min(Math.max(due, startDay), releaseDay);
     // `from` 是**日号**，落格子要换成轴上的列偏移（第 0 列 = 开工日），再 +2 跳过左栏那一列。
     return { item, col: from - startDay, span: to === null ? 0 : Math.max(1, to - from + 1) };
