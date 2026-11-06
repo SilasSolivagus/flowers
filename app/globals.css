@@ -52,9 +52,18 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 
 /* ── 看板 ──────────────────────────────────────────── */
 .board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto}
+/* 线稿的分组带（分析 / 开发 / 归档）。本应用的状态机是 10 个状态、读模型没有分组字段，
+   看板不渲染这一行；类留在原处是因为它是 views.css 原样移植的一段，删掉就看不出省略了什么。 */
 .gband{display:grid;grid-template-columns:repeat(11,minmax(132px,1fr));gap:8px;padding:0 0 6px}
 .gb{font:600 11px/16px var(--f-sans);letter-spacing:.08em;color:var(--c-text-4);padding-left:2px}
-.gcols{display:grid;grid-template-columns:repeat(11,minmax(132px,1fr));gap:8px;flex:1;min-height:0}
+
+/* 列网格。两处与线稿不同，都是「10 列」这个事实逼出来的：
+   ① 列数 11 → 10（线稿有 11 个状态，spec 是 10 个）；
+   ② 最小列宽 132px → 0。132px × 10 + 8px × 9 = 1392px，比 1280 视口减去左轨 184px 与看板
+      左右 padding 48px 之后的 1048px 多 344px：照搬 minmax 就必然横向滚动，而硬性要求是
+      1280 宽下 10 列全部可见。列宽改成等分（1fr）后 1280 下每列 97.6px，1440 下 113px，
+      与线稿同一套比例（等宽列 + 8px 沟 + 圆角井），只是按可用宽度收窄。 */
+.gcols{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:8px;flex:1;min-height:0}
 
 .col{display:flex;flex-direction:column;min-width:0;min-height:0;
      border:0.5px solid var(--c-line);border-radius:12px;
@@ -71,10 +80,14 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
       transition:background var(--d-fast) var(--e-standard),border-color var(--d-fast) var(--e-standard)}
 .card:hover{background:color-mix(in srgb, var(--c-text-1) 1.5%, var(--c-surface))}
 .card .t{font:400 var(--t-body-s) var(--f-sans);line-height:17px;color:var(--c-text-1)}
-.card .m{display:flex;align-items:center;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
+.card .m{display:flex;align-items:center;flex-wrap:wrap;gap:0 6px;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
 .card .m .k{flex:0 0 auto;font-family:var(--f-mono)}
 .card .m .d{margin-left:auto;flex:0 0 auto;font-family:var(--f-num)}
-.card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 「等谁」是这块看板唯一的信息（同一列里等的东西各不相同），所以它必须能读全。
+   线稿给的是单行省略号，那是在 132px 列宽下的写法；1280 宽 10 列时卡片内容宽约 60px，
+   单行会把「提测日已过 11-04，等提测」压成「提测日已…」——等于把这一行删掉。
+   改成可折行（不加行数上限）：文字全在，卡片变高，列井本来就按内容撑高。 */
+.card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);white-space:normal;overflow-wrap:anywhere}
 .card .w.neg{color:var(--c-negative)}
 
 .card.mine{border-color:var(--c-accent);box-shadow:inset 2px 0 0 var(--c-accent);
