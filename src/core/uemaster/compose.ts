@@ -7,6 +7,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId } from '../validate.js';
 import { attachArtifact } from './attach.js';
+import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
@@ -156,6 +157,19 @@ export type RequirementRow = {
   type: string;
   requester: string;
   prd_url: string | null;
+  /**
+   * 六问（P4-02）。生成要它们，因为你正在写的材料是照着**描述**写的。
+   *
+   * 这一行在哪个时刻被读出来，决定了产物的指纹（见 `loadRequirement` 下面的注释）：
+   * 生成可能跑 2–3 分钟，中途有人改描述是常态，所以指纹必须在**读需求的那一刻**
+   * 就算出来、一路带下去，而不是等在 attach 那一刻现算。
+   */
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
 };
 
 // ─── 提示词 1：只要一段 mermaid ──────────────────────────────────────────────
@@ -777,9 +791,10 @@ export function missingProviderText(): string {
 
 export async function loadRequirement(db: Db, requirementId: string): Promise<RequirementRow> {
   const res = await db.execute<RequirementRow>(sql`
-    select id, number, title, type, requester, prd_url
+    select id, number, title, type, requester, prd_url,
+           context, problem, outcome, surfaces, edge_cases, out_of_scope
       from requirements
-     where id = ${requirementId}`);
+     where id = ${requirementId} and deleted_at is null`);
   const row = res.rows[0];
   if (!row) throw new AppError('not_found', '需求不存在');
   return { ...row, number: Number(row.number) };
@@ -982,6 +997,12 @@ export async function composeEvaluation(
   if (cfg === null) throw new AppError('provider_unconfigured', missingProviderText());
 
   const req = await loadRequirement(db, requirementId);
+  /**
+   * 这次生成是照着哪一版描述做的（P4-02）：在**读完需求**的这一刻取指纹，然后一路
+   * 带到 `attachArtifact`。attach 要跑完 2–3 分钟才发生，那时现算会得到一个「照着
+   * 新版做的」的假结论（见 `requirements/fingerprint.ts` 文件头）。
+   */
+  const inputHash = fingerprintOfRow(req);
   let usage: ComposeUsage = { prompt: 0, completion: 0 };
 
   // 留痕的笔：作业 id 从请求来（用例里没有作业，笔就是空写）。模型名绑在笔上——
@@ -1025,7 +1046,7 @@ export async function composeEvaluation(
   await writeFile(file, built.html, 'utf8');
 
   const url = artifactUrl(file);
-  const artifact = await attachArtifact(db, actor, { requirementId, stage, url });
+  const artifact = await attachArtifact(db, actor, { requirementId, stage, url, inputHash });
 
   return { url, attempts: flow.attempts, usage, artifactId: artifact.id };
 }

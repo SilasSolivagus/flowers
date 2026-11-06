@@ -3,7 +3,20 @@ import type { Db } from '../../db/client.js';
 import { parseRequirementId } from '../validate.js';
 import { STAGES, type Stage } from './packs.js';
 
-export type ArtifactRef = { stage: Stage; url: string; at: Date };
+export type ArtifactRef = {
+  stage: Stage;
+  url: string;
+  at: Date;
+  /**
+   * 生成这份产物时需求描述的指纹（P4-02），null = 那一版没记（老产物 / 人手 attach）。
+   *
+   * 读模型只把它**带出来**，不解释：`fresh` / `stale` / `unknown` 由调用方拿它与
+   * 当前描述的指纹比（`requirements/fingerprint.ts` 的 `freshnessOf`）。在这里算的
+   * 话，`listArtifacts` 就得为每条需求再查一次描述——而它的调用方（抽屉）本来就有
+   * 那一行。
+   */
+  inputHash: string | null;
+};
 
 /** stage 的固定次序：读模型按它排三行，不按时间。 */
 const RANK = new Map<Stage, number>(STAGES.map((stage, i) => [stage, i]));
@@ -25,15 +38,22 @@ const RANK = new Map<Stage, number>(STAGES.map((stage, i) => [stage, i]));
 export async function listArtifacts(db: Db, requirementId: string): Promise<ArtifactRef[]> {
   const id = parseRequirementId({ requirementId });
 
-  const res = await db.execute<{ stage: Stage; url: string; at: Date }>(sql`
-    select stage, url, at from (
-      select distinct on (stage) stage, url, created_at as at, id
+  const res = await db.execute<{
+    stage: Stage; url: string; at: Date; input_hash: string | null;
+  }>(sql`
+    select stage, url, at, input_hash from (
+      select distinct on (stage) stage, url, created_at as at, id, input_hash
         from uemaster_artifacts
        where requirement_id = ${id}
        order by stage, created_at desc, id desc
     ) latest`);
 
   return res.rows
-    .map((row) => ({ stage: row.stage, url: row.url, at: new Date(row.at) }))
+    .map((row) => ({
+      stage: row.stage,
+      url: row.url,
+      at: new Date(row.at),
+      inputHash: row.input_hash,
+    }))
     .sort((a, b) => (RANK.get(a.stage) ?? 0) - (RANK.get(b.stage) ?? 0));
 }

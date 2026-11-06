@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
+import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
 } from './board.js';
@@ -35,6 +36,15 @@ export type DetailRef = {
   /** 已格式化成 MM-DD 的那一天（页面不再自己算日期）。 */
   atLabel: string | null;
   present: boolean;
+  /**
+   * 这份产物与**当前**描述是否对得上（P4-02）。
+   *
+   * 三态而不是一个布尔：`unknown`（产物上没有指纹：P4-02 之前落库的行，或人/agent
+   * 直接 attach 的行）与 `stale`（指纹不等）是两件不同的事，界面上也是两句不同的话
+   * （「版本未知」/「需求已更新」）。把它算在读模型里、而不是让抽屉自己比一遍，
+   * 是因为「当前指纹」要那一行需求的描述，只有这里取得到。
+   */
+  freshness: Freshness;
   /**
    * 这个阶段**正在跑**的那次生成（null = 没有）。
    *
@@ -102,6 +112,21 @@ export type Detail = {
     dueAtLabel: string | null;
     /** 「时间已用 %」：今天在 [版本开工日, 承诺完成日] 区间里的位置（spec §4）。 */
     timeUsed: { percent: number; from: string; to: string } | null;
+  };
+  /**
+   * 六个描述性问题（P4-02）：抽屉只读展示 + 编辑表单的初始值。
+   *
+   * 与 `info` 分开，因为它们的读者不同：`info` 是「这条需求是谁提的、停在哪」，
+   * 六问是「它要做什么」。混在一起会让抽屉的「信息」段变成一张什么都有的表，
+   * 而编辑表单只需要这六个字段（标题在 `title` 上，PRD 链接在 `info` 里）。
+   */
+  description: {
+    context: string | null;
+    problem: string | null;
+    outcome: string | null;
+    surfaces: string | null;
+    edgeCases: string | null;
+    outOfScope: string | null;
   };
   refs: DetailRef[];
   review: DetailReview | null;
@@ -223,6 +248,19 @@ function describe(type: string, payload: Payload): { label: string; note: string
         note: [reason, due ? `新承诺 ${due}` : null].filter(Boolean).join(' · ') || null,
       };
     }
+    case 'requirement.updated': {
+      // 事件里记的是「改了哪几问」（`fields: [{field,label,from,to}]`，见 manage.ts）。
+      // 时间轴上只写字段名：一整段新描述不该在这里出现第二遍（正文在 ① 描述段）。
+      const fields = Array.isArray(payload.fields) ? payload.fields : [];
+      const labels = fields
+        .map((item) => (typeof item === 'object' && item !== null
+          ? (item as Payload).label
+          : null))
+        .filter((label): label is string => typeof label === 'string' && label !== '');
+      return { label: '更新描述', note: labels.length > 0 ? labels.join(' · ') : null };
+    }
+    case 'requirement.deleted':
+      return { label: '删除需求', note: text(payload, 'title') };
     case 'requirement.rejected':
       return { label: '拒绝', note: text(payload, 'reason') };
     case 'requirement.shelved':
@@ -285,14 +323,21 @@ function artifactRef(
   label: string,
   artifact: ArtifactRef | undefined,
   runningJobId: string | null,
+  currentHash: string,
 ): DetailRef {
   const generation = runningJobId === null ? null : { id: runningJobId };
   if (!artifact) {
-    return { stage, label, url: null, at: null, atLabel: null, present: false, generation };
+    // 没有产物：新鲜度这一格没有意义（界面上那一行是「生成」入口，不是链接）。
+    // 给 'unknown' 而不是留空：类型只有三态，而这一格只在 `present` 时被读。
+    return {
+      stage, label, url: null, at: null, atLabel: null, present: false,
+      freshness: 'unknown', generation,
+    };
   }
   const at = artifact.at.toISOString();
   return {
-    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true, generation,
+    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true,
+    freshness: freshnessOf(artifact.inputHash, currentHash), generation,
   };
 }
 
@@ -316,6 +361,12 @@ type Row = {
   release_name: string | null;
   window_start: string | null;
   release_date: string | null;
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
 };
 
 type ReviewRow = {
@@ -336,16 +387,20 @@ type ReviewRow = {
 export async function getRequirementDetail(id: string): Promise<Detail | null> {
   if (!UUID.test(id)) return null;
 
+  // 三处过滤都带 `deleted_at is null`：软删除的行对外等于不存在（P4-02）。
+  // 版本的 join 也带：版本被删之后，那条需求的排期字段仍在，但**版本名不该再显示**
+  // （`rel.id` 会因为 join 不成立变成 null，`commit.release` 随之整段消失）。
   const found = await db.execute<Row>(sql`
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
+           r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
            m.name as owner,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
       from requirements r
       left join members m on m.id = r.owner_member_id
-      left join releases rel on rel.id = r.release_id
-     where r.id = ${id}`);
+      left join releases rel on rel.id = r.release_id and rel.deleted_at is null
+     where r.id = ${id} and r.deleted_at is null`);
   const row = found.rows[0];
   if (!row) return null;
 
@@ -388,6 +443,13 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
   // 走 `listArtifacts` 而不是在这里再写一遍 `distinct on`：两个读侧各写一份 SQL，
   // 迟早在「同毫秒写入怎么定序」这种细节上分叉。
   const artifacts = new Map((await listArtifacts(db, id)).map((a) => [a.stage, a]));
+
+  /**
+   * 当前描述的指纹：产物那三行把它与各自存下来的 `input_hash` 比一次，得出
+   * 「新的 / 需求已更新 / 版本未知」。用的是写侧同一个函数（`fingerprintOfRow`），
+   * 所以「编辑保存后产物自己变旧」不需要任何额外写入——它是算出来的，不是存下来的。
+   */
+  const currentHash = fingerprintOfRow(row);
 
   /**
    * 正在跑的生成作业，按 stage 取最新一条。
@@ -437,10 +499,18 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
       dueAtLabel: formatMonthDay(row.commit_due_at),
       timeUsed: timeUsed(row.window_start, row.commit_due_at),
     },
+    description: {
+      context: row.context,
+      problem: row.problem,
+      outcome: row.outcome,
+      surfaces: row.surfaces,
+      edgeCases: row.edge_cases,
+      outOfScope: row.out_of_scope,
+    },
     refs: [
-      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), running.get('evaluate') ?? null),
-      artifactRef('review', '评审材料', artifacts.get('review'), running.get('review') ?? null),
-      artifactRef('inspect', '走查材料', artifacts.get('inspect'), running.get('inspect') ?? null),
+      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), running.get('evaluate') ?? null, currentHash),
+      artifactRef('review', '评审材料', artifacts.get('review'), running.get('review') ?? null, currentHash),
+      artifactRef('inspect', '走查材料', artifacts.get('inspect'), running.get('inspect') ?? null, currentHash),
     ],
     review,
     events: eventRes.rows.map((e) => ({

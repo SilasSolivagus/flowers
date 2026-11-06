@@ -7,6 +7,7 @@ import { parseRequirementId } from '../validate.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
+import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import {
   addUsage, buildFlow, buildPages, flat, loadRequirement, missingProviderText, parseFlow,
@@ -1083,6 +1084,8 @@ export async function reviewRequirement(
   if (cfg === null) throw new AppError('provider_unconfigured', missingProviderText());
 
   const req = await loadRequirement(db, requirementId);
+  // 与 compose 同一条规矩：指纹在读需求的这一刻取，不等到 attach（那时描述可能已经变了）。
+  const inputHash = fingerprintOfRow(req);
   const prd = await prdBaseline(db, actor, req, full);
 
   let usage: ComposeUsage = { prompt: 0, completion: 0 };
@@ -1155,7 +1158,9 @@ export async function reviewRequirement(
   await writeFile(file, built.html, 'utf8');
 
   const url = artifactUrl(file);
-  const artifact = await full.attach(db, actor, { requirementId, stage: 'review', url });
+  const artifact = await full.attach(db, actor, {
+    requirementId, stage: 'review', url, inputHash,
+  });
 
   const counts = countByType(found.findings);
   return {

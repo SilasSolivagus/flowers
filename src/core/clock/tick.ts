@@ -188,7 +188,9 @@ export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
       select r.id, r.state, rel.id as release_id, rel.window_start, r.commit_test_at, r.commit_due_at
         from requirements r
         left join releases rel on rel.id = r.release_id
-       where r.state in (${states})
+       -- 软删除的需求不再被时钟推进（P4-02）：它对外已经不存在，推进它只会往
+       -- events 里写一行没人看得到、也无法解释的迁移。
+       where r.state in (${states}) and r.deleted_at is null
        order by r.id
          for update of r`);
 

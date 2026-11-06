@@ -616,11 +616,20 @@ type RequirementRow = {
   type: string;
   requester: string;
   prd_url: string | null;
+  // 六问（P4-02）：`compose.ts` 的 RequirementRow 带上了它们，这个批次脚本拼提示词要
+  // 交给同一批函数，所以形状必须与那边一致（这里不参与指纹，只是形状对齐）。
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
 };
 
 async function loadRequirements(numbers: number[]): Promise<RequirementRow[]> {
   const res = await db.execute<RequirementRow>(sql`
-    select id, number, title, type, requester, prd_url
+    select id, number, title, type, requester, prd_url,
+           context, problem, outcome, surfaces, edge_cases, out_of_scope
       from requirements
      where number = any(${sql.raw(`array[${numbers.join(',')}]`)})
      order by number`);

@@ -88,6 +88,7 @@ export async function listReleases(): Promise<Release[]> {
   const releaseRes = await db.execute<ReleaseRow>(sql`
     select id, name, window_start, release_date
       from releases
+     where deleted_at is null
      order by release_date, name`);
 
   // 状态列表走参数绑定（不是拼字符串）：'ready' 这些是 State 的字面量，但只有一份
@@ -99,6 +100,7 @@ export async function listReleases(): Promise<Release[]> {
            r.state_entered_at, r.commit_test_at, r.commit_due_at
       from requirements r
      where r.release_id is not null
+       and r.deleted_at is null
        and r.state in (${states})
      order by r.commit_due_at nulls last, r.number`);
 

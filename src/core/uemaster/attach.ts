@@ -10,6 +10,28 @@ import { isStage, type Stage } from './packs.js';
 import { ARTIFACT_PREFIX, BAD_URL, artifactFile } from './store.js';
 
 const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
+
+/**
+ * 内容指纹的格式：sha256 的十六进制。
+ *
+ * 为什么要校验：`input_hash` 是**比对键**（读侧拿它与当前描述的指纹逐字相等比较），
+ * 一个大小写不对、或者被截断的值不会让任何东西报错，只会让那份产物永远显示
+ * 「需求已更新」。宁可在这里拒绝一个形状不对的值，也不要在库里留一个永远不等于
+ * 任何东西的字符串。
+ *
+ * 不传就是 null（**不是**在这里现算）：attach 发生在生成**之后**，那时需求可能已经
+ * 被改过；现算出来的指纹会声称这次生成是照着新版做的，而它其实是照着旧版做的。
+ * 见 `src/db/schema.ts` 的 `inputHash` 注释与 `requirements/fingerprint.ts` 文件头。
+ */
+const BAD_HASH = '内容指纹格式不正确';
+
+function parseInputHash(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text === '') return null;
+  if (!/^[0-9a-f]{64}$/.test(text)) throw new AppError('invalid_hash', BAD_HASH);
+  return text;
+}
 const NO_REQUIREMENT = '需求不存在';
 
 /**
@@ -136,6 +158,10 @@ async function assertSiteFileExists(url: string): Promise<void> {
  *
  * 顺序是「需求存在」→「站内文件存在」→ insert → 事件 →（必要时）推进：需求 id 打错
  * 时该报「需求不存在」，而不是报一个跟这条需求毫无关系的文件缺失。
+ *
+ * P4-02 起多收一个可空的 `inputHash`：这份产物是照着哪一版描述生成的。它由**生成
+ * 入口**在读需求那一刻算好带下来（见 `fingerprint.ts` 与 `start.ts` 的注释），这里
+ * 只负责校验形状、原样落库；拿不到就存 null（`版本未知`），绝不现算。
  */
 export async function attachArtifact(
   db: Db,
@@ -147,10 +173,17 @@ export async function attachArtifact(
   const requirementId = parseRequirementId(input);
   const stage = parseStage(input.stage);
   const url = parseUrl(input.url);
+  // 生成入口在读需求那一刻算好、一路带下来；人/agent 直接 attach 时不传 → null。
+  const inputHash = parseInputHash(input.inputHash);
 
   return db.transaction(async (tx) => {
+    // `deleted_at is null`：软删除的需求对外等于不存在（P4-02）。这条检查同时守住了
+    // 一条更隐蔽的路——一次生成跑完时需求已经被删了，attach 会在这里说不，而不是
+    // 往一条看不见的需求上再挂一份材料、再推它一次状态。
     const found = await tx.execute<Locked>(
-      sql`select state, type, prd_url from requirements where id = ${requirementId} for update`);
+      sql`select state, type, prd_url from requirements
+           where id = ${requirementId} and deleted_at is null
+           for update`);
     const row = found.rows[0];
     if (!row) throw new AppError('not_found', NO_REQUIREMENT);
 
@@ -158,8 +191,8 @@ export async function attachArtifact(
     if (url.startsWith('/')) await assertSiteFileExists(url);
 
     const inserted = await tx.execute<{ id: string }>(sql`
-      insert into uemaster_artifacts (requirement_id, stage, url, created_by)
-      values (${requirementId}, ${stage}, ${url}, ${actor})
+      insert into uemaster_artifacts (requirement_id, stage, url, created_by, input_hash)
+      values (${requirementId}, ${stage}, ${url}, ${actor}, ${inputHash})
       returning id`);
 
     await recordEvent(tx, {

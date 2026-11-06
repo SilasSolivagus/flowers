@@ -293,7 +293,10 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
              limit 1) as inspect_at
       from requirements r
       left join members m on m.id = r.owner_member_id
-      left join releases rel on rel.id = r.release_id
+      -- 软删除的版本 join 不上：那条需求的排期字段仍在（历史事实），但版本名与
+      -- 开工日不该再出现在卡片上（P4-02 的「删掉的版本从看板标签里消失」）。
+      left join releases rel on rel.id = r.release_id and rel.deleted_at is null
+     where r.deleted_at is null
      order by r.number`);
 
   // 列直接建出来，byState 只是它的索引：卡片推进 Map 里的数组，就是推进要返回的那个

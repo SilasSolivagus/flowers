@@ -8,6 +8,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { resolveMirrorConfig } from '../codemirror/mirror.js';
+import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
@@ -160,7 +161,7 @@ export async function startGeneration(
 
   const jobId = await db.transaction(async (tx) => {
     const found = await tx.execute<{ id: string }>(
-      sql`select id from requirements where id = ${requirementId} for update`);
+      sql`select id from requirements where id = ${requirementId} and deleted_at is null for update`);
     if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
 
     const running = await tx.execute<{ id: string; created_at: Date }>(sql`
@@ -300,14 +301,26 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     id: string; stage: string; status: string;
     requirement_id: string; number: number; title: string;
     type: string; requester: string; prd_url: string | null;
+    context: string | null; problem: string | null; outcome: string | null;
+    surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;
   }>(sql`
     select j.id, j.stage, j.status,
-           r.id as requirement_id, r.number, r.title, r.type, r.requester, r.prd_url
+           r.id as requirement_id, r.number, r.title, r.type, r.requester, r.prd_url,
+           r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope
       from uemaster_jobs j
       join requirements r on r.id = j.requirement_id
      where j.id = ${jobId}`);
   const job = found.rows[0];
   if (!job) throw new AppError('not_found', '生成任务不存在');
+
+  /**
+   * 这次生成是照着哪一版描述做的（P4-02）。
+   *
+   * 取在这里、不在 attach 那一刻：worker 会跑 2–3 分钟，中途有人改描述是常态。
+   * 所有 provider 分支（compose / review / inspect）各自在自己的 `loadRequirement`
+   * 里算同一件事；CLI 那条路是**本函数**直接 attach，所以这里也算一份。
+   */
+  const inputHash = fingerprintOfRow(job);
   if (job.status !== 'running') return;
   if (!isStage(job.stage)) {
     await failJob(db, jobId, BAD_STAGE);
@@ -442,6 +455,7 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       requirementId: job.requirement_id,
       stage: job.stage,
       url: result.url,
+      inputHash,
     });
     await doneJob(db, jobId, artifact.id);
   } catch (error) {

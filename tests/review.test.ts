@@ -287,7 +287,10 @@ describe('readFindings / 引文核对', () => {
   });
 
   it('标题：版本 + 总数 + 按类型分布；没问题的节点也要有一行「无问题」', () => {
-    const req = { id: 'x', number: 6, title: '分享页搜索', type: 'feature', requester: '吕品', prd_url: null };
+    const req = {
+      id: 'x', number: 6, title: '分享页搜索', type: 'feature', requester: '吕品', prd_url: null,
+      context: null, problem: null, outcome: null, surfaces: null, edge_cases: null, out_of_scope: null,
+    };
     const findings = [
       { type: 'dead_end' as const, node: 'C', quote: QUOTE_DEAD_END, why: 'w' },
       { type: 'dead_end' as const, node: 'C', quote: QUOTE_STATE, why: 'w' },

@@ -27,11 +27,28 @@ export const members = pgTable('members', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * 版本（发版窗口）。
+ *
+ * P4-02 起多了三列：
+ * - `goal` / `note` 是**版本自己的描述**，不是需求描述的一部分。owner 的原话是
+ *   「新建版本时告诉最近一个版本是几号到几号」——那是对**上下文**的要求，而上下文
+ *   的另一半恰恰是「这一版想干什么」。两列都可空：老版本行没有它们，也不该因为
+ *   少一段描述就不能用。
+ * - `deleted_at` 是软删除。版本行被需求通过 `requirements.release_id` 引用，
+ *   `events` 里也有它的名字；硬删会把那些引用断在一个不存在的主键上（或者被外键
+ *   直接拦住），于是「删掉一个建错的版本」会变成「删不掉」。软删之后读侧一律
+ *   `deleted_at is null`，被删的版本从版本页、看板的版本标签、排期下拉里一起消失，
+ *   但那条需求、那条事件仍然指向同一个 id。
+ */
 export const releases = pgTable('releases', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
   releaseDate: timestamp('release_date', { withTimezone: true }).notNull(),
+  goal: text('goal'),
+  note: text('note'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
 });
 
 export const requirements = pgTable('requirements', {
@@ -50,6 +67,41 @@ export const requirements = pgTable('requirements', {
   commitTestAt: timestamp('commit_test_at', { withTimezone: true }),
   commitDueAt: timestamp('commit_due_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+
+  /**
+   * 六个描述性问题（P4-02）：录入面唯一可编辑的东西。
+   *
+   * 为什么是这六问、为什么是**可空文本**而不是非空：
+   * - 六问的用途只有一个——把「生成材料的 agent 需要知道的上下文」从人的脑子里
+   *   搬到库里。缺哪一问，生成就会在那一处猜（`surfaces` 缺 → 流程图里会出现不存在
+   *   的页面；`outcome` 缺 → 边界与异常只能靠猜），所以界面在缺的时候给一行提示；
+   *   但**录入不该被拦下**：真实的需求常常是先建一条再补描述，把六问做成必填只会
+   *   逼人造六个「无」。
+   * - 可空而不是 not null default ''：历史行没有这些值，加非空列要回填一个假值
+   *   （''），而 '' 与 null 在语义上是同一件事——「没写」。指纹函数因此把两者
+   *   哈希成同一个值（见 `src/core/requirements/fingerprint.ts`）。
+   * - 全部是 `text`：一问就是一段话，长度不设上限；界面里是 textarea。
+   *
+   * 列名与语义一一对应，界面上的标签就是这里注释的中文（两处只有一个来源：
+   * `src/core/requirements/manage.ts` 的 `FIELD_FIELDS`）。
+   */
+  context: text('context'),          // 谁在什么情况下用
+  problem: text('problem'),          // 现在怎么做 / 哪不好
+  outcome: text('outcome'),          // 做成什么样算成功
+  surfaces: text('surfaces'),        // 涉及哪些页面 / 入口
+  edgeCases: text('edge_cases'),     // 失败 / 空 / 无权限怎么办
+  outOfScope: text('out_of_scope'),  // 这次不做什么
+
+  /**
+   * 软删除（P4-02）。
+   *
+   * 只软删、不硬删：`events` 用 `requirement_id`（无外键、可空）指向需求，
+   * `uemaster_artifacts` / `uemaster_jobs` / `prd_snapshots` / `review_assignments`
+   * 四张表都是外键引用。硬删要么被外键拦住，要么把「谁在哪天承诺了什么」这条
+   * 审计线一起删掉——那正是这个系统存在的意义。所以删除 = 打一个时间戳，
+   * 读侧一律 `deleted_at is null`。
+   */
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
 }, (t) => ({ numUnique: uniqueIndex('requirements_number_unique').on(t.number) }));
 
 export const reviewAssignments = pgTable('review_assignments', {
@@ -78,6 +130,23 @@ export const uemasterArtifacts = pgTable('uemaster_artifacts', {
   url: text('url').notNull(),                // http(s) 完整链接，或 / 开头的站内路径
   createdBy: text('created_by').notNull(),   // 成员名或 'agent'
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * 这份产物是照着哪一版描述生成的 = 那一刻需求的指纹（P4-02）。
+   *
+   * `src/core/requirements/fingerprint.ts` 的 sha256（十六进制）。读侧拿它与**当前**
+   * 描述的指纹比：相等 → 产物还是新的；不等 → 「需求已更新」；null → 「版本未知」
+   * （P4-02 之前落库的行，以及绕过生成器直接 attach 的行）。
+   *
+   * 为什么存成列、而不是在读的时候比对 `created_at` 与 `requirements` 的更新时间：
+   * 时间先后**不等于**内容变了——改一个字再改回来，时间戳变了，产物却仍然是照它生成的。
+   * 内容指纹是这件事唯一的正确答案。
+   *
+   * 为什么可空、且不允许「就地推算」：生成要跑 2–3 分钟，attach 发生在**之后**；
+   * 若在 attach 那一刻现算指纹，中途有人改了描述，这次生成就会被记成「照着新版做的」。
+   * 指纹必须在**读需求的那一刻**取（见 `start.ts` / `compose.ts` 的 loadRequirement），
+   * 拿不到就存 null —— 存一个编出来的值比存 null 坏得多。
+   */
+  inputHash: text('input_hash'),
 }, (t) => ({
   stageCheck: check(
     'uemaster_artifacts_stage_check',

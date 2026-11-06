@@ -17,6 +17,7 @@ import { repoShape, type RepoShape } from '../codemirror/route.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
+import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import { assembleWalkmap, type PageFragment } from './compose.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
@@ -208,6 +209,13 @@ type RequirementRow = {
   type: string;
   requester: string;
   prd_url: string | null;
+  /** 六问（P4-02）：指纹要它们，见 `compose.ts` 的 `RequirementRow`。 */
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
 };
 
 // ─── 依赖（测试注入用） ──────────────────────────────────────────────────────
@@ -1063,9 +1071,10 @@ export function readVerify(
 
 async function loadRequirement(db: Db, requirementId: string): Promise<RequirementRow> {
   const res = await db.execute<RequirementRow>(sql`
-    select id, number, title, type, requester, prd_url
+    select id, number, title, type, requester, prd_url,
+           context, problem, outcome, surfaces, edge_cases, out_of_scope
       from requirements
-     where id = ${requirementId}`);
+     where id = ${requirementId} and deleted_at is null`);
   const row = res.rows[0];
   if (!row) throw new AppError('not_found', '需求不存在');
   return { ...row, number: Number(row.number) };
@@ -1115,6 +1124,8 @@ export async function inspect(
     throw new AppError('provider_unconfigured', '未配置模型接口：走查要问模型，先把「接口地址 + API Key + 模型名」配好');
   }
   const req = await loadRequirement(db, requirementId);
+  // 与 compose / review 同一刻：指纹在读完需求时取，attach 时原样带下去。
+  const inputHash = fingerprintOfRow(req);
   const prd = await baselinePrd(db, actor, requirementId, full);
   const stats = emptyStats();
   stats.prdVersion = prd.version;
@@ -1300,7 +1311,9 @@ export async function inspect(
   await writeFile(file, built.html, 'utf8');
 
   const url = artifactUrl(file);
-  const artifact = await full.attach(db, actor, { requirementId, stage: 'inspect', url });
+  const artifact = await full.attach(db, actor, {
+    requirementId, stage: 'inspect', url, inputHash,
+  });
 
   stats.bytes = Buffer.byteLength(built.html, 'utf8');
   stats.ms = Date.now() - started;
