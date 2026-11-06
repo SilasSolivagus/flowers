@@ -156,3 +156,41 @@ describe('顶层形状', () => {
     expect('findings' in out).toBe(false);
   });
 });
+
+describe('节点漏字段与仓库反推（旧语料 132 次里各 2 / 1 次）', () => {
+  it('节点漏写 title → 用 id 补（id 是唯一标识，不构成编造）', () => {
+    const out = coerceAnswer({ nodes: [{ id: 'C1', kind: 'page', anno: [['一致', 'x']] }] }, [], ['C1']) as {
+      nodes: Array<{ title?: string }>;
+    };
+    expect(out.nodes[0]!.title).toBe('C1');
+  });
+
+  it('repo 留空但路径只在一个仓里存在 → 反推成那个仓', async () => {
+    const { validateStructure } = await import('../src/core/uemaster/inspect.js');
+    const trees = new Map([
+      ['123pan-pc', new Set(['src/pc-only.ts'])],
+      ['123pan-uni-app', new Set(['src/uni-only.vue'])],
+    ]);
+    const doc = {
+      flows: [1, 2, 3].map((i) => ({ id: String.fromCharCode(64 + i), title: 't', kind: 'page' as const })),
+      findings: [{
+        verdict: 'differs' as const, prd: 'p', code: 'c', evidence: [{ repo: '', path: 'src/uni-only.vue', note: '' }],
+      }],
+    };
+    expect(validateStructure(doc, trees).ok).toBe(true);
+  });
+
+  it('路径两个仓都没有 → 说清"这个文件不存在"，而不是"仓库『』不在范围内"', async () => {
+    const { validateStructure } = await import('../src/core/uemaster/inspect.js');
+    const trees = new Map([['123pan-pc', new Set(['a.ts'])], ['123pan-uni-app', new Set(['b.vue'])]]);
+    const doc = {
+      flows: [1, 2, 3].map((i) => ({ id: String.fromCharCode(64 + i), title: 't', kind: 'page' as const })),
+      findings: [{
+        verdict: 'differs' as const, prd: 'p', code: 'c', evidence: [{ repo: '', path: 'src/nope.ts', note: '' }],
+      }],
+    };
+    const out = validateStructure(doc, trees);
+    expect(out.ok).toBe(false);
+    expect(out.problems.join('；')).toContain('都不存在');
+  });
+});

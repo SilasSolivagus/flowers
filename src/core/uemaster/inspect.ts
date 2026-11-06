@@ -627,7 +627,9 @@ export function structureRepairPrompt(
 // ─── 结构回话的解析与校验 ────────────────────────────────────────────────────
 
 const EvidenceSchema = z.object({
-  repo: z.string().min(1),
+  // repo 允许空串：容错层认不出仓库时留空，交给 `validateStructure` 按路径反推。
+  // 在 schema 这一层就拒掉，等于把「能救回来的」变成「退回重答一整轮」。
+  repo: z.string().default(''),
   path: z.string().min(1),
   note: z.string().default(''),
 });
@@ -735,9 +737,18 @@ export function validateStructure(doc: Structure, trees: TreeIndex): { ok: boole
     if (finding.prd.trim() === '') problems.push(`${at} 没有写 PRD 里的说法`);
 
     for (const evidence of finding.evidence) {
+      // repo 没写全时按路径反推：一个路径只在一个仓里存在，就必然是那一个。
+      // 这不是猜——两边都查过，唯一命中才补；两边都有或都没有，仍旧报错。
+      if (evidence.repo === '' || !trees.has(evidence.repo)) {
+        const hits = [...trees.entries()].filter(([, set]) => set.has(evidence.path)).map(([id]) => id);
+        if (hits.length === 1) evidence.repo = hits[0]!;
+      }
       const tree = trees.get(evidence.repo);
       if (tree === undefined) {
-        problems.push(`${at} 的证据仓库「${evidence.repo}」不在这次走查的仓库里（只有 ${[...trees.keys()].join('、')}）`);
+        problems.push(evidence.repo === ''
+          // 空仓库 + 两个仓都查不到这个路径：真正的问题是"这个文件不存在"，不是"仓库没写"。
+          ? `${at} 的证据路径 ${evidence.path} 在 ${[...trees.keys()].join('、')} 里都不存在`
+          : `${at} 的证据仓库「${evidence.repo}」不在这次走查的仓库里（只有 ${[...trees.keys()].join('、')}）`);
         continue;
       }
       // 这一段就是「镜像存在的意义」：路径必须真的在 HEAD 上。

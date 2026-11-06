@@ -81,7 +81,7 @@ const FLOW_MAX_TOKENS = 12_000;        // 实测 36% 的格被思考吃光：4k 
  * 一屏 300–500 token 很正常，5 个页面节点就吃掉旧预算。给少了模型会开始截断，
  * 截断的 HTML 又会被 `wt-` 类校验拒掉——那是一次白花的调用。
  */
-const FRAGMENTS_MAX_TOKENS = 14_000;
+const FRAGMENTS_MAX_TOKENS = 24_000;    // 实测 11 格在 14k 撞顶被截断：一页 HTML 很占字
 
 /** 形状判据（与本文件头「判据 1」对应）。上限刻意不判：图更大不是错。 */
 const MIN_NODES = 3;

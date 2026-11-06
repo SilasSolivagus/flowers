@@ -166,10 +166,18 @@ function coerceRoot(raw: unknown): unknown {
   if (Array.isArray(o.nodes)) {
     return {
       ...o,
-      nodes: o.nodes.map((n) =>
-        typeof n === 'object' && n !== null && 'anno' in n
-          ? { ...(n as Record<string, unknown>), anno: coerceAnno((n as Record<string, unknown>).anno) }
-          : n),
+      nodes: o.nodes.map((n) => {
+        if (typeof n !== 'object' || n === null) return n;
+        const node = n as Record<string, unknown>;
+        const out: Record<string, unknown> = { ...node };
+        if ('anno' in out) out.anno = coerceAnno(out.anno);
+        // 漏写 title（实测 nodes.3.title Required）：标题就是节点 id，不算编造——
+        // 它没有提供新信息，也不会让读者误解这一步是什么（id 是流程图的唯一标识）。
+        if (typeof out.title !== 'string' || out.title.trim() === '') {
+          if (typeof out.id === 'string') out.title = out.id;
+        }
+        return out;
+      }),
     };
   }
   if (o.findings === undefined && Array.isArray(o.results)) return { ...o, findings: o.results };
