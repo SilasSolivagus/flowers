@@ -4,3 +4,4 @@ node_modules/
 tsconfig.tsbuildinfo
 dist/
 data/uemaster/
+docs/superpowers/wecom-auth-qr.png

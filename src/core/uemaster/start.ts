@@ -7,9 +7,11 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import { resolveMirrorConfig } from '../codemirror/mirror.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
+import { inspect as inspectMaterial } from './inspect.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
@@ -330,6 +332,32 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     // 平台的 key 发请求」这种两套配置。所以这里把 `actor` 显式传进去。
     const strategy = await resolveStrategy(actor);
     if (strategy.kind === 'provider') {
+      /**
+       * 走查是**另一条链路**：它的输入除了 PRD 还有「实现」，而实现只存在于代码镜像
+       * （`codemirror/mirror.ts` 的只读层）里。所以它不能被 compose 那条路顶替——
+       * 用评估管线生成一份「走查材料」，产物是对的、结论全是编的，那是最坏的一种坏。
+       *
+       * 没有镜像就在这里停下，并点名缺的那一格（`code.mirror.repos`）。检查放在
+       * worker 里而不是 `startGeneration` 里：配置可能在按钮按下的那一刻之后被改，
+       * 而 worker 是真正要用它的那个进程。
+       */
+      if (job.stage === 'inspect') {
+        const mirror = await resolveMirrorConfig(db);
+        if (!mirror.ok) {
+          await failJob(db, jobId, `生成走查材料需要代码镜像：${mirror.message}`);
+          return;
+        }
+        const inspected = await inspectMaterial(db, actor, {
+          requirementId: job.requirement_id,
+          jobId,
+        }, {
+          // 同 compose：worker 是另一个进程，配置要按**同一个人**再解析一次（P2.12）。
+          resolveConfig: () => resolveProviderConfig(actor),
+        });
+        await doneJob(db, jobId, inspected.artifactId);
+        return;
+      }
+
       const composed = await composeEvaluation(db, actor, {
         requirementId: job.requirement_id,
         stage: job.stage,

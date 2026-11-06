@@ -148,7 +148,14 @@ export function classifyFailure(raw: string): Failure {
 
 // ─── 一次尝试的那一行字 ──────────────────────────────────────────────────────
 
-export type AttemptPhase = 'flow' | 'pages' | 'build';
+/**
+ * 一次尝试属于哪一段。
+ *
+ * `flow` / `pages` / `build` 是 `composeEvaluation` 的三段；`locate` / `verify` 是走查
+ * （`inspect.ts`）的两段——结构与复核。名字不同不是洁癖：抽屉里那三行字
+ * （`第 1 次 · locate · …`）要能让人分清自己看的是哪条链路上的哪一次。
+ */
+export type AttemptPhase = 'flow' | 'pages' | 'build' | 'locate' | 'verify';
 
 /** 一次尝试（对应 `uemaster_job_attempts` 的一行，只取界面要的几格）。 */
 export type AttemptView = {

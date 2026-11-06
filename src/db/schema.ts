@@ -147,7 +147,7 @@ export const uemasterJobAttempts = pgTable('uemaster_job_attempts', {
   id: uuid('id').primaryKey().defaultRandom(),
   jobId: uuid('job_id').notNull().references(() => uemasterJobs.id, { onDelete: 'cascade' }),
   attempt: integer('attempt').notNull(),     // 阶段内的第几次（1 基）
-  phase: text('phase').notNull(),            // flow | pages | build
+  phase: text('phase').notNull(),            // flow | pages | build | locate | verify
   model: text('model').notNull(),            // 这一次用的模型名（换模型后旧行仍有意义）
   promptChars: integer('prompt_chars').notNull(),
   outputChars: integer('output_chars').notNull(),
@@ -157,7 +157,7 @@ export const uemasterJobAttempts = pgTable('uemaster_job_attempts', {
 }, (t) => ({
   phaseCheck: check(
     'uemaster_job_attempts_phase_check',
-    sql`${t.phase} in ('flow', 'pages', 'build')`,
+    sql`${t.phase} in ('flow', 'pages', 'build', 'locate', 'verify')`,
   ),
   byJob: index('uemaster_job_attempts_job').on(t.jobId, t.id),
 }));
