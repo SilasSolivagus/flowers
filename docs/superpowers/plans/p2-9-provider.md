@@ -21,6 +21,8 @@ P2.8 之后，「生成」仍然等于在本机跑一条 CLI（`FLOWERS_GEN_CMD`
 `src/core` 其余服务、`src/db` schema、`app/`、`mcp/` 一行没动；没有新依赖；
 没有迁移（仍旧只用 `app_settings` 那张键值表）。
 
+本次提交：`a382f59` —— `feat(uemaster): 直连 chat 接口的客户端——一个 key 就够，不抛异常、不记 key`
+
 ---
 
 ## 1. 契约
