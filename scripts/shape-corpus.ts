@@ -75,9 +75,12 @@ const PHASE_OF: Record<Stage, { first: Phase; second: Phase }> = {
  * `VERIFY_MAX_TOKENS` 同值——**推理模型先把预算花在思考上**，给少了回话是空串
  * （`provider.ts` 会把这件事说成「模型把输出预算用在了思考上」）。
  */
+// 与应用里的常量保持一致（不是各写一份）。早前这里落后于产品：应用已经抬到
+// flow 12k / pages 24k，跑批还在用 4k / 14k，于是每一轮都复现出**已经不存在的**
+// 截断——把「跑批参数旧了」误读成「产品还有 11 处漂移」。
 const BUDGET: Record<Phase, number> = {
-  flow: 4_000,
-  pages: 14_000,
+  flow: 12_000,
+  pages: 24_000,
   structure: 32_000,
   verify: 64_000,
 };
