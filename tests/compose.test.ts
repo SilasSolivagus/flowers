@@ -141,30 +141,41 @@ const ISLAND_FLOW = `flowchart TD
   X["孤岛一"] --> Y["孤岛二"]
 `;
 
-/** 与 GOOD_FLOW 的 5 个节点一一对应的页面说明。 */
-const PAGES_JSON = `{
-  "nodes": [
-    { "id": "A", "kind": "page", "title": "进入寄养频道",
-      "field": ["宠物类型（下拉）"],
-      "button": ["下一步"],
-      "note": ["PRD 未提供：频道首页的分类入口"],
-      "states": [{ "name": "默认", "desc": ["展示频道介绍与入口按钮"] }] },
-    { "id": "B", "kind": "decision", "title": "是否登录？",
-      "field": [], "button": [],
-      "note": ["判定依据：会话里有没有用户"], "states": [] },
-    { "id": "C", "kind": "page", "title": "选择宠物",
-      "field": ["宠物（列表单选）"],
-      "button": ["确认选择"],
-      "note": [],
-      "states": [{ "name": "空", "desc": ["没有宠物时引导去建档"] }] },
-    { "id": "D", "kind": "page", "title": "跳转登录",
-      "field": [], "button": ["去登录"],
-      "note": ["登录后回到本页"], "states": [] },
-    { "id": "E", "kind": "system", "title": "提交订单",
-      "field": ["订单号"], "button": ["下单"],
-      "note": ["后台生成寄养单"], "states": [] }
-  ]
-}`;
+/**
+ * 与 GOOD_FLOW 的 5 个节点一一对应的页面片段。
+ *
+ * 这是**上游契约**的输入，不是我们发明的 JSON：`kind=page` 交一屏 `wt-*` 标记的 HTML，
+ * `kind=decision` 只交标注（判断节点没有页面）。HTML 里的 `onclick="goNode('E')"`
+ * 是契约里的联动 API，构建器会把它们接到左侧流程图上。
+ */
+const PHONE = [
+  '<div class="wt-screen">',
+  '  <div class="wt-statusbar"><span>9:41</span><span class="wt-sb-icons"></span></div>',
+  '  <div class="wt-nav"><span class="wt-nav-title">寄养</span></div>',
+  '  <div class="wt-body"><div class="wt-card"><div class="wt-li-title">最近的寄养门店</div></div></div>',
+  '  <div class="wt-bottombar"><button class="wt-btn" onclick="goNode(\'E\')">提交</button></div>',
+  '</div>',
+].join('\n');
+
+const WIDE = [
+  '<div class="wt-browserbar"><i></i><i></i><i></i><span>门店后台 - 订单</span></div>',
+  '<div class="wt-body"><table class="wt-table"><tr><th>订单号</th></tr><tr><td>PO-1</td></tr></table></div>',
+].join('\n');
+
+const PAGES_JSON = JSON.stringify({
+  nodes: [
+    { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE,
+      anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']] },
+    { id: 'B', kind: 'decision', title: '是否登录？',
+      anno: [['判定依据', '会话里有没有用户']] },
+    { id: 'C', kind: 'page', frame: 'phone', title: '选择宠物', html: PHONE,
+      anno: [['字段', '宠物（列表单选）'], ['空态', '没有宠物时引导去建档']] },
+    { id: 'D', kind: 'page', frame: 'phone', title: '跳转登录', html: PHONE,
+      anno: [['承接', '登录后回到本页']] },
+    { id: 'E', kind: 'page', frame: 'wide', title: '提交订单', html: WIDE,
+      anno: [['归属', '后台生成寄养单']] },
+  ],
+});
 
 /** 一条收集里的需求（无 PRD、类型齐全）：评估这条路走得通。 */
 async function inbox() {
@@ -260,17 +271,20 @@ describe('composeEvaluation', () => {
     // 1) 引擎的 SVG 是**内联**进文档的（不是 <img>，不是外链）
     expect(html).toContain('<svg id="flowsvg"');
     expect(html).toContain('data-flowspec="1"');
-    // 2) 五个节点的文案都在（图里 + 左侧列表 + 中栏标题）
+    // 2) 五个节点的文案都在（SVG 里 + 构建器的节点映射 JSON 里）
     for (const label of ['进入寄养频道', '是否登录？', '选择宠物', '跳转登录', '提交订单']) {
       expect(html).toContain(label);
     }
-    // 3) 只有页面说明里才有的内容——证明中栏是**从 JSON 渲染**的，不是模型写的 HTML
+    // 3) 材料里只有标注才有的内容——标注来自提示词 2，页面来自 `wt-*` 片段
     expect(html).toContain('宠物（列表单选）');
     expect(html).toContain('没有宠物时引导去建档');
-    // 4) 三栏的骨架与可点节点
-    expect(html).toContain('class="node-btn" data-node="A"');
-    expect(html).toContain('data-pane="E"');
-    expect(html).toContain('data-states="C"');
+    // 4) 三栏骨架是 **build.py 的**：流程画布 / 设备框 / 标注面板 + 页面 div
+    expect(html).toContain('class="flow-panel"');
+    expect(html).toContain('id="flow-svg-light"');
+    expect(html).toContain('id="frame-phone"');
+    expect(html).toContain('class="page" id="p-A"');
+    expect(html).toContain('wt-bottombar');
+    expect(html).toContain('id="state-card"');
     // 5) 自足：没有外部资源
     expect(html).not.toMatch(/<script[^>]+src=/);
     expect(html).not.toMatch(/<link[^>]+href=/);
@@ -280,9 +294,11 @@ describe('composeEvaluation', () => {
     expect(provider.prompts[0]).toContain('flowchart TD');
     expect(provider.prompts[0]).toContain('单主干');
     expect(provider.prompts[0]).toContain('subgraph');
-    // 提示词 2 带着**已定稿**的节点清单
-    expect(provider.prompts[1]).toContain('A  进入寄养频道');
-    expect(provider.prompts[1]).toContain('B  是否登录？');
+    // 提示词 2 带着**已定稿**的节点清单与 page-guide 的关键规则
+    expect(provider.prompts[1]).toContain('A  [页面]  进入寄养频道');
+    expect(provider.prompts[1]).toContain('B  [判断]  是否登录？');
+    expect(provider.prompts[1]).toContain('wt-screen');
+    expect(provider.prompts[1]).toContain('375px');
   });
 
   it('形状太小 → 修一次；修图提示词里写着节点数与连线数', async () => {
@@ -367,22 +383,24 @@ describe('composeEvaluation', () => {
     expect(error.message).toContain('分组 auto 下模型 x 的可用渠道不存在');
   });
 
-  it('页面说明两次都不合法 → 失败，不留文件', async () => {
+  it('页面片段两次都不合法 → 失败，不留文件', async () => {
     const provider = await useFake();
     const r = await inbox();
     provider.enqueue(
       GOOD_FLOW,
       '好的，我先说结论：这一步是一个页面。（没有一个 JSON 对象）',
       // 结构合法、但只写了 A 一个节点：zod 过，覆盖率不过——这才是「少节点」那条路
-      '{"nodes":[{"id":"A","kind":"page","title":"进入寄养频道","field":["x"],"button":["y"],'
-        + '"states":[{"name":"默认","desc":[]}]}]}',
+      JSON.stringify({ nodes: [
+        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道',
+          html: '<div class="wt-screen"><div class="wt-body">x</div></div>', anno: [] },
+      ] }),
     );
 
     const error = await caught(composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' }));
 
     expect(error.code).toBe('pages_rejected');
-    // 第二次失败的原因是「少节点」（zod 要求 field/states 有默认值，但 A 之外全缺）
-    expect(error.message).toContain('没有说明');
+    // 第二次失败的原因是「少节点」：A 之外全缺
+    expect(error.message).toContain('没有页面片段');
     expect(await artifactCount()).toBe(0);
     expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate.html`)).toBe(false);
     // 图那一关只花了一次；页面说明问了两遍

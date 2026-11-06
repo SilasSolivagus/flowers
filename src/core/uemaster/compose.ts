@@ -13,16 +13,28 @@ import {
   type ProviderConfig, type ProviderResult,
 } from './provider.js';
 import { ARTIFACT_ROOT, artifactUrl } from './store.js';
+import {
+  buildWalkmap, renderWalkthrough, validateWalkmap,
+  type Anno, type BuildResult, type Frame, type NodeInput, type NodeKind,
+  type PageInput, type Walkmap, type WalkmapAssets,
+} from './walkmap.js';
 
 /**
  * 「B 路线」：一个对话模型 + vendored 排版器，自己把需求做成一份**查过**的评估材料。
  *
  * 为什么要有这条路：P2.6–P2.9 的生成是「甩一条 agent CLI」——它要本机装着、登录着、
  * 会自己决定写什么 HTML、还会绕过检查直接交回一份没排过版的图。owner 的要求是
- * 「我有一个 LLM 的 key，就这一件事」：一个有 key 的部署必须能产出材料。所以这里不再
- * 让模型「写 HTML」，只让它做两件它真的擅长的事——**画图**（一段受限语法的 mermaid）
- * 和**写页面说明**（一段结构化 JSON）；**HTML 由我们确定性渲染**，图由 vendored 的
- * 排版器**验过**才收。三者各归其位，材料就不再是「模型心情」的产物。
+ * 「我有一个 LLM 的 key，就这一件事」：一个有 key 的部署必须能产出材料。所以这里
+ * 让模型只做两件它真的擅长的事——**画图**（一段受限语法的 mermaid）与**画页面**
+ * （每个节点一屏 `wt-*` 标记的 HTML 片段）；**成品 HTML 由 UEmaster 的 `build.py`
+ * 产出**，不是我们拼的模板。这正是 owner 那句话的意思：「展示出来的东西和 uemaster
+ * 效果一致，不要改」——一致的办法只有一个，就是**用它的构建器**。
+ *
+ * 三段各自的判据（缺一段，材料就退回「模型心情」）：
+ * - 图：vendored 排版器的计数全 0 + 我们自己的形状判据；
+ * - 页面片段：`wt-*` 词表、375/690 两种宽度、无 emoji、只写 body 内片段；
+ * - 拼装：walkmap/1 契约（`walkmap.ts` 的校验器是 `build.py` 规则的镜像，先说话
+ *   再 spawn，所以模型拿到的是一句中文而不是一份 Traceback）。
  *
  * 这条链路的核心不是提示词，是**判据**：
  *
@@ -30,8 +42,8 @@ import { ARTIFACT_ROOT, artifactUrl } from './store.js';
  *    mermaid"` → `nodes: 1`，退出 0）。所以除计数之外还判**形状**：少于 3 个节点或
  *    少于 2 条连线的回复一律算失败，与计数无关。
  * 2. **失败要能被修。** 每次拒收都把「上一版原文 + 引擎原文（含交叉/重叠的点）+
- *    具体要改什么」拼回提示词，最多 3 次；3 次都不行就把最后一句引擎错误交给用户
- *    ——他要看到的是「为什么」，不是「生成失败」。
+ *    具体要改什么」拼回提示词，图最多 3 次、页面片段最多 2 次；都不行就把最后那句
+ *    （引擎的或校验器的）交给用户——他要看到的是「为什么」，不是「生成失败」。
  * 3. **降级要看得到。** 没配模型接口时说清缺哪一项；模型接口报错时**原样**带回
  *    （`分组 auto 下模型 x 的可用渠道不存在` 是 owner 换模型的唯一线索）。
  *
@@ -45,7 +57,7 @@ import { ARTIFACT_ROOT, artifactUrl } from './store.js';
 /** 图这一关最多问 3 次（首版 + 两次修图）。 */
 export const MAX_FLOW_ATTEMPTS = 3;
 
-/** 页面说明最多问 2 次（首版 + 一次改 JSON）。 */
+/** 页面片段最多问 2 次（首版 + 一次修：JSON 形状或 walkmap 契约都算）。 */
 export const MAX_PAGES_ATTEMPTS = 2;
 
 /**
@@ -60,8 +72,14 @@ export const CALL_TIMEOUT_MS = 90_000;
 /** 一段 mermaid 用不了多少 token；给多了只会让模型开始写解释。 */
 const FLOW_MAX_TOKENS = 900;
 
-/** 页面说明是 N 段结构化 JSON，给足余量。 */
-const PAGES_MAX_TOKENS = 3000;
+/**
+ * 页面片段的预算：N 屏 HTML + 标注。
+ *
+ * 比上一版（3000）翻倍，因为现在每屏都是**真的 HTML**（状态栏、导航、卡片、弹窗…），
+ * 一屏 300–500 token 很正常，5 个页面节点就吃掉旧预算。给少了模型会开始截断，
+ * 截断的 HTML 又会被 `wt-` 类校验拒掉——那是一次白花的调用。
+ */
+const FRAGMENTS_MAX_TOKENS = 6000;
 
 /** 形状判据（与本文件头「判据 1」对应）。上限刻意不判：图更大不是错。 */
 const MIN_NODES = 3;
@@ -83,13 +101,16 @@ export type ComposeDeps = {
   complete: (cfg: ProviderConfig, prompt: string, opts?: { maxTokens?: number; timeoutMs?: number }) => Promise<ProviderResult>;
   render: (mermaid: string) => Promise<FlowCheck>;
   resolveConfig: () => Promise<ProviderConfig | null>;
+  /** 拼好的 walkmap → HTML。真实实现是 vendored 的 `build.py`（子进程）。 */
+  build: (walkmap: Walkmap, assets: WalkmapAssets) => Promise<BuildResult>;
 };
 
-/** 真实的三个依赖：真 HTTP、真 Python 排版器、真配置解析。 */
+/** 真实的四个依赖：真 HTTP、真 Python 排版器、真配置解析、真 walkmap 构建器。 */
 const LIVE: ComposeDeps = {
   complete,
   render: (mermaid) => renderFlowchart(mermaid),
   resolveConfig: resolveProviderConfig,
+  build: (walkmap, assets) => renderWalkthrough(walkmap, assets),
 };
 
 // ─── 入参与出参 ──────────────────────────────────────────────────────────────
@@ -257,67 +278,111 @@ export function repairPrompt(
   ].join('\n');
 }
 
-// ─── 提示词 2：页面说明（结构化 JSON） ───────────────────────────────────────
+// ─── 提示词 2：页面片段（上游 walkmap 契约的输入） ──────────────────────────
 
-/** 图里解析出来的一个节点。`kind` 决定页面上显示成「页面 / 系统 / 判断」。 */
+/** 图里解析出来的一个节点。`kind` 决定它该画页面还是只写标注。 */
 export type FlowNode = { id: string; label: string; kind: 'process' | 'decision' | 'backend' };
 
+/** 模型交回来的一份页面片段。`html` 我们**一个字都不改**，原样写进临时目录。 */
+export type PageFragment = {
+  id: string;
+  title: string;
+  kind: NodeKind;
+  frame: Frame;
+  /** `kind=page` 时是 body 内的片段；`system` / `decision` 是空串（它们没有页面）。 */
+  html: string;
+  anno: Anno[];
+};
+
+export type FragmentDoc = { nodes: PageFragment[] };
+
+/** 图里的节点形态 → 契约里的节点形态。后台环节在上游叫 system。 */
+export function kindOf(node: FlowNode): NodeKind {
+  if (node.kind === 'decision') return 'decision';
+  if (node.kind === 'backend') return 'system';
+  return 'page';
+}
+
 /**
- * 页面说明的提示词。
+ * 提示词 2：每个节点交一份**页面片段**，不再是我们的私有 JSON。
  *
- * 为什么把 JSON 形状整个写进提示词：`extractJson` 只负责「从回话里抠出一个能
- * `JSON.parse` 的对象」，字段口径由这里定义、由 zod 校验。少一个字段模型不会自己
- * 补，多一个字段也不该让整份材料作废——所以 schema 允许缺省（`.default([])`），
- * 但要求**每个节点都有条目**（由 `readPages` 校验，缺一个就要重来）。
+ * 为什么把 `page-guide.md` 的规则**抄进提示词**：模型读不到仓库里的文件。而这一版
+ * 材料要过的关是上游的 `build.py`——它只认 `wt-*` 组件类、只认 375 / 690 两种宽度、
+ * 见到 emoji 直接拒。这些规则写不进提示词，模型就会交一份自认为漂亮的 HTML，然后在
+ * 校验那一步被整份打回。规则下面那些**会变的部分**（节点清单、状态、编号）才是每次
+ * 不同的东西。
+ *
+ * 为什么 `system` / `decision` 只交标注：上游 SKILL.md 的原则是「无页面的步骤不建
+ * 节点」。判断与后台环节本来就没有用户能看到的页面，硬画一个就是编页面。它们的
+ * 说明写进标注（`anno`），由 `assembleWalkmap` 折进前一个页面节点——正是上游那句
+ * "动作说明写进前一节点的标注"。
  */
-export function pagesPrompt(req: RequirementRow, stage: Stage, nodes: FlowNode[]): string {
-  const list = nodes.map((node) => `  ${node.id}  ${node.label}`).join('\n');
+export function fragmentsPrompt(req: RequirementRow, stage: Stage, nodes: FlowNode[]): string {
+  const list = nodes
+    .map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`)
+    .join('\n');
 
   return [
-    `下面是 PAN-${req.number}「${flat(req.title)}」这张流程图已经定稿的节点（id 与文案）：`,
+    `你在为 PAN-${req.number}「${flat(req.title)}」画走查页面。`,
+    `这份材料是${NOUN[stage]}：${FOCUS[stage]}`,
+    '',
+    '流程图已经定稿，节点清单（id / 形态 / 文案）：',
     list,
     '',
-    `请为每个节点写一份页面说明，输出**一个** JSON 对象（不要代码围栏、不要解释），形状如下：`,
+    '请为每个节点交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
+    ' 1. 设备框就是用户的手机屏幕或浏览器窗口：框里每一段文字都必须是上线后用户真的会看到的内容。',
+    '    设计理由、边界条件、「本期不做 / 待确认」、演示操作说明一律不写；元素下方不加解释性的小字。',
+    ' 2. 手机页面按 375px 宽画（frame 写 phone）；后台与网页页面放 690px 宽的窗口（frame 写 wide）。',
+    ' 3. 只用模板内置的 wt-* 组件类，不自带 <style>、不引外部资源：',
+    '    wt-screen（整屏容器）、wt-statusbar、wt-nav（wt-nav-back / wt-nav-title / wt-nav-action）、',
+    '    wt-titlebar、wt-body、wt-card、wt-section、wt-list / wt-list-item / wt-li-main / wt-li-title /',
+    '    wt-li-sub / wt-li-extra / wt-li-arrow、wt-input、wt-btn（整行主按钮）/ wt-btn-ghost / wt-btn-sm、',
+    '    wt-badge、wt-dimtext、wt-tabs / wt-tab / wt-on、wt-empty、wt-img、wt-bottombar、',
+    '    wt-modal / wt-dialog / wt-dialog-title / wt-dialog-body / wt-dialog-actions、wt-toast、',
+    '    wt-browserbar（后台地址栏）、wt-table。',
+    ' 4. 只写 body 内的片段：不要 <html>、<head>、<body>、<script>、<style>。',
+    ' 5. 一个状态一份片段：同一页面因规则不同而出现的态（弹窗、toast、空态、只读态）各写一份；',
+    '    弹窗态 = 原页面 + wt-modal（放在 wt-screen 里），toast 态 = 原页面 + wt-toast。',
+    '    不同状态之间共用的那部分结构必须一模一样，评审才比得出来。',
+    ` 6. 页面上能推进流程的按钮写 onclick="goNode('节点id')"，id 必须是上面清单里的 id。`,
+    ' 7. 不用 emoji（构建器硬校验，出现即整份材料被拒）。图片用 wt-img 占位，图标用文字占位。',
+    ' 8. 只画需求里有的内容，不自行添加功能；PRD 没给的细节用中性占位内容，不要写「PRD 未提供」。',
     '',
+    '输出：**一个** JSON 对象（不要代码围栏、不要解释），nodes 里每个节点一条：',
     '{',
     '  "nodes": [',
-    '    {',
-    '      "id": "A",',
-    '      "kind": "page",',
-    '      "title": "进入寄养频道",',
-    '      "field": ["宠物类型（下拉）", "寄养日期（日期选择）"],',
-    '      "button": ["下一步"],',
-    '      "note": ["未登录时先走登录，不在这里拦"],',
-    '      "states": [',
-    '        { "name": "默认", "desc": ["展示频道介绍与入口按钮"] },',
-    '        { "name": "加载中", "desc": ["骨架屏，不展示假数据"] }',
-    '      ]',
-    '    },',
-    '    { "id": "B", "kind": "decision", "title": "是否登录？", "field": [], "button": [],',
-    '      "note": ["判定依据：会话里有没有用户"], "states": [] },',
-    '    { "id": "G", "kind": "system", "title": "门店接单后台", "field": ["订单号"],',
-    '      "button": ["接单", "拒单"], "note": ["非前端环节：门店在后台看到这张单"], "states": [] }',
+    '    { "id": "A", "kind": "page", "frame": "phone", "title": "进入寄养频道",',
+    '      "html": "<div class=\\"wt-screen\\"><div class=\\"wt-statusbar\\"><span>9:41</span>'
+      + '<span class=\\"wt-sb-icons\\"></span></div><div class=\\"wt-nav\\">'
+      + '<span class=\\"wt-nav-title\\">寄养</span></div><div class=\\"wt-body\\">'
+      + '<div class=\\"wt-card\\">…</div></div></div>",',
+    '      "anno": [["内容", "按距离列出可寄养门店"], ["操作", "点「立即预约」后判断是否首次预约"]] },',
+    '    { "id": "B", "kind": "decision", "title": "是否登录？",',
+    '      "anno": [["判定依据", "会话里有没有用户"]] }',
     '  ]',
     '}',
     '',
     '规则：',
-    ' 1. id 必须与上面给的节点 id 一一对应，一个不多一个不少。',
-    ` 2. kind 只能是 "page" | "system" | "decision"：用户看得到页面/弹层/表单的写 page，`,
-    '    后台或外部系统写 system，流程图里的判断节点写 decision。',
-    ' 3. page 必须有 title、至少 1 条 field、至少 1 条 button、至少 1 条 states；',
-    '    field 是这一步的输入项（写清控件形态），button 是这一步能点的动作，',
-    '    note 是约束、风险与「PRD 未提供」的推断（推断的就在 note 里标「PRD 未提供」）。',
-    ' 4. states 是这一步的页面状态：默认 / 加载中 / 空 / 失败 / 无权限 / 超时……',
-    '    正常流程至少要有「默认」；异常状态宁可多写，那是评审最常问的地方。',
-    '    states 为空数组仅限 decision 与 system。',
-    ' 5. 全部中文，每一条不超过 20 个字，不要 emoji。',
-    ` 6. 这份材料的用途：${FOCUS[stage]}`,
-    ' 7. 只输出 JSON 本身：第一个字符是 {，最后一个字符是 }。',
+    ' 1. id 必须与清单一一对应，一个不多一个不少；kind 与清单里的形态一致。',
+    ' 2. kind=page 必须给 frame 与 html（html 是完整可渲染的一屏，不是描述）；',
+    '    kind=system / decision **不要**给 html——流程图里它本来就没有页面，只给 anno。',
+    ' 3. anno 是右栏标注：每项 ["小标题", "正文"]，小标题 2–6 个字，正文一句话；',
+    '    要指页面位置时写成「[A] 顶部状态卡片」，编号只写在标注里、不画进页面。',
+    '    每页 1–3 条，只写设计约束、判定依据、边界与风险，不要重复页面里已有的文案。',
+    ' 4. title 用清单里的节点文案，不要改写。全部中文。',
+    ' 5. 只输出 JSON 本身：第一个字符是 {，最后一个字符是 }。',
   ].join('\n');
 }
 
-/** 改 JSON 的提示词：上一版 + 哪里不合规 + 规则再来一遍。 */
-export function pagesRepairPrompt(
+/**
+ * 改片段的提示词：上一版原文 + **哪一条规则没过** + 规则再来一遍。
+ *
+ * `why` 可能是两种东西，但模型看到的形状是一样的：
+ * - `readFragments` 的 JSON / 覆盖率问题（少节点、多节点、结构不对）；
+ * - `validateWalkmap` 的一句话（「节点 X 没有对应的页面」「页面 X 的片段没有使用 wt- 类」）。
+ * 两者都写成「问题：…」，因为对模型而言都是「你交的这份哪里不合规」。
+ */
+export function fragmentsRepairPrompt(
   req: RequirementRow,
   stage: Stage,
   nodes: FlowNode[],
@@ -325,58 +390,65 @@ export function pagesRepairPrompt(
   why: string,
 ): string {
   const trimmed = previous.trim();
-  const shown = trimmed.length > 1200 ? `${trimmed.slice(0, 1200)}…` : trimmed;
+  const shown = trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
   return [
-    `上一版的页面说明不合规（PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}）。`,
+    `上一版的页面片段没有过校验（PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}）。`,
     '',
     '上一版原文：',
     shown === '' ? '（空）' : shown,
     '',
     `问题：${why}`,
     '',
-    '节点清单（id 与文案，一个都不能少）：',
-    nodes.map((node) => `  ${node.id}  ${node.label}`).join('\n'),
+    '节点清单（id / 形态 / 文案，一个都不能少）：',
+    nodes.map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`).join('\n'),
     '',
-    '请重发**完整**的 JSON：{"nodes":[{"id","kind","title","field":[],"button":[],"note":[],"states":[{"name","desc":[]}]}]}。',
-    'kind 只能是 page / system / decision；page 的 states 至少 1 条；全部中文；不要代码围栏、不要解释。',
-    '只输出 JSON 本身。',
+    '重发**完整**的 JSON，形状不变：',
+    '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]]}]}',
+    'kind=page 给 frame 与 html；kind=system / decision 只给 anno，不要给 html。',
+    'html 只用 wt-* 组件类、只写 body 内片段、不用 emoji；一个状态一份片段；',
+    '页面上推进流程的按钮写 onclick="goNode(\'节点id\')"。全部中文，只输出 JSON 本身。',
   ].join('\n');
 }
 
-// ─── 页面说明的 schema 与校验 ────────────────────────────────────────────────
+// ─── 页面片段的 schema 与校验 ────────────────────────────────────────────────
 
-const StateSchema = z.object({
-  name: z.string().min(1),
-  desc: z.array(z.string()).default([]),
-});
+const AnnoSchema = z.array(z.string().min(1)).min(2).max(3);
 
-const NodeDocSchema = z.object({
+const FragmentSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(['page', 'system', 'decision']),
   title: z.string().min(1),
-  field: z.array(z.string()).default([]),
-  button: z.array(z.string()).default([]),
-  note: z.array(z.string()).default([]),
-  states: z.array(StateSchema).default([]),
+  frame: z.enum(['phone', 'wide']).default('phone'),
+  html: z.string().default(''),
+  anno: z.array(AnnoSchema).default([]),
 });
 
-const PagesSchema = z.object({ nodes: z.array(NodeDocSchema).min(1) });
+const FragmentsSchema = z.object({ nodes: z.array(FragmentSchema).min(1) });
 
-export type PagesDoc = z.infer<typeof PagesSchema>;
-export type NodeDoc = z.infer<typeof NodeDocSchema>;
+function toAnno(pairs: string[][]): Anno[] {
+  return pairs.map((pair) => (pair.length >= 3
+    ? [pair[0]!, pair[1]!, pair[2]!] as Anno
+    : [pair[0]!, pair[1]!] as Anno));
+}
 
 /**
- * 校验一份页面说明：JSON 抠得出来 + zod 通过 + **节点全覆盖**。
+ * 校验一份页面片段回话：JSON 抠得出来 + zod 通过 + **节点全覆盖** + 每条 kind 的义务。
  *
- * 「节点全覆盖」是这里唯一一条超出 zod 的规矩：少一个节点，成品页面上那里就是一个
- * 空壳，而空壳在评审里比「没有这一步」更误导——看图的人会以为这一步真的没有页面。
- * 多出来的节点直接告错（不静默丢弃）：那是模型把图改错了的信号。
+ * 与 `readPages` 同一套覆盖率口径（少一个节点就重来：空壳页面在评审里比「没有这一步」
+ * 更误导），多出来的是 kind 的义务：`page` 必须有能看的一屏 html，`system` / `decision`
+ * 不许有（它们没有页面，硬画一个就是编）。
+ *
+ * 这一层**不查** `wt-*` 类与 emoji：那是 walkmap 契约的事，由 `validateWalkmap` 说，
+ * 报错格式也统一在那里（一句话、可重试）。两层分工清楚，错误就不会两处各说一半。
  */
-export function readPages(text: string, ids: string[]): { ok: true; doc: PagesDoc } | { ok: false; why: string } {
+export function readFragments(
+  text: string,
+  ids: string[],
+): { ok: true; doc: FragmentDoc } | { ok: false; why: string } {
   const raw = extractJson<unknown>(text);
   if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
 
-  const parsed = PagesSchema.safeParse(raw);
+  const parsed = FragmentsSchema.safeParse(raw);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue === undefined ? '结构不对' : `${issue.path.join('.') || '(根)'}：${issue.message}`;
@@ -384,16 +456,129 @@ export function readPages(text: string, ids: string[]): { ok: true; doc: PagesDo
   }
 
   const seen = new Set<string>();
+  const nodes: PageFragment[] = [];
   for (const node of parsed.data.nodes) {
     if (seen.has(node.id)) return { ok: false, why: `节点 ${node.id} 写了两遍` };
     seen.add(node.id);
+
+    const html = node.html.trim();
+    if (node.kind === 'page') {
+      if (html === '') return { ok: false, why: `节点 ${node.id} 是页面，但没有给 html` };
+      if (!html.includes('<')) return { ok: false, why: `节点 ${node.id} 的 html 不是 HTML 片段` };
+    }
+
+    nodes.push({
+      id: node.id,
+      title: node.title,
+      kind: node.kind,
+      frame: node.frame,
+      html: node.kind === 'page' ? html : '',
+      anno: toAnno(node.anno),
+    });
   }
+
   const missing = ids.filter((id) => !seen.has(id));
-  if (missing.length > 0) return { ok: false, why: `这些节点没有说明：${missing.join('、')}` };
+  if (missing.length > 0) return { ok: false, why: `这些节点没有页面片段：${missing.join('、')}` };
   const extra = [...seen].filter((id) => !ids.includes(id));
   if (extra.length > 0) return { ok: false, why: `多出了图里不存在的节点：${extra.join('、')}` };
 
-  return { ok: true, doc: parsed.data };
+  return { ok: true, doc: { nodes } };
+}
+
+// ─── 拼 walkmap：片段 → 契约 JSON ────────────────────────────────────────────
+
+/** 形态在提示词清单里的名字。 */
+const KIND_NOUN: Record<NodeKind, string> = { page: '页面', system: '系统', decision: '判断' };
+
+/** 片段内容的**身份**：同一份字节就是同一个页面（去重、成组的唯一依据）。 */
+function fragmentKey(html: string): string {
+  return html.replace(/\r\n/g, '\n').trim();
+}
+
+export type Assembly = {
+  walkmap: Walkmap;
+  /** 页面 id → 片段原文。`renderWalkthrough` 会把它落成真实文件。 */
+  fragments: Record<string, string>;
+  /** 没有自己的页面、被挂到别的节点页面上的环节（判断 / 系统）。 */
+  detached: Array<{ node: string; page: string }>;
+};
+
+/**
+ * 页面片段 → walkmap/1 的 JSON。三条规则，全部写在这里：
+ *
+ * 1. **一份片段一个页面**：内容完全相同的片段共用同一个 `pages[].id`（id 取第一次
+ *    出现的节点 id，前缀 `p-`），所以「同一页」在 walkmap 里只有一个文件。
+ * 2. **同一页面被多个页面节点使用 = 一组状态**：组名取这些标题的公共前缀
+ *    （「寄养首页 · 未预约」→「寄养首页」），状态的 label 就是节点标题；单状态不建组
+ *    （上游硬规则：右侧不放按钮）。推导在 `deriveStateGroups`。
+ * 3. **判断 / 系统环节没有自己的页面**：它们不建 `pages` 条目，而是挂到**前一个**
+ *    页面节点的页面上（没有前一个就挂后一个），标注留在自己身上——所以点它不会
+ *    变成死点，右栏写的正是「这一步为什么在这里」。上游口径是「无页面的步骤不建
+ *    节点、动作说明写进前一节点的标注」；我们的流程图里这种节点已经画出来了，
+ *    能做的只有把它挂到它发生的那个页面上，而不是替它编一个页面。
+ *
+ * 纯函数：不读磁盘、不看时钟。同一份片段永远得到同一份 walkmap。
+ */
+export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: string }): Assembly {
+  const pageOf = new Map<string, string>();
+  const pages: PageInput[] = [];
+  const fragments: Record<string, string> = {};
+
+  const nodes: NodeInput[] = [];
+  const pageNode = new Map<string, NodeInput>();
+  const detached: Array<{ node: string; page: string }> = [];
+
+  /** 折标注用：离这个下标最近的页面节点（先往前找、再往后找）。 */
+  const nearestPage = (index: number): NodeInput | undefined => {
+    for (let i = index - 1; i >= 0; i -= 1) {
+      const hit = pageNode.get(doc.nodes[i]!.id);
+      if (hit !== undefined) return hit;
+    }
+    for (let i = index + 1; i < doc.nodes.length; i += 1) {
+      const hit = pageNode.get(doc.nodes[i]!.id);
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  };
+
+  doc.nodes.forEach((fragment, index) => {
+    if (fragment.kind !== 'page' || fragment.html === '') {
+      const host = nearestPage(index);
+      // 没有任何页面节点时校验会说「一个页面片段都没有」；这里先按无页面记。
+      if (host === undefined) {
+        nodes.push({ id: fragment.id, title: fragment.title, kind: fragment.kind, anno: fragment.anno });
+        return;
+      }
+      detached.push({ node: fragment.id, page: host.page ?? '' });
+      nodes.push({ id: fragment.id, title: fragment.title, kind: fragment.kind, page: host.page, anno: fragment.anno });
+      return;
+    }
+
+    const key = fragmentKey(fragment.html);
+    let pageId = pageOf.get(key);
+    if (pageId === undefined) {
+      pageId = `p-${fragment.id}`;
+      pageOf.set(key, pageId);
+      pages.push({ id: pageId, frame: fragment.frame, html: fragment.html });
+      fragments[pageId] = fragment.html;
+    }
+
+    const node: NodeInput = {
+      id: fragment.id,
+      title: fragment.title,
+      kind: 'page',
+      page: pageId,
+      anno: fragment.anno,
+    };
+    pageNode.set(fragment.id, node);
+    nodes.push(node);
+  });
+
+  return {
+    walkmap: buildWalkmap({ title: opts.title, svg: opts.svg, nodes, pages }),
+    fragments,
+    detached,
+  };
 }
 
 // ─── mermaid 的取文、解析与形状 ──────────────────────────────────────────────
@@ -596,299 +781,59 @@ async function buildFlow(
   throw new AppError('flow_rejected', '流程图没有通过检查');
 }
 
-/** 页面说明这一关：问 → `extractJson` → zod + 全覆盖 → 不合规就再问一次。 */
+/**
+ * 页面片段这一关：问 → 读（zod + 全覆盖）→ 拼 walkmap → 校验（build.py 的规则镜像）
+ * → 不合规就带着**那一句话**再问一次。
+ *
+ * 为什么把「拼装 + 校验」放进重试循环里：模型交的东西有两种坏法——JSON 形状不对
+ * （`readFragments` 说），和 JSON 合法但 walkmap 不合格（`validateWalkmap` 说，
+ * 例如某页没有片段、片段没用 `wt-*` 类、状态组只剩一个状态）。对模型而言这两种
+ * 都是「这份哪里不合规」，修法也一样：整份重发。所以它们共用一次重试预算，
+ * 也共用同一句 `why`。
+ *
+ * 为什么**先校验再 spawn**：spawn 一个 Python 进程去解释一份已经知道是错的东西，
+ * 只会在错误信息前面多一层 `Traceback`。校验过了再交给 build.py，它的报错就只
+ * 剩「我们自己的 bug」这一类。
+ */
 async function buildPages(
   cfg: ProviderConfig,
   req: RequirementRow,
   stage: Stage,
   nodes: FlowNode[],
+  flow: { svg: string },
   deps: ComposeDeps,
   usage: ComposeUsage,
-): Promise<{ doc: PagesDoc; usage: ComposeUsage }> {
+): Promise<{ assembly: Assembly; warnings: string[]; usage: ComposeUsage }> {
   const ids = nodes.map((node) => node.id);
-  let prompt = pagesPrompt(req, stage, nodes);
+  const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;
+  let prompt = fragmentsPrompt(req, stage, nodes);
   let spent = usage;
   let why = '';
 
   for (let attempt = 1; attempt <= MAX_PAGES_ATTEMPTS; attempt += 1) {
-    const reply = await deps.complete(cfg, prompt, { maxTokens: PAGES_MAX_TOKENS, timeoutMs: CALL_TIMEOUT_MS });
+    const reply = await deps.complete(cfg, prompt, { maxTokens: FRAGMENTS_MAX_TOKENS, timeoutMs: CALL_TIMEOUT_MS });
     if (!reply.ok) throw new AppError('provider_error', reply.error);
     spent = addUsage(spent, reply.usage);
 
-    const read = readPages(reply.text, ids);
-    if (read.ok) return { doc: read.doc, usage: spent };
+    const read = readFragments(reply.text, ids);
+    if (!read.ok) {
+      why = read.why;
+    } else {
+      const assembly = assembleWalkmap(read.doc, { title, svg: flow.svg });
+      const report = validateWalkmap(assembly.walkmap, { svg: flow.svg, fragments: assembly.fragments });
+      if (report.ok) return { assembly, warnings: report.warnings, usage: spent };
+      // 校验器的原话直接当 `why`：它就是我们要在界面上说的那一句。
+      why = report.errors.join('；');
+    }
 
-    why = read.why;
     if (attempt === MAX_PAGES_ATTEMPTS) break;
-    prompt = pagesRepairPrompt(req, stage, nodes, reply.text, why);
+    prompt = fragmentsRepairPrompt(req, stage, nodes, reply.text, why);
   }
 
   throw new AppError(
     'pages_rejected',
-    `页面说明 ${MAX_PAGES_ATTEMPTS} 次都没通过校验：${why}`,
+    `页面片段 ${MAX_PAGES_ATTEMPTS} 次都没通过校验：${why}`,
   );
-}
-
-// ─── 产物：确定性渲染 ────────────────────────────────────────────────────────
-
-const ESCAPES: Record<string, string> = {
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-};
-
-/** HTML 转义（文本与属性共用一份）。节点文案来自模型，必须当**数据**写进文档。 */
-function esc(value: string): string {
-  return value.replace(/[&<>"']/g, (ch) => ESCAPES[ch]!);
-}
-
-const KIND_TEXT: Record<NodeDoc['kind'], string> = { page: '页面', system: '系统', decision: '判断' };
-
-/** 一个节点在左侧列表里的那一行。 */
-function listItem(node: FlowNode, doc: NodeDoc | undefined): string {
-  const kind = doc?.kind ?? (node.kind === 'decision' ? 'decision' : node.kind === 'backend' ? 'system' : 'page');
-  const title = doc?.title ?? node.label;
-  return [
-    '      <li>',
-    `        <button type="button" class="node-btn" data-node="${esc(node.id)}">`,
-    `          <span class="nid">${esc(node.id)}</span>`,
-    `          <span class="ntitle">${esc(title)}</span>`,
-    `          <span class="nkind ${kind}">${KIND_TEXT[kind]}</span>`,
-    '        </button>',
-    '      </li>',
-  ].join('\n');
-}
-
-/** 中栏：一个节点的页面（或系统/判断规则）。 */
-function paneOf(node: FlowNode, doc: NodeDoc | undefined, first: boolean): string {
-  const kind = doc?.kind ?? (node.kind === 'decision' ? 'decision' : node.kind === 'backend' ? 'system' : 'page');
-  const title = doc?.title ?? node.label;
-  const blocks: string[] = [];
-
-  if (doc !== undefined && doc.field.length > 0) {
-    blocks.push([
-      '        <section class="blk">',
-      '          <h3>字段</h3>',
-      '          <ul class="items">',
-      ...doc.field.map((item) => `            <li>${esc(item)}</li>`),
-      '          </ul>',
-      '        </section>',
-    ].join('\n'));
-  }
-  if (doc !== undefined && doc.button.length > 0) {
-    blocks.push([
-      '        <section class="blk">',
-      '          <h3>按钮</h3>',
-      '          <div class="btns">',
-      ...doc.button.map((item) => `            <span class="btn">${esc(item)}</span>`),
-      '          </div>',
-      '        </section>',
-    ].join('\n'));
-  }
-  if (doc !== undefined && doc.note.length > 0) {
-    blocks.push([
-      '        <section class="blk">',
-      '          <h3>说明</h3>',
-      '          <ul class="items">',
-      ...doc.note.map((item) => `            <li>${esc(item)}</li>`),
-      '          </ul>',
-      '        </section>',
-    ].join('\n'));
-  }
-  if (blocks.length === 0) {
-    blocks.push('        <p class="empty">这一版没有写这一步的内容。</p>');
-  }
-
-  return [
-    `      <div class="pane${kind === 'page' ? '' : ' pane-wide'}" data-pane="${esc(node.id)}"${first ? '' : ' hidden'}>`,
-    '        <div class="frame">',
-    `          <div class="frame-bar"><span class="nid">${esc(node.id)}</span>`
-      + `<strong>${esc(title)}</strong><span class="nkind ${kind}">${KIND_TEXT[kind]}</span></div>`,
-    '          <div class="frame-body">',
-    ...blocks,
-    '          </div>',
-    '        </div>',
-    '      </div>',
-  ].join('\n');
-}
-
-/** 右栏：同一节点的状态。 */
-function statesOf(node: FlowNode, doc: NodeDoc | undefined, first: boolean): string {
-  const states = doc?.states ?? [];
-  const body = states.length === 0
-    ? ['        <p class="empty">这一步没有写状态。</p>']
-    : [
-      '        <ol class="state-list">',
-      ...states.flatMap((state) => [
-        '          <li>',
-        `            <strong>${esc(state.name)}</strong>`,
-        state.desc.length === 0 ? '' : '            <ul class="items">',
-        ...state.desc.map((item) => `              <li>${esc(item)}</li>`),
-        state.desc.length === 0 ? '' : '            </ul>',
-        '          </li>',
-      ]),
-      '        </ol>',
-    ];
-  return [
-    `      <div class="states" data-states="${esc(node.id)}"${first ? '' : ' hidden'}>`,
-    `        <p class="who">${esc(doc?.title ?? node.label)}</p>`,
-    ...body.filter((line) => line !== ''),
-    '      </div>',
-  ].join('\n');
-}
-
-const CSS = `
-:root { --ink:#1b1c1f; --mute:#6b6f76; --line:#e3e5e8; --bg:#f6f7f9; --card:#fff; --accent:#2f6df6; }
-* { box-sizing:border-box; }
-body { margin:0; background:var(--bg); color:var(--ink);
-  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif; }
-.head { padding:18px 24px 14px; background:var(--card); border-bottom:1px solid var(--line); }
-.head .pan { display:inline-block; font-size:12px; letter-spacing:.04em; color:var(--mute); }
-.head h1 { margin:4px 0 6px; font-size:20px; line-height:1.3; }
-.head .meta { margin:0; font-size:12px; color:var(--mute); }
-.wrap { display:grid; grid-template-columns:minmax(340px,470px) minmax(320px,1fr) minmax(200px,290px);
-  gap:14px; padding:16px 20px 32px; align-items:start; }
-.col { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
-.h2 { margin:0 0 10px; font-size:13px; font-weight:600; color:var(--mute); letter-spacing:.02em; }
-.h2 .hint { font-weight:400; }
-.svg-box { overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
-.svg-box svg { display:block; width:100%; height:auto; }
-.node-list { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:6px; }
-.node-btn { display:flex; width:100%; gap:8px; align-items:center; padding:7px 9px; text-align:left;
-  border:1px solid var(--line); border-radius:8px; background:#fff; cursor:pointer; font:inherit; color:inherit; }
-.node-btn:hover { border-color:var(--accent); }
-.node-btn.on { border-color:var(--accent); box-shadow:0 0 0 2px rgba(47,109,246,.15); }
-.nid { flex:none; min-width:22px; padding:1px 5px; border-radius:5px; background:var(--bg);
-  color:var(--mute); font-size:11px; text-align:center; }
-.ntitle { flex:1; font-size:13px; line-height:1.35; }
-.nkind { flex:none; font-size:11px; padding:1px 6px; border-radius:999px; border:1px solid var(--line); color:var(--mute); }
-.nkind.page { border-color:#bcd0fb; color:#2557c9; background:#f2f6ff; }
-.nkind.system { border-color:#c9ccd2; color:#4d5259; background:#f1f2f4; }
-.nkind.decision { border-color:#e6d5a8; color:#8a6a15; background:#fdf7e6; }
-.pane[hidden], .states[hidden] { display:none; }
-.frame { border:1px solid var(--line); border-radius:12px; overflow:hidden; }
-.pane-wide .frame { border-style:dashed; }
-.frame-bar { display:flex; gap:8px; align-items:center; padding:9px 12px; background:var(--bg); border-bottom:1px solid var(--line); }
-.frame-bar strong { font-size:14px; }
-.frame-body { padding:12px; display:flex; flex-direction:column; gap:12px; }
-.blk h3 { margin:0 0 6px; font-size:12px; color:var(--mute); font-weight:600; }
-.items { margin:0; padding-left:18px; font-size:13px; line-height:1.6; }
-.btns { display:flex; flex-wrap:wrap; gap:8px; }
-.btn { padding:6px 14px; border-radius:7px; background:var(--accent); color:#fff; font-size:13px; }
-.empty { margin:0; font-size:12px; color:var(--mute); }
-.who { margin:0 0 8px; font-size:13px; font-weight:600; }
-.state-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
-.state-list > li { border-left:2px solid var(--line); padding-left:10px; }
-.state-list strong { font-size:13px; }
-@media (max-width:1100px) { .wrap { grid-template-columns:1fr; } }
-`.trim();
-
-/** 切换的脚本：点图上的节点、点左侧列表，三栏一起动。没有外部依赖、没有构建。 */
-const SCRIPT = `
-(function () {
-  var panes = Array.prototype.slice.call(document.querySelectorAll('[data-pane]'));
-  var states = Array.prototype.slice.call(document.querySelectorAll('[data-states]'));
-  var nodes = Array.prototype.slice.call(document.querySelectorAll('[data-node]'));
-  function show(id) {
-    panes.forEach(function (el) { el.hidden = el.getAttribute('data-pane') !== id; });
-    states.forEach(function (el) { el.hidden = el.getAttribute('data-states') !== id; });
-    nodes.forEach(function (el) {
-      var on = el.getAttribute('data-node') === id;
-      if (el.tagName.toLowerCase() === 'button') el.classList.toggle('on', on);
-      else el.classList.toggle('sel', on);
-    });
-    var ring = document.getElementById('sel-ring');
-    var group = document.querySelector('[data-node="' + id + '"]:not(button)');
-    if (ring && group && group.getBBox) {
-      var b = group.getBBox();
-      ring.setAttribute('x', b.x - 7);
-      ring.setAttribute('y', b.y - 7);
-      ring.setAttribute('width', b.width + 14);
-      ring.setAttribute('height', b.height + 14);
-      ring.setAttribute('visibility', 'visible');
-    }
-  }
-  document.addEventListener('click', function (event) {
-    var target = event.target;
-    if (!target || !target.closest) return;
-    var hit = target.closest('[data-node]');
-    if (hit) show(hit.getAttribute('data-node'));
-  });
-  if (nodes.length > 0) show(nodes[0].getAttribute('data-node'));
-})();
-`.trim();
-
-export type ArtifactInput = {
-  req: RequirementRow;
-  stage: Stage;
-  svg: string;
-  nodes: FlowNode[];
-  doc: PagesDoc;
-};
-
-/**
- * 把「先验过」的三样东西拼成一份自足 HTML：左=流程图 + 节点列表，中=页面，右=状态。
- *
- * 为什么 HTML 由我们写而不是让模型写：
- * - 模型写的 HTML 每一次都不一样，改一个字就要重看一遍整页；
- * - 这里的三栏是**同一份数据**的三个视图（mermaid 节点、页面 JSON、状态 JSON），
- *   渲染是纯函数——同一份输入永远得到同一份字节，评审看到的东西就不会漂。
- *
- * 自足：样式与脚本内联、无 CDN、无相对资源。产物经 `/uemaster/...` 出去时带有
- * `Content-Security-Policy: sandbox allow-scripts; default-src 'none'`（见路由），
- * 所以内联的 style/script 是**唯一**能用的东西——引一个外部字体就会静默失效。
- */
-export function renderArtifact(input: ArtifactInput): string {
-  const { req, stage, svg, nodes, doc } = input;
-  const byId = new Map(doc.nodes.map((node) => [node.id, node]));
-  const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;
-  const meta = `类型 ${flat(req.type)} · 提出人 ${flat(req.requester)}`
-    + ` · ${NOUN[stage]} · ${nodes.length} 个流程节点`;
-
-  const items = nodes.map((node) => listItem(node, byId.get(node.id))).join('\n');
-  const panes = nodes.map((node, index) => paneOf(node, byId.get(node.id), index === 0)).join('\n');
-  const states = nodes.map((node, index) => statesOf(node, byId.get(node.id), index === 0)).join('\n');
-
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(title)}</title>
-<style>
-${CSS}
-</style>
-</head>
-<body>
-<header class="head">
-  <span class="pan">PAN-${req.number}</span>
-  <h1>${esc(flat(req.title))}</h1>
-  <p class="meta">${esc(meta)}</p>
-</header>
-<main class="wrap">
-  <aside class="col">
-    <h2 class="h2">业务流程</h2>
-    <div class="svg-box">
-${svg.trim()}
-    </div>
-    <h2 class="h2" style="margin-top:14px">流程节点 <span class="hint">（点图上节点或这里的行切换）</span></h2>
-    <ol class="node-list">
-${items}
-    </ol>
-  </aside>
-  <section class="col">
-    <h2 class="h2">页面</h2>
-${panes}
-  </section>
-  <aside class="col">
-    <h2 class="h2">状态</h2>
-${states}
-  </aside>
-</main>
-<script>
-${SCRIPT}
-</script>
-</body>
-</html>
-`;
 }
 
 // ─── 入口 ────────────────────────────────────────────────────────────────────
@@ -896,8 +841,12 @@ ${SCRIPT}
 /**
  * 把一条需求做成一份**查过**的评估材料，落盘、attach、返回站内路径。
  *
- * 顺序是硬的：先拿配置（没有就点名缺什么）→ 图（3 次上限，验过才收）→ 页面说明
- * （2 次上限，schema + 全覆盖）→ 渲染 → 写文件 → `attachArtifact`。
+ * 顺序是硬的：先拿配置（没有就点名缺什么）→ 图（3 次上限，验过才收）→ 页面片段
+ * （2 次上限，JSON + walkmap 契约）→ **build.py 出 HTML** → 写文件 → `attachArtifact`。
+ *
+ * 材料本身不再是我们的模板：第二段之后的 HTML 由 vendored 的 `build.py` 产出，
+ * 与 UEmaster 的 flow-walkthrough 技能的产物是同一份实现、同一套样式。我们这一侧
+ * 只负责「把模型交的片段拼成契约要求的样子」，以及「在 spawn 之前把话说清楚」。
  *
  * 为什么写文件在 attach 之前：`attachArtifact` 会 stat 站内链接（没有文件就是
  * `artifact_missing`），而且它在同一个事务里把 inbox 的需求推到待设计。文件先落地，
@@ -928,16 +877,23 @@ export async function composeEvaluation(
   const flow = await buildFlow(cfg, req, stage, full, usage);
   usage = flow.usage;
 
-  // 节点清单只解析一次：提示词 2、左侧列表、中右两栏都用它，三处不会漂。
+  const svg = flow.check.svg ?? '';
+  // 节点清单只解析一次：提示词 2、拼 walkmap、日志都用它，三处不会漂。
   const nodes = parseFlow(flow.mermaid).nodes;
-  const pages = await buildPages(cfg, req, stage, nodes, full, usage);
+  const pages = await buildPages(cfg, req, stage, nodes, { svg }, full, usage);
   usage = pages.usage;
 
-  const html = renderArtifact({ req, stage, svg: flow.check.svg ?? '', nodes, doc: pages.doc });
+  const built = await full.build(pages.assembly.walkmap, {
+    svg,
+    fragments: pages.assembly.fragments,
+  });
+  if (!built.ok || built.html === undefined) {
+    throw new AppError('walkmap_rejected', `走查页构建失败：${built.error ?? built.errors.join('；')}`);
+  }
 
   const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, `${stage}.html`);
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, html, 'utf8');
+  await writeFile(file, built.html, 'utf8');
 
   const url = artifactUrl(file);
   const artifact = await attachArtifact(db, actor, { requirementId, stage, url });
