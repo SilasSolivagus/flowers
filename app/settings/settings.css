@@ -1,0 +1,41 @@
+/* 设置页专属样式。**不进 globals.css**：那是共享外壳表，此刻有别的任务在改它；
+   设置这一组（.setwrap / .stabs / .stab / .sg）只被 /settings 消费，留在页面自己的
+   样式表里，谁改谁的就动谁的文件。
+
+   来源：~/Flower/docs/ux/gate-console/views.css 的「设置」一段（已评审版本），
+   声明逐字移植；只有三处必要适配，都是为了把「客户端切 class」换成「服务端渲染的链接」：
+   1. `.stab.on` → `.stab[aria-current="page"]`：tab 的选中态由 ?tab= 查询参数决定，
+      服务端渲染时就是 aria-current，页面里没有一行 JS 去加 class；
+   2. `.stab` 现在是 `<a>`：补 display:inline-flex / align-items / text-decoration:none，
+      并给它一个键盘焦点环（与 .rail > a、.member select 同一套 tokens）；
+   3. 行内的长值（姓名拼接、角色名）允许折行：`.i .l` / `.v` 加 min-width:0 与
+      overflow-wrap:anywhere。`.i` 是 flex，不折断的长串会把整行顶出 390 宽的屏幕。
+
+   铁律与 globals.css 一致：颜色一律 var(--c-*)，不写字面色值。 */
+
+/* 上游 .setwrap 用 24px 的左右内边距、880px 的上限：设置是读的表，不是看板，
+   1280 宽下不该被拉成一张横跨全屏的表格。 */
+.setwrap{padding:16px 24px 32px;max-width:880px}
+
+.stabs{display:flex;gap:4px;border-bottom:1px solid var(--c-line);margin-bottom:16px}
+.stab{display:inline-flex;align-items:center;height:36px;padding:0 12px;font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-3);border-bottom:2px solid transparent;margin-bottom:-1px;text-decoration:none}
+.stab[aria-current="page"]{color:var(--c-text-1);font-weight:600;border-bottom-color:var(--c-accent)}
+.stab:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
+
+.sg{background:var(--c-surface);border:1px solid var(--c-line);border-radius:var(--r-sm);margin-bottom:16px;overflow:hidden}
+.sg .h{padding:12px 16px;border-bottom:1px solid var(--c-line);font:600 var(--t-body-s) var(--f-sans)}
+/* 一个 .i 就是一行「标签 → 值」。设置页上除 tab 之外只有这一种形状：
+   行标签在左、值在右，没有第三种（没有开关、没有说明段落）。 */
+.sg .i{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--c-line)}
+.sg .i:last-child{border-bottom:0}
+.sg .i .l{min-width:0}
+.sg .i .l b{display:block;font:500 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
+.sg .i .v{margin-left:auto;min-width:0;text-align:right;color:var(--c-text-2);font:400 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
+.sg .i .v.mono{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-3)}
+
+/* 工作流是**有序**列表，序号是信息（状态机的顺序），所以用 <ol>：
+   屏幕阅读器念「10 项，第 1 项」比念十行并列的键值对更接近它本来是什么。
+   <ol> 的浏览器序号（1. 2. 3.）被去掉，换成与 .i 同一档的等宽号位——
+   十行里「01」与「10」同宽，数字列不会一抖一抖。 */
+.sg .wf{margin:0;padding:0;list-style:none}
+.sg .wf .n{flex:0 0 2.5ch;font:400 var(--t-caption) var(--f-num);color:var(--c-text-4)}
