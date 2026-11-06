@@ -41,7 +41,9 @@ export default async function BoardPage({
   return (
     <main className="view">
       <Board columns={columns} />
-      {detail !== null && <Drawer detail={detail} releases={releases} />}
+      {/* key 是需求 id：从 A 的抽屉直接跳到 B 的抽屉（URL 导航）时，整块重新挂载，
+          上一个动作留下的失败消息与表单值不会跟着漂到另一条需求上。 */}
+      {detail !== null && <Drawer key={detail.id} detail={detail} releases={releases} />}
     </main>
   );
 }

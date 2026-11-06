@@ -157,6 +157,9 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .dfail{padding:10px 24px;border-top:1px solid var(--c-line);color:var(--c-negative);
        background:color-mix(in srgb, var(--c-negative) 8%, var(--c-surface));
        font:400 var(--t-caption) var(--f-sans)}
+/* 新增：同一句话在 sheet 里再显示一遍（失败的表单不关，原因就在眼前）。
+   sheet 的左右内边距是 20px，且 header 已经有下边框，所以去掉这条上边框。 */
+.sheet .dfail{border-top:0;padding:10px 20px}
 /* 新增：抽屉表单里的控件焦点环，与顶栏的 .member select 同一套（UA 默认的蓝色焦点环不属这套 tokens） */
 .fld input:focus-visible,.fld select:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
 

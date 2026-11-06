@@ -151,19 +151,23 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
             </section>
           )}
 
-          {/* ⑤ 记录：事件流本身，最新的在最下面（seq 升序，读模型定的） */}
-          <section className="dsec">
-            <h3>记录</h3>
-            {detail.events.map((event) => (
-              <div className="rec" key={event.seq}>
-                <span className="t">{event.dateLabel}</span>
-                <span>
-                  {actorLabel(event.actor)} {event.label}
-                  {event.note !== null ? ` · ${event.note}` : ''}
-                </span>
-              </div>
-            ))}
-          </section>
+          {/* ⑤ 记录：事件流本身，最新的在最下面（seq 升序，读模型定的）。
+              与其余几段同一条规矩：一次事件都没有就不画这一段的标题——
+              一个空的「记录」框只是家具。 */}
+          {detail.events.length > 0 && (
+            <section className="dsec">
+              <h3>记录</h3>
+              {detail.events.map((event) => (
+                <div className="rec" key={event.seq}>
+                  <span className="t">{event.dateLabel}</span>
+                  <span>
+                    {actorLabel(event.actor)} {event.label}
+                    {event.note !== null ? ` · ${event.note}` : ''}
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
         </div>
 
         {/* ⑥ 动作：只显示当前状态合法的那些；已拒绝这种终态没有动作，就不渲染动作条 */}

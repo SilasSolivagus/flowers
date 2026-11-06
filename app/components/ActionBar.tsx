@@ -78,28 +78,57 @@ async function submit(_prev: ActionResult, formData: FormData): Promise<ActionRe
   return runAction(formData);
 }
 
+/** 提交那一刻表单里的字段值原样记下来（失败后要把它们放回输入框）。 */
+function readForm(form: HTMLFormElement | null): Record<string, string> {
+  const values: Record<string, string> = {};
+  if (form === null) return values;
+  for (const [key, value] of new FormData(form).entries()) values[key] = String(value);
+  return values;
+}
+
 export function ActionBar({
   id, actions, releases,
 }: { id: string; actions: DetailAction[]; releases: ReleaseOption[] }) {
   const [state, formAction, pending] = useActionState(submit, IDLE);
   const [open, setOpen] = useState<DetailAction | null>(null);
+  /** 最近一次提交的是哪个动作，以及它提交出去的字段值。 */
+  const [last, setLast] = useState<{ action: DetailAction; values: Record<string, string> } | null>(null);
 
-  // 一次提交有了结果就把表单收起：成功之后合法动作已经换了；失败的那句话要落在
-  // 抽屉里（动作条上方），不能继续被 sheet 的遮罩挡着。
-  useEffect(() => { setOpen(null); }, [state]);
+  // 只有成功才收起表单。失败必须留在原地：PRD 链接、两个日期是这界面上最贵的输入，
+  // 关掉表单等于把它们扔掉，而用户还要一边看着原因一边改。
+  useEffect(() => { if (state.ok) setOpen(null); }, [state]);
 
   const message = state.ok ? null : state.message;
+
+  // 当前动作已经不在合法集合里（时钟把这条需求推进了、或同事先做了一步）→ 这张表单
+  // 整个不渲染：它上面的按钮再点一次只会撞同一个 illegal_transition。这条同时是
+  // 「提交成功后表单自己消失」的机械保证——每一种迁移都会换掉合法动作集合。
+  const sheet = open !== null && actions.includes(open) ? open : null;
+  // 失败的是这张表单才回填它的字段值、才在表单里显示那句话；换一个动作就是干净的一张表。
+  const seed = last !== null && last.action === sheet ? last.values : {};
+  const sheetMessage = last !== null && last.action === sheet ? message : null;
+
+  function remember(action: DetailAction, form: HTMLFormElement | null) {
+    setLast({ action, values: readForm(form) });
+  }
 
   return (
     <>
       <div className="dfoot">
-        {/* 失败的原文照登：领域层的中文消息就是给用户看的，不再包一层「操作失败」 */}
+        {/* 失败的原文照登：领域层的中文消息就是给用户看的，不再包一层「操作失败」。
+            这一处是唯一的 alert 区域——表单里会再显示一遍同一句话（那份只是文字，
+            不再 alert 一次，否则读屏会听见两遍）。 */}
         {message !== null && <div className="dfail" role="alert">{message}</div>}
         <div className="db">
           {actions.map((action) => (
             FIELDS[action].length === 0 ? (
               // 无字段的动作：点下去就是一次表单提交（不是按钮上挂事件）
-              <form className="act" action={formAction} key={action}>
+              <form
+                className="act"
+                action={formAction}
+                key={action}
+                onSubmit={(event) => remember(action, event.currentTarget)}
+              >
                 <input type="hidden" name="act" value={action} />
                 <input type="hidden" name="id" value={id} />
                 <button className="btn" type="submit" disabled={pending}>{LABEL[action]}</button>
@@ -120,7 +149,7 @@ export function ActionBar({
         </div>
       </div>
 
-      {open !== null && (
+      {sheet !== null && (
         <div
           className="sheet on"
           onClick={(event) => {
@@ -128,23 +157,33 @@ export function ActionBar({
           }}
         >
           <div className="box">
-            <form action={formAction}>
-              <input type="hidden" name="act" value={open} />
+            <form action={formAction} onSubmit={(event) => remember(sheet, event.currentTarget)}>
+              <input type="hidden" name="act" value={sheet} />
               <input type="hidden" name="id" value={id} />
-              <div className="h">{LABEL[open]}</div>
-              {FIELDS[open].length > 0 && (
+              <div className="h">{LABEL[sheet]}</div>
+              {sheetMessage !== null && <div className="dfail">{sheetMessage}</div>}
+              {FIELDS[sheet].length > 0 && (
                 <div className="b">
-                  {FIELDS[open].map((f) => (
+                  {FIELDS[sheet].map((f) => (
                     <div className="fld" key={f.name}>
                       <label htmlFor={`field-${f.name}`}>{f.label}</label>
                       {f.kind === 'release' ? (
-                        <select id={`field-${f.name}`} name={f.name} defaultValue={releases[0]?.id}>
+                        <select
+                          id={`field-${f.name}`}
+                          name={f.name}
+                          defaultValue={seed[f.name] ?? releases[0]?.id}
+                        >
                           {releases.map((r) => (
                             <option key={r.id} value={r.id}>{r.name} · {r.window}</option>
                           ))}
                         </select>
                       ) : (
-                        <input id={`field-${f.name}`} name={f.name} type={f.kind} />
+                        <input
+                          id={`field-${f.name}`}
+                          name={f.name}
+                          type={f.kind}
+                          defaultValue={seed[f.name] ?? ''}
+                        />
                       )}
                     </div>
                   ))}
@@ -153,7 +192,7 @@ export function ActionBar({
               <div className="f">
                 <button className="btn" type="button" onClick={() => setOpen(null)}>取消</button>
                 <button className="btn primary" type="submit" disabled={pending}>
-                  {LABEL[open]}
+                  {LABEL[sheet]}
                 </button>
               </div>
             </form>

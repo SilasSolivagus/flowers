@@ -43,18 +43,25 @@ function field(formData: FormData, name: string): string {
  *   而用户和排查的人只看到一句话术。这里让它们穿到 Next 的错误边界上（dev 里是
  *   覆盖层，生产里是 500），宁可吵，也不装作成功。
  *
- * revalidatePath 只在成功之后调：失败的一次提交什么都没改，不需要重取。
+ * revalidatePath 放在 finally 里，成功与失败都刷：
+ * 失败**不等于**「什么都没改」。最常见的两种拒绝恰恰是「服务端已经和页面不一样了」——
+ * `illegal_transition`（时钟把这条需求推进了，例如 test 自己上到 live）与
+ * `not_found`（同事先把这一步做掉了）。只在成功路径上刷，抽屉会继续显示旧状态、继续
+ * 提供已经不可能成功的按钮，用户每点一次都撞同一句话，只能手动刷新才能恢复。
+ * 刷新不会抹掉失败原因：`useActionState` 的返回值在客户端，服务端重新渲染的只是
+ * 六段与动作条，所以用户看着「为什么失败」的同时，按钮集合在下面跟着变对。
  */
 async function run(call: (actor: string) => Promise<unknown>): Promise<ActionResult> {
   const actor = await currentMember();
   try {
     await call(actor);
+    return { ok: true };
   } catch (error) {
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
+  } finally {
+    revalidatePath('/');
   }
-  revalidatePath('/');
-  return { ok: true };
 }
 
 /** 评估：inbox → design。 */
