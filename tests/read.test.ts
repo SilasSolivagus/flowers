@@ -12,6 +12,7 @@ import { makeRelease } from './helpers/factory.js';
 import { getBoard } from '../src/core/read/board.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
+import { cleanArtifacts, writeArtifact } from './helpers/files.js';
 import { listReleases } from '../src/core/read/version.js';
 import { actorFromCookie, DEFAULT_MEMBER, listMembers } from '../src/core/read/member.js';
 
@@ -31,6 +32,8 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  // attach 现在会 stat 站内链接，这些用例在 public/uemaster/ 下造了真文件。
+  await cleanArtifacts();
   await pool.end();
 });
 
@@ -445,6 +448,7 @@ function shanghaiMonthDay(now: Date = new Date()): string {
 describe('参考段：三处槽位从产物表读', () => {
   it('有产物时该槽位 present 为真，带 url 与当天的 atLabel', async () => {
     const r = await seedInbox('房超');
+    await writeArtifact('/uemaster/PAN-7/evaluate.html');
     await attachArtifact(db, '吕品', {
       requirementId: r.id, stage: 'evaluate', url: '/uemaster/PAN-7/evaluate.html',
     });
@@ -478,12 +482,14 @@ describe('参考段：三处槽位从产物表读', () => {
   it('同一个 stage 有多份时读最新那一份', async () => {
     const r = await seedInbox('房超');
     const target = { requirementId: r.id, stage: 'evaluate' as const };
+    await writeArtifact('/uemaster/PAN-7/evaluate-v1.html');
     await attachArtifact(db, '吕品', { ...target, url: '/uemaster/PAN-7/evaluate-v1.html' });
     // 两行同一毫秒写入时 `created_at desc` 会打平，定序就落到随机的 uuid 上：
     // 用例把第一份按下去一小时，读侧的选择才有唯一答案。
     await db.execute(sql`
       update uemaster_artifacts set created_at = now() - interval '1 hour'
        where requirement_id = ${r.id}`);
+    await writeArtifact('/uemaster/PAN-7/evaluate-v2.html');
     await attachArtifact(db, '吕品', { ...target, url: '/uemaster/PAN-7/evaluate-v2.html' });
 
     const d = (await getRequirementDetail(r.id))!;
@@ -503,6 +509,7 @@ describe('参考段：三处槽位从产物表读', () => {
       label: 'PRD 快照', url: 'https://docs.example.com/prd/r', present: true,
     });
 
+    await writeArtifact('/uemaster/PAN-7/review.html');
     await attachArtifact(db, '吕品', {
       requirementId: id, stage: 'review', url: '/uemaster/PAN-7/review.html',
     });
@@ -533,6 +540,7 @@ describe('参考段：三处槽位从产物表读', () => {
    */
   it('提交产物的事件在时间轴上是中文，不是 uemaster.attached', async () => {
     const r = await seedInbox('房超');
+    await writeArtifact('/uemaster/PAN-7/inspect.html');
     await attachArtifact(db, '吕品', {
       requirementId: r.id, stage: 'inspect', url: '/uemaster/PAN-7/inspect.html',
     });

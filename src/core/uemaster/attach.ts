@@ -1,3 +1,5 @@
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
@@ -23,22 +25,98 @@ function parseStage(value: unknown): Stage {
 }
 
 /**
+ * C0 控制字符（含 tab/换行）与空白，外加反斜杠。
+ *
+ * 为什么要在**解析之前**拒：WHATWG 的 URL 解析器会把 tab、LF、CR 从输入里直接
+ * 剔掉，所以 `/<TAB>/evil.com/x.html` 落地就是 `//evil.com/x.html`；而在 http(s)
+ * 这类特殊 scheme 下反斜杠等价于 `/`，`/\evil.com/x.html` 同样解析成
+ * `//evil.com/x.html`。两个字符串都「以 / 开头」却都指向站外——只查前缀的守卫
+ * 会被它们绕过去。合法产物路径里不含这些字符，直接拒掉最省事。
+ */
+const FORBIDDEN_IN_URL = /[\u0000-\u0020\u007f\\]/;
+
+/**
+ * 逐层解码（最多两层），用于识破 `/%2F/evil.com` 这种「解码后才变成协议相对」的形状。
+ *
+ * 非法百分号编码（`/%E0%A4%A`）解不开就按原文继续判：浏览器会把它当字面字符，
+ * 而它仍然是站内路径；真正的「文件不存在」由后面的 stat 负责说。
+ */
+function decodedLayers(url: string): string {
+  let out = url;
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      const next = decodeURIComponent(out);
+      if (next === out) break;
+      out = next;
+    } catch {
+      break;
+    }
+  }
+  return out;
+}
+
+/**
  * 产物链接的两种合法形状：完整 http(s) 链接，或以 `/` 开头的站内路径。
  *
  * 为什么站内路径是必需的形状：agent 把文件写在 `public/uemaster/...`，交回来的
  * 就是 `/uemaster/PAN-7/evaluate.html`；要求它拼一个绝对域名只会拼错。
  *
- * 为什么排除 `//host/x`：那在浏览器里是协议相对 URL，等于打开站外的 http(s) 页面。
- * 它虽然「以 / 开头」，却不是站内路径——放行它等于给抽屉里开一个去任意站点的跳板。
+ * 为什么连 `javascript:` / `data:` 一起收在 invalid_url 里：抽屉会把这个值直接
+ * 渲染成 <a href>，那两种 scheme 一旦落库就是一个储存型脚本执行点。
  *
- * 为什么连 `javascript:` 一起收在 invalid_url 里：抽屉会把这个值直接渲染成 <a href>，
- * `javascript:` / `data:` 一旦落库就是一个储存型脚本执行点。
+ * 归一化（控制字符、反斜杠、解码后的 `//`）见 `FORBIDDEN_IN_URL` 与
+ * `decodedLayers`：判的是「浏览器最终会把它解析成什么」，不是「字符串长什么样」。
  */
 function parseUrl(value: unknown): string {
   const url = asText(value);
-  const siteRelative = url.startsWith('/') && !url.startsWith('//');
+  if (FORBIDDEN_IN_URL.test(url)) throw new AppError('invalid_url', BAD_URL);
+
+  const decoded = decodedLayers(url);
+  if (FORBIDDEN_IN_URL.test(decoded)) throw new AppError('invalid_url', BAD_URL);
+  // 解码后以 `//` 开头：浏览器会当协议相对 URL，等于打开站外页面。
+  const siteRelative = url.startsWith('/') && !decoded.startsWith('//');
+
   if (!/^https?:\/\//i.test(url) && !siteRelative) throw new AppError('invalid_url', BAD_URL);
   return url;
+}
+
+/**
+ * 站内链接 → 磁盘路径。
+ *
+ * 站内路径的解析基准是**本项目根目录下的 public/**：`/uemaster/PAN-7/evaluate.html`
+ * 对应 `public/uemaster/PAN-7/evaluate.html`。`path.resolve` 会把 `..` 折叠掉，所以
+ * 折完还要回头确认仍落在 public 里——否则 `/uemaster/../../.env` 能读到仓库任意文件。
+ */
+function siteFile(url: string): string {
+  const root = path.resolve(process.cwd(), 'public');
+  const abs = path.resolve(root, `.${url}`);
+  const rel = path.relative(root, abs);
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new AppError('invalid_url', BAD_URL);
+  }
+  return abs;
+}
+
+/**
+ * 站内链接必须有文件在后面。
+ *
+ * 为什么在服务层验：attach 说成功、抽屉里出现一行链接、点开 404——这是最难查的
+ * 一种坏，因为每一层都「没错」。产物是 agent 写出来的文件，写没写是**可验的事实**，
+ * 就该在交回来的时候验掉。http(s) 链接不验：那种产物在别人的服务器上，够不着。
+ */
+async function assertSiteFileExists(url: string): Promise<void> {
+  const file = siteFile(url);
+  const rel = `public${url}`;
+  try {
+    const info = await stat(file);
+    if (info.isFile()) return;
+  } catch {
+    // 落到下面统一报错：不存在与「存在但不是文件」对调用方是同一件事。
+  }
+  throw new AppError(
+    'artifact_missing',
+    `产物文件不存在：${rel} —— 先把文件写到项目根目录下的 ${rel}，再把链接交回来`,
+  );
 }
 
 /**
@@ -53,6 +131,9 @@ function parseUrl(value: unknown): string {
  * 存在性检查放在事务里、并且用一次 `select` 而不是直接 insert：外键冲突抛的是英文的
  * 23503，而「这条需求不存在」是调用方（MCP agent）最常撞上的错误，得给它中文 code。
  * 不加行锁——本次不改需求状态，没有需要串行化的写。
+ *
+ * 顺序是「需求存在」→「站内文件存在」→ insert：需求 id 打错时该报「需求不存在」，
+ * 而不是报一个跟这条需求毫无关系的文件缺失。
  */
 export async function attachArtifact(
   db: Db,
@@ -70,6 +151,9 @@ export async function attachArtifact(
       sql`select id from requirements where id = ${requirementId}`,
     );
     if (found.rows.length === 0) throw new AppError('not_found', NO_REQUIREMENT);
+
+    // 只验站内路径：http(s) 的产物在别人服务器上，这里够不着。
+    if (url.startsWith('/')) await assertSiteFileExists(url);
 
     const inserted = await tx.execute<{ id: string }>(sql`
       insert into uemaster_artifacts (requirement_id, stage, url, created_by)
