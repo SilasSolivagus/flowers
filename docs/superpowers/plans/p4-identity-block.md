@@ -73,9 +73,49 @@ URL 参数或 dev-only 控件里的后门。
 - `12-ce-390.png` — 390 收起（默认档）：同上，看板不被挤坏
 - `13-ce-390-expanded.png` — 390 手动展开（184px）：同样不溢出
 
-（截图时把 Next 的 dev 指示浮标 `nextjs-portal` 隐掉了，否则它正好压住左下角身份块。）
+（当时那几张是把 Next 的 dev 指示浮标 `nextjs-portal` 手动隐掉的——它正好压住左下角身份块；
+现在 `next.config.ts` 里 `devIndicators: false` 直接关掉了，见文末补记。）
 
 ## 验证
 
 - `npx tsc --noEmit` 干净；
 - `npx vitest run` 239 passed，随后 `npm run seed -- --reset` 已把演示数据灌回。
+
+## 补记：dev 指示浮标关掉，并复检左轨底部
+
+### 配置键
+
+`next.config.ts` 顶层加 `devIndicators: false`。
+
+选它而不是「把浮标挪个角」：装的 16.4.5 里这个键的类型是
+`devIndicators?: false | { position?: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' }`
+（`node_modules/next/dist/server/config-shared.d.ts:1532`，默认值 `{ position: 'bottom-left' }`
+在同文件 1831 行的完整配置里）。布尔就是「整个关掉」，对象只是换位置——而四个角里
+左下角正好压着身份块，右上角压顶栏标题、右下角压在途卡片，挪到哪儿都还是有一块浮标挡内容。
+所以用布尔。
+
+A/B 验过：把这一行临时改成 `{ position: 'bottom-left' }`，dev 服务热重启后黑色「N」圆标
+立刻回来、正压住「吕品 / PM」（截图当时存在 `/tmp/ab-with-badge.png`，不进仓库）；
+改回 `false` 后同一个视口同一份截图里圆标消失。所以是这个键在起作用，不是缓存或巧合。
+（`nextjs-portal` 这个宿主元素仍在 DOM 里，但它是 0×0——圆标在它的 shadow root 里，
+量宿主量不出来，只有截图算数。）
+
+### 三个状态的左轨底部
+
+截图在 `docs/superpowers/shots/`（每张另附 `-rail.png` 是左轨底部 140px 的 2× 放大裁切）：
+
+- `14-dev-1280-expanded.png`（1280 展开，184px）——设置 → hairline → 吕品 / PM，
+  圆标没了，整块读得清；底边到视口还有 12px（`.rail` 的 `padding-bottom`），
+  上不贴导航、下不贴边，是「一组」而不是「贴边的一堆字」。
+- `15-dev-1280-collapsed.png`（1280 收起，56px）——设 / hairline / 吕 竖着叠在一起、都居中，
+  一条 hairline 把它们括成一组；间距是 10px（`.me` 收起态的 `padding-top`），
+  读起来是一块，不是两个互不相干的东西。
+- `16-dev-390-collapsed.png`（390 收起，默认档）——与 1280 收起逐像素同形（裁切图 sha 相同），
+  居中、无溢出，`documentElement.scrollWidth === 390`。
+
+量出来的几何（三种状态一致）：`.me` 高 53px / 收起 31px，底边距恒为 12px，
+`.rail` 的 `scrollWidth === clientWidth`（183 / 55），页面上没有任何 `position: fixed`
+元素落在左下 160px 内。
+
+**结论：间距没动。** 圆标是唯一压在身份块上的东西，它一走，12px 的底边距与 10px 的
+hairline 间距就是对的——没有为了「看起来改过」而调 CSS。

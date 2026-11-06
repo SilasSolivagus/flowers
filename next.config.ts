@@ -7,6 +7,12 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ['pg'],
   // 本地验证用 127.0.0.1 打开时不至于被 dev 资源跨源策略挡掉 HMR。
   allowedDevOrigins: ['127.0.0.1'],
+  // 关掉 dev 指示浮标（左下角的黑色「N」圆标）。它固定在视口左下角，
+  // 与左轨底部的身份块（吕品 / PM）完全重叠，dev 下那块内容读不出来、
+  // 每张截图都带着一个圆标。16.4.5 的 next/dist/server/config-shared.d.ts:1532
+  // 把它声明成 `false | { position?: 'top-left' | ... }`——布尔就是「整个关掉」，
+  // 不是删掉一项配置；这里要的是关掉，不是挪位置。
+  devIndicators: false,
   experimental: {
     // 领域层（src/core）用的是 NodeNext 风格的相对导入：`import ... from './errors.js'`。
     // 这是 Node 直接跑 .ts（tsx / vitest）时唯一正确的写法，也是 P1 全仓的统一风格。
