@@ -133,7 +133,7 @@ export async function shelveRequirement(db: Db, actor: string, raw: unknown) {
  * 编号 / PRD 链接这些身份信息保留，排期信息等重新排期时再覆盖。
  *
  * 迁移表里只有 `shelved → inbox` 这一对通向 inbox，所以只按 from/to 配对判断就够：
- * 对别的状态调恢复都会撞 illegal_transition（'不能从「dev」直接到「inbox」'）。
+ * 对别的状态调恢复都会撞 illegal_transition（'不能从「开发中」直接到「收集」'）。
  */
 export async function restoreRequirement(db: Db, actor: string, raw: unknown) {
   const input = requirePlainObject(raw);

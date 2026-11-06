@@ -11,6 +11,7 @@ import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal.js';
 import { AppError } from '../src/core/errors.js';
+import { STATE_LABEL } from '../src/core/state-machine.js';
 import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { makeQueued, makeReadyAt, makeRelease, reviewerOf } from './helpers/factory.js';
@@ -229,7 +230,7 @@ describe('evaluate', () => {
     await evaluate(db, '吕品', { requirementId: r.id });
 
     expect(await caught(evaluate(db, '吕品', { requirementId: r.id }))).toMatchObject({
-      code: 'illegal_transition', message: '不能从「design」直接到「design」',
+      code: 'illegal_transition', message: '不能从「待设计」直接到「待设计」',
     });
     expect((await rowOf(r.id)).state).toBe('design');
   });
@@ -342,7 +343,7 @@ describe('submitReview', () => {
 
     expect(await caught(submitReview(db, '吕品', {
       requirementId: r.id, prdUrl: 'https://y/prd',
-    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「review」直接到「review」' });
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「待评审」直接到「待评审」' });
     expect((await rowOf(r.id)).prd_url).toBe('https://x/prd');
   });
 
@@ -362,7 +363,7 @@ describe('submitReview', () => {
     const reason = (bad[0] as PromiseRejectedResult).reason;
     expect(reason).toBeInstanceOf(AppError);
     expect(reason).toMatchObject({
-      code: 'illegal_transition', message: '不能从「review」直接到「review」',
+      code: 'illegal_transition', message: '不能从「待评审」直接到「待评审」',
     });
 
     const winner = ok[0] as PromiseFulfilledResult<{ state: string; skippedEvaluation: boolean }>;
@@ -557,7 +558,7 @@ describe('评审派单、通过与打回', () => {
   it('不在待评审状态时通过 / 打回都报 illegal_transition', async () => {
     const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: fresh.id }))).toMatchObject({
-      code: 'illegal_transition', message: '不能从「inbox」直接到「queue」',
+      code: 'illegal_transition', message: '不能从「收集」直接到「待排期」',
     });
     // 打回的措辞（I2）：inbox → design 是**合法**的一对（评估的路子），所以这里
     // 报的是「当前在收集状态，不能执行这一步」——说「不能从 inbox 到 design」会让
@@ -573,7 +574,7 @@ describe('评审派单、通过与打回', () => {
     const passed = await inReview();
     await reviewPass(db, '吕正豪', { requirementId: passed.id });
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: passed.id }))).toMatchObject({
-      code: 'illegal_transition', message: '不能从「queue」直接到「queue」',
+      code: 'illegal_transition', message: '不能从「待排期」直接到「待排期」',
     });
     expect((await rowOf(passed.id)).state).toBe('queue');
   });
@@ -582,7 +583,7 @@ describe('评审派单、通过与打回', () => {
     const r = await inReview();
     expect(await caught(submitReview(db, '吕品', {
       requirementId: r.id, prdUrl: 'https://y',
-    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「review」直接到「review」' });
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「待评审」直接到「待评审」' });
 
     expect(await assignmentsOf(r.id)).toHaveLength(1);
   });
@@ -790,7 +791,7 @@ describe('排期（三个日期）', () => {
     const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(schedule(db, '吕品', {
       requirementId: fresh.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
-    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「inbox」直接到「ready」' });
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「收集」直接到「待开发」' });
     expect((await scheduledColumnsOf(fresh.id)).state).toBe('inbox');
 
     // 已经排过期的再排一次
@@ -802,7 +803,7 @@ describe('排期（三个日期）', () => {
     const other = await makeRelease('2027.01', '2027-01-01', '2027-01-08');
     expect(await caught(schedule(db, '吕品', {
       requirementId: done.id, releaseId: other, commitTestAt: '2027-01-05', commitDueAt: '2027-01-06',
-    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「ready」直接到「ready」' });
+    }))).toMatchObject({ code: 'illegal_transition', message: '不能从「待开发」直接到「待开发」' });
 
     const kept = await scheduledColumnsOf(done.id);
     expect(kept.release_id).toBe(rel);
@@ -832,7 +833,7 @@ describe('排期（三个日期）', () => {
     const reason = (bad[0] as PromiseRejectedResult).reason;
     expect(reason).toBeInstanceOf(AppError);
     expect(reason).toMatchObject({
-      code: 'illegal_transition', message: '不能从「ready」直接到「ready」',
+      code: 'illegal_transition', message: '不能从「待开发」直接到「待开发」',
     });
 
     // 只有一次写成功：一条事件，日期是两次提交里合法的那一个。
@@ -1095,7 +1096,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     expect(iso((await datesOf(id)).commit_due_at)).toBe('2099-12-31T00:00:00.000Z');
   });
 
-  it.each(['dev', 'design', 'inbox'])('从「%s」打回报 illegal_transition，行不动', async (from) => {
+  it.each(['dev', 'design', 'inbox'] as const)('从「%s」打回报 illegal_transition，行不动', async (from) => {
     const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = ${from} where id = ${r.id}`);
     const before = await eventCountOf(r.id);
@@ -1103,7 +1104,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     expect(await caught(bounce(db, '王妍', {
       requirementId: r.id, reason: '自测没过', newCommitDueAt: '2026-12-10',
     }, NOW))).toMatchObject({
-      code: 'illegal_transition', message: `不能从「${from}」直接到「dev」`,
+      code: 'illegal_transition', message: `不能从「${STATE_LABEL[from]}」直接到「开发中」`,
     });
 
     const row = await datesOf(r.id);
@@ -1424,16 +1425,16 @@ describe('拒绝 / 搁置 / 恢复', () => {
     expect(await eventCountOf(r.id)).toBe(before);
   });
 
-  it.each(['inbox', 'design', 'queue', 'dev', 'live', 'rejected'])(
+  it.each(['inbox', 'design', 'queue', 'dev', 'live', 'rejected'] as const)(
     '从「%s」恢复都是 illegal_transition，行不动', async (from) => {
       const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
       await forceState(r.id, from);
       const before = await eventCountOf(r.id);
 
       // 状态机里只有 shelved → inbox 这一对通向 inbox，所以报错沿用状态机的措辞：
-      // 「不能从「dev」直接到「inbox」」——恢复不是回退到某一步，是从搁置里出来。
+      // 「不能从「开发中」直接到「收集」」——恢复不是回退到某一步，是从搁置里出来。
       expect(await caught(restoreRequirement(db, '吕品', { requirementId: r.id })))
-        .toMatchObject({ code: 'illegal_transition', message: `不能从「${from}」直接到「inbox」` });
+        .toMatchObject({ code: 'illegal_transition', message: `不能从「${STATE_LABEL[from]}」直接到「收集」` });
 
       expect(await stateOf(r.id)).toBe(from);
       expect(await eventCountOf(r.id)).toBe(before);
@@ -1450,7 +1451,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
     expect(await caught(shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' })))
       .toMatchObject({ code: 'illegal_transition', message: '终态不能再搁置' });
     expect(await caught(restoreRequirement(db, '吕品', { requirementId: r.id })))
-      .toMatchObject({ code: 'illegal_transition', message: '不能从「rejected」直接到「inbox」' });
+      .toMatchObject({ code: 'illegal_transition', message: '不能从「已拒绝」直接到「收集」' });
 
     expect(await stateOf(r.id)).toBe('rejected');
     expect(await eventCountOf(r.id)).toBe(before);

@@ -181,7 +181,7 @@ describe('tick 的边与 TRANSITIONS 同源', () => {
  * I2：同一对 from/to 可能有多条路，只有 trigger 能区分。
  *
  * 这里钉住的是**措辞**：配对存在、动作不对时，报的必须是「当前在某个状态，不能执行
- * 这一步」，不能报「不能从「inbox」直接到「design」」——后者是合法迁移，用户会以为
+ * 这一步」，不能报「不能从「收集」直接到「待设计」」——后者是合法迁移，用户会以为
  * 状态机坏了。
  */
 describe('assertTrigger — 配对合法但动作不对', () => {
@@ -220,9 +220,10 @@ describe('assertTrigger — 配对合法但动作不对', () => {
   });
 
   it('配对本身不存在时报的是配对（两条消息各管一件事）', () => {
+    // R44：这条消息会渲染到界面上，所以两端都是 STATE_LABEL，不是 State 原值。
     expect(caught(() => assertTrigger('inbox' as State, 'dev' as State, 'evaluate')))
       .toMatchObject({
-        code: 'illegal_transition', message: '不能从「inbox」直接到「dev」',
+        code: 'illegal_transition', message: '不能从「收集」直接到「开发中」',
       });
   });
 });

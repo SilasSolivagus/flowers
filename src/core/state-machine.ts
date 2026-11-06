@@ -82,9 +82,23 @@ export function clockTransitions(): readonly Transition[] {
  */
 export type TransitionContext = { hasPrd?: boolean; hasType?: boolean };
 
+/**
+ * 按 from/to 取那一行迁移；没有这一对就是状态机的边界。
+ *
+ * 报错的两个人名用 `STATE_LABEL` 而不是 `State` 原值（R44）：这句话会被渲染到界面
+ * 上（抽屉的动作失败消息），而 `State` 是库里/代码里的英文枚举，用户看到的会变成
+ * 「不能从「queue」直接到「queue」」——同一条消息在 `assertTrigger` 里一直是中文的，
+ * 两处措辞不一致只是因为 `find()` 先抛。措辞沿用 `assertTrigger` 的形状：
+ * 「不能从「x」直接到「y」」，两端都取标签。
+ */
 export function find(from: State, to: State): Transition {
   const t = TRANSITIONS.find((x) => x.from === from && x.to === to);
-  if (!t) throw new AppError('illegal_transition', `不能从「${from}」直接到「${to}」`);
+  if (!t) {
+    throw new AppError(
+      'illegal_transition',
+      `不能从「${STATE_LABEL[from]}」直接到「${STATE_LABEL[to]}」`,
+    );
+  }
   return t;
 }
 
@@ -120,9 +134,10 @@ export function assertTransition(
  * 光看配对，走错门的动作会被当成合法迁移执行，静默顶掉别人那一步。
  *
  * 出错时的措辞分开：
- * - 配对本身不存在 → 「不能从「x」直接到「y」」（这是状态机的边界，用户看得懂）；
+ * - 配对本身不存在 → 「不能从「待评审」直接到「待排期」」（这是状态机的边界，用户看得懂；
+ *   两端都是中文名，R44 见 find）；
  * - 配对存在但动作不对 → 「这条需求当前在「待评审」，不能执行这一步」。
- *   不能报配对：`inbox → design` 是**合法**的一对，说「不能从 inbox 到 design」
+ *   不能报配对：`inbox → design` 是**合法**的一对，说「不能从「收集」直接到「待设计」」
  *   等于告诉用户状态机坏了。
  *
  * 顺序：先查配对、再查动作、最后查门。动作不对时**不许**先报门——对一条 inbox 的
