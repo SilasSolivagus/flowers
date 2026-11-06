@@ -1,0 +1,691 @@
+import { execFile } from 'node:child_process';
+import { db as appDb } from '../../db/client.js';
+import { readSetting, type Queryable } from '../uemaster/settings.js';
+
+/**
+ * 走查的第一层：**只读**地读一台远端服务器上的 git 镜像。
+ *
+ * 为什么是「镜像」而不是「仓库」：这台 flowers 不 checkout 123pan 的代码，也不
+ * 拥有它。owner 在 `dogyun:/srv/123pan-mirror/` 下留了三个 bare 仓（`--git-dir`
+ * 能读、`git show HEAD:path` 能出内容），走查要的正是「HEAD 上现在是什么样」。
+ * 所以这一层只做四件事：列文件、搜字符串、读一个文件、读 HEAD 那一行提交——
+ * 全部是 git 的**读命令**，没有工作区，也没有 index。
+ *
+ * 三条硬规矩：
+ *
+ * 1. **没有 shell。** 命令一律是 argv 数组交给 `execFile`（与 `uemaster/flow.ts`
+ *    同一个理由）：路径、pattern 里可能有中文、引号、`$()`，走 shell 就等于把那
+ *    段文本再解释一遍。本地是 `git --git-dir=<path> …`，远端是
+ *    `ssh <host> git --git-dir=<path> …`——都是数组，没有人能拼进一条管道。
+ * 2. **失败是数据，不是异常。** 超时、退出码非 0、ssh 连不上、配置缺一块，全部
+ *    返回 `{ ok: false, code, message }`，message 是中文（stderr 的尾巴原样附在
+ *    后面——`ssh: Could not resolve hostname` 比「读取失败」有用得多）。
+ * 3. **读命令白名单。** 每一个 argv 都过 `isReadOnlyGitArgs()`：子命令只能是
+ *    ls-tree / log / grep / show / cat-file / rev-parse / for-each-ref / symbolic-ref，
+ *    且不许带 `--output`。写命令（更新 ref、checkout、gc、push）在到达进程之前
+ *    就被拒了——「只读」是构造上的，不是靠调用方自觉。
+ *
+ * 为什么把 build 产物当成噪音：`git grep -l "分享链接" HEAD` 在 123pan-pc 上命中
+ * 的是 `web-file/frontend/dist/web.asar`——那是**提交进仓库的构建产物**（817 个
+ * 文件里有一大坨是 dist / asar / map / 锁文件）。不滤掉它们，走查阶段一拿到的
+ * 「页面结构」会是打包后的文件名，模型只会照着猜。
+ */
+
+// ─── 形状 ────────────────────────────────────────────────────────────────────
+
+export type RepoRef = { id: string; path: string };
+
+export type Transport = 'local' | 'ssh';
+
+/** 失败码：调用方按它分支，人读 `message`。 */
+export type MirrorFailureCode =
+  | 'bad_config'   // 配置缺一块 / 值不合法（含读不到设置）
+  | 'unknown_repo' // repoId 不在配置里
+  | 'bad_path'     // 路径/pattern 不合法（绝对路径、..、冒号注入）
+  | 'timeout'      // 超过 20 秒没回来
+  | 'git_failed'   // 退出码非 0（含 ssh 自己失败）
+  | 'not_read_only'; // 白名单拒绝：这是内部 bug，不是用户输入
+
+export type MirrorFailure = { ok: false; code: MirrorFailureCode; message: string };
+export type MirrorOk<T> = { ok: true; data: T };
+/** 每一次读都是一次「成了」或「一句中文」，从不抛。 */
+export type MirrorResult<T> = MirrorOk<T> | MirrorFailure;
+
+export function fail(code: MirrorFailureCode, message: string): MirrorFailure {
+  return { ok: false, code, message };
+}
+
+export function ok<T>(data: T): MirrorOk<T> {
+  return { ok: true, data };
+}
+
+// ─── 配置的键与默认 ──────────────────────────────────────────────────────────
+
+export const MIRROR_TRANSPORT_KEY = 'code.mirror.transport';
+export const MIRROR_REPOS_KEY = 'code.mirror.repos';
+export const MIRROR_SSH_HOST_KEY = 'code.mirror.sshHost';
+
+export const ENV_TRANSPORT = 'FLOWERS_MIRROR_TRANSPORT';
+export const ENV_REPOS = 'FLOWERS_MIRROR_REPOS';
+export const ENV_SSH_HOST = 'FLOWERS_MIRROR_SSH_HOST';
+
+/** `dogyun` 是 owner 那台机器的 ssh 别名；写死成默认是因为它是当前唯一的部署。 */
+export const DEFAULT_SSH_HOST = 'dogyun';
+
+/** 环境里什么都没说时的传输方式。`local` 不隐含任何远端假设。 */
+export const DEFAULT_TRANSPORT: Transport = 'local';
+
+/** 一次 git 读最多等 20 秒：2.4G 的仓在局域网里 `git grep` 也是这个量级。 */
+export const GIT_TIMEOUT_MS = 20_000;
+
+/**
+ * ssh 的固定参数。`BatchMode=yes` 是必须的：没有它，密钥不对时 ssh 会**停在
+ * 密码提示**上，20 秒后被我们杀掉，而人看到的是一句「超时」——真正的原因
+ * （密钥没配）反而被藏了。`ConnectTimeout=10` 让连不通的机器快速失败。
+ */
+const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'] as const;
+
+export type MirrorConfig = {
+  transport: Transport;
+  repos: RepoRef[];
+  sshHost: string;
+};
+
+// ─── 环境 → 设置 → 默认 ──────────────────────────────────────────────────────
+
+function envCell(name: string): string | null {
+  const value = process.env[name]?.trim() ?? '';
+  return value === '' ? null : value;
+}
+
+/** 设置那一格；读失败（库连不上）是**失败**，不是「没配」——两者的下一步不同。 */
+async function settingCell(
+  database: Queryable,
+  key: string,
+): Promise<{ ok: true; value: string | null } | MirrorFailure> {
+  try {
+    const value = (await readSetting(database, key))?.trim() ?? '';
+    return { ok: true, value: value === '' ? null : value };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail('bad_config', `读不到设置「${key}」：数据库错误（${detail}）`);
+  }
+}
+
+/**
+ * `code.mirror.repos` 的解析。**整份作废，不拼半份**：一个 id 缺 path、path 不是
+ * 绝对路径、两个 id 重名，都会让整份配置失败——半份仓库列表比没有更糟，因为
+ * 调用方会以为自己读的是全部。
+ *
+ * 报错一定点名缺的是哪一格（`code.mirror.repos` 或 `FLOWERS_MIRROR_REPOS`）：
+ * owner 看到「镜像没配」还得自己猜是哪个键。
+ */
+export function parseRepos(raw: string, from: 'env' | 'settings'): MirrorResult<RepoRef[]> {
+  const where = from === 'env' ? `环境变量 ${ENV_REPOS}` : `设置项 ${MIRROR_REPOS_KEY}`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return fail('bad_config', `${where} 不是合法的 JSON（${detail}）`);
+  }
+  if (!Array.isArray(parsed)) {
+    return fail('bad_config', `${where} 必须是一个 JSON 数组，形如 [{"id":"123pan-pc","path":"/srv/x.git"}]`);
+  }
+  if (parsed.length === 0) {
+    return fail('bad_config', `${where} 是空数组：至少要配一个镜像仓库（{"id","path"}）`);
+  }
+  const repos: RepoRef[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < parsed.length; i += 1) {
+    const item: unknown = parsed[i];
+    if (typeof item !== 'object' || item === null) {
+      return fail('bad_config', `${where} 的第 ${i + 1} 项不是 { id, path }`);
+    }
+    const id = (item as { id?: unknown }).id;
+    const path = (item as { path?: unknown }).path;
+    if (typeof id !== 'string' || id.trim() === '') {
+      return fail('bad_config', `${where} 的第 ${i + 1} 项缺 id`);
+    }
+    if (typeof path !== 'string' || path.trim() === '') {
+      return fail('bad_config', `${where} 的第 ${i + 1} 项（${id}）缺 path`);
+    }
+    const clean = path.trim();
+    if (!clean.startsWith('/')) {
+      return fail('bad_config', `${where} 里 ${id} 的 path 必须是绝对路径（现在是「${clean}」）`);
+    }
+    if (seen.has(id.trim())) {
+      return fail('bad_config', `${where} 里 id「${id.trim()}」出现了两次`);
+    }
+    seen.add(id.trim());
+    repos.push({ id: id.trim(), path: clean });
+  }
+  return ok(repos);
+}
+
+function parseTransport(raw: string, from: 'env' | 'settings'): MirrorResult<Transport> {
+  const where = from === 'env' ? `环境变量 ${ENV_TRANSPORT}` : `设置项 ${MIRROR_TRANSPORT_KEY}`;
+  if (raw === 'local' || raw === 'ssh') return ok(raw);
+  return fail('bad_config', `${where} 只能是 local 或 ssh（现在是「${raw}」）`);
+}
+
+/**
+ * 三格按 **env → 设置 → 默认** 解析（与 provider 的三格同一个顺序）。
+ *
+ * 每一格各自回落、但**仓库列表不回落**：env 只覆盖一半（例如只给了 transport）时，
+ * 其余照样从设置读；只有 `repos` 缺失会整份失败——没有仓库的 transport 是一个
+ * 会「看起来配好了」的空壳。
+ *
+ * `database` 可注入：用例里没有库也能钉住「缺 repos」那句话。
+ */
+export async function resolveMirrorConfig(
+  database: Queryable = appDb,
+): Promise<MirrorResult<MirrorConfig>> {
+  // transport
+  const transportEnv = envCell(ENV_TRANSPORT);
+  let transport: Transport | MirrorFailure;
+  if (transportEnv !== null) {
+    const parsed = parseTransport(transportEnv, 'env');
+    if (!parsed.ok) return parsed;
+    transport = parsed.data;
+  } else {
+    const cell = await settingCell(database, MIRROR_TRANSPORT_KEY);
+    if (!cell.ok) return cell;
+    if (cell.value === null) {
+      transport = DEFAULT_TRANSPORT;
+    } else {
+      const parsed = parseTransport(cell.value, 'settings');
+      if (!parsed.ok) return parsed;
+      transport = parsed.data;
+    }
+  }
+
+  // repos
+  const reposEnv = envCell(ENV_REPOS);
+  let repos: RepoRef[];
+  if (reposEnv !== null) {
+    const parsed = parseRepos(reposEnv, 'env');
+    if (!parsed.ok) return parsed;
+    repos = parsed.data;
+  } else {
+    const cell = await settingCell(database, MIRROR_REPOS_KEY);
+    if (!cell.ok) return cell;
+    if (cell.value === null) {
+      return fail(
+        'bad_config',
+        `没有配置代码镜像仓库：在设置里填「${MIRROR_REPOS_KEY}」，或设环境变量 ${ENV_REPOS}，`
+        + '形如 [{"id":"123pan-pc","path":"/srv/123pan-mirror/123pan-pc.git"}]',
+      );
+    }
+    const parsed = parseRepos(cell.value, 'settings');
+    if (!parsed.ok) return parsed;
+    repos = parsed.data;
+  }
+
+  // sshHost：只有 ssh 才需要，但既然有默认值，就总是解析出一份完整配置。
+  const hostEnv = envCell(ENV_SSH_HOST);
+  let sshHost: string;
+  if (hostEnv !== null) {
+    sshHost = hostEnv;
+  } else {
+    const cell = await settingCell(database, MIRROR_SSH_HOST_KEY);
+    if (!cell.ok) return cell;
+    sshHost = cell.value ?? DEFAULT_SSH_HOST;
+  }
+
+  return ok({ transport, repos, sshHost });
+}
+
+// ─── 只读白名单 ──────────────────────────────────────────────────────────────
+
+/**
+ * 本文件允许跑的子命令。加一个之前先问：它会写 `.git` 或工作区吗？
+ * `show` / `cat-file` / `rev-parse` 都可能被用来写文件（`--output`），所以另有一条
+ * 「不许 `--output`」的规则兜着。
+ */
+export const READ_ONLY_SUBCOMMANDS: readonly string[] = [
+  'ls-tree', 'log', 'grep', 'show', 'cat-file', 'rev-parse', 'for-each-ref', 'symbolic-ref',
+];
+
+/** 子命令之外，任何位置出现这些词都不放行（防御性：子命令已经够窄了）。 */
+const WRITE_TOKENS: readonly string[] = [
+  '--output', 'update-ref', 'update-index', 'write-tree', 'checkout', 'checkout-index',
+  'commit-tree', 'hash-object', 'gc', 'prune', 'repack', 'push', 'fetch', 'clone',
+  'worktree', 'stash', 'reset', 'clean', 'filter-branch',
+];
+
+/**
+ * argv 是不是一次**纯读**。纯函数、可单测；`runGit` 每次调用前都过一遍，
+ * 不通过就返回 `not_read_only`（那是本模块的 bug，不是用户输入的问题）。
+ */
+export function isReadOnlyGitArgs(args: readonly string[]): boolean {
+  const sub = args[0];
+  if (typeof sub !== 'string' || !READ_ONLY_SUBCOMMANDS.includes(sub)) return false;
+  return !args.some((arg) => WRITE_TOKENS.some((token) => arg === token || arg.startsWith(`${token}=`)));
+}
+
+// ─── argv 构造（没有 shell） ─────────────────────────────────────────────────
+
+export const HEAD_REF = 'HEAD';
+
+/**
+ * 一次读命令的完整 argv。
+ *
+ * 本地：`git --git-dir=<path> …`
+ * 远端：`ssh -o BatchMode=yes -o ConnectTimeout=10 <host> git --git-dir=<path> …`
+ *
+ * 远端那一段**不是**把命令拼成字符串交给 ssh：ssh 会把 argv 从第二个参数起
+ * 用空格拼成一条远程命令行，所以参数里的空格/引号仍会被远端 shell 重新解释。
+ * 本模块传进去的参数是我们自己造的字面量（路径、`HEAD`、`--format=…`、pattern），
+ * 唯一可能带空格的是 grep 的 pattern——它被放在 `-e` 之后，而远端 shell 对它的
+ * 解释上限也就是「把一个 pattern 拆成两个词」，不会变成一条命令。
+ * 要彻底消除这一层，得换成 `ssh <host> -- git …` 的协议式调用；当前部署里
+ * pattern 来自我们自己的走查流程（中文短句），不做这一层。
+ */
+export function gitArgv(
+  config: Pick<MirrorConfig, 'transport' | 'sshHost'>,
+  repoPath: string,
+  args: readonly string[],
+): string[] {
+  const gitPart = ['git', `--git-dir=${repoPath}`, ...args];
+  if (config.transport === 'local') return gitPart;
+  return ['ssh', ...SSH_OPTS, config.sshHost, ...gitPart];
+}
+
+// ─── 跑一次 ──────────────────────────────────────────────────────────────────
+
+type GitRun = {
+  exitCode: number | null;
+  timedOut: boolean;
+  /** 进程根本没起来（git 没装、ssh 没装）。 */
+  spawnError: string | null;
+  /** 被输出上限截断（只对 `show` 有意义）。 */
+  outputLimited: boolean;
+  stdout: Buffer;
+  stderr: string;
+};
+
+const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
+
+/** 跑一次 argv，**永远 resolve**；失败是一种数据。 */
+function runGit(
+  argv: string[],
+  opts: { timeoutMs?: number; maxBuffer?: number } = {},
+): Promise<GitRun> {
+  const [bin, ...rest] = argv;
+  const timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    execFile(
+      bin ?? 'git',
+      rest,
+      {
+        timeout: timeoutMs,
+        killSignal: 'SIGTERM',
+        maxBuffer: opts.maxBuffer ?? DEFAULT_MAX_BUFFER,
+        encoding: 'buffer',
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout ?? ''), 'utf8');
+        const err = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : String(stderr ?? '');
+        const e = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string; code?: number | string }) | null;
+        if (!e) {
+          resolve({ exitCode: 0, timedOut: false, spawnError: null, outputLimited: false, stdout: out, stderr: err });
+          return;
+        }
+        // maxBuffer 超限：Node 会杀掉子进程，但把已经收到的部分交回来。
+        if (e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+          resolve({ exitCode: null, timedOut: false, spawnError: null, outputLimited: true, stdout: out, stderr: err });
+          return;
+        }
+        if (typeof e.code === 'string') {
+          resolve({ exitCode: null, timedOut: false, spawnError: `${e.code}: ${e.message}`, outputLimited: false, stdout: out, stderr: err });
+          return;
+        }
+        const timedOut = Boolean(e.killed) && (e.signal === 'SIGTERM' || e.signal === 'SIGKILL');
+        resolve({
+          exitCode: typeof e.code === 'number' ? e.code : null,
+          timedOut,
+          spawnError: null,
+          outputLimited: false,
+          stdout: out,
+          stderr: err,
+        });
+      },
+    );
+  });
+}
+
+/** stderr 的尾巴：整段可能是一屏 Python 式 traceback，报错那一行只要最后一段。 */
+export function tail(text: string, max = 800): string {
+  const trimmed = text.trim();
+  return trimmed.length <= max ? trimmed : `…${trimmed.slice(-max)}`;
+}
+
+/** 把一次进程结果压成一句中文（或 null 表示成功）。 */
+function runFailure(run: GitRun, timeoutMs: number, bin: string): MirrorFailure | null {
+  if (run.spawnError !== null) {
+    return fail('git_failed', `${bin} 起不来（${run.spawnError}）`);
+  }
+  if (run.timedOut) {
+    const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000} 秒` : `${timeoutMs} 毫秒`;
+    return fail('timeout', `${bin} 读取超时：${seconds}内没有返回`);
+  }
+  if (run.exitCode !== 0) {
+    const detail = tail(run.stderr);
+    const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
+    return fail('git_failed', `${bin} 读取失败（${code}）：${detail === '' ? '（stderr 是空的）' : detail}`);
+  }
+  return null;
+}
+
+// ─── 噪音过滤 ────────────────────────────────────────────────────────────────
+
+/** 目录级排除：出现在**任何**一段路径里都算噪音（最后一段除外，见下）。 */
+const NOISE_DIRS: ReadonlySet<string> = new Set([
+  'dist', 'build', 'out', 'node_modules', 'coverage', '.next', '.nuxt', 'vendor_bundle',
+]);
+
+/** 扩展名级排除：二进制、图片、字体、压缩包、源映射。 */
+const NOISE_EXT: ReadonlySet<string> = new Set([
+  // 打包产物 / 源映射
+  'asar', 'map', 'min.js', 'min.css',
+  // 图片
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'icns', 'tiff', 'avif',
+  // 字体 / 音视频
+  'woff', 'woff2', 'ttf', 'otf', 'eot', 'mp3', 'mp4', 'wav', 'webm', 'mov',
+  // 二进制 / 归档
+  'exe', 'dll', 'so', 'dylib', 'bin', 'node', 'wasm', 'class', 'jar', 'pyc',
+  'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'pdf', 'dmg', 'iso',
+  'sqlite', 'sqlite3', 'db', 'o', 'obj', 'a', 'lib',
+]);
+
+/** 文件名级排除：锁文件（几万行，且没有一个字是业务代码）。 */
+const NOISE_FILES: ReadonlySet<string> = new Set([
+  'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml',
+  'pnpm-lock.yml', 'bun.lockb', 'composer.lock', 'cargo.lock', 'gemfile.lock',
+  'poetry.lock', 'go.sum', 'mix.lock', 'podfile.lock',
+]);
+
+/** 小写扩展名（多段扩展名按 `min.js` 这种整串查，见 `isNoisePath`）。 */
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot <= 0 ? '' : name.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * 这个路径算不算噪音。
+ *
+ * 每条排除都有实据：
+ * - `dist/ build/ out/`：三个仓都把打包产物提交进去了。`123pan-pc` 的
+ *   `web-file/frontend/dist/web.asar` 就是一条 2.4M 的黑箱文件，`git grep` 一命中
+ *   就顶掉一条真正有用的源码命中。
+ * - `node_modules/`：就算被提交（有的老仓真的这么干），它也不是这个项目的代码。
+ * - `*.asar`：Electron 包体，二进制；命中它等于命中了一份压缩过的私有副本。
+ * - `*.min.js` / `*.map`：压缩产物与源映射。映射里的 `sourcesContent` 会让
+ *   「这里有没有这个字符串」永远为真。
+ * - 锁文件：几万行依赖坐标，检索时噪声占比最高，且没有一个字是业务代码。
+ * - 图片/字体/音视频/二进制/归档：`git grep` 对二进制会直接跳（`-I`），但
+ *   `lsTree` 会把它们全列出来；阶段一的「页面结构」里出现一堆 `.png` 只会误导。
+ *
+ * 目录判定只看**非最后一段**：`build/` 是目录，`build.js` 是文件（它可能是源码）。
+ */
+export function isNoisePath(input: string): boolean {
+  const path = input.replace(/^\.?\//, '').trim();
+  if (path === '') return true;
+  const segments = path.split('/');
+  const name = segments[segments.length - 1] ?? '';
+  // 目录段（不含文件名本身）
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (NOISE_DIRS.has((segments[i] ?? '').toLowerCase())) return true;
+  }
+  const lower = name.toLowerCase();
+  if (NOISE_FILES.has(lower)) return true;
+  if (lower.endsWith('.min.js') || lower.endsWith('.min.css') || lower.endsWith('.d.ts.map')) return true;
+  const ext = extensionOf(lower);
+  if (ext !== '' && NOISE_EXT.has(ext)) return true;
+  return false;
+}
+
+// ─── 路径合法性 ──────────────────────────────────────────────────────────────
+
+/**
+ * 仓库内的相对路径。拒绝：空、绝对路径、`..`、NUL、`show` 用的冒号（`<rev>:<path>`
+ * 里冒号是分隔符，路径里再有一个就会读到别的东西）。
+ *
+ * 注意这**不是**安全边界（argv 里没有 shell），是「别让我们自己造出一个会读错对象
+ * 的 revision」。
+ */
+export function cleanRepoPath(input: string, opts: { allowColon?: boolean } = {}): string | null {
+  const path = input.trim();
+  if (path === '' || path.startsWith('/') || path.includes('\0')) return null;
+  if (!opts.allowColon && path.includes(':')) return null;
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '..' || segment === '.')) return null;
+  return path;
+}
+
+// ─── 解析一份配置 + 找仓库 ──────────────────────────────────────────────────
+
+type ResolvedRepo = { config: MirrorConfig; repo: RepoRef };
+
+async function resolveRepo(repoId: string): Promise<ResolvedRepo | MirrorFailure> {
+  const resolved = await resolveMirrorConfig();
+  if (!resolved.ok) return resolved;
+  const repo = resolved.data.repos.find((item) => item.id === repoId);
+  if (repo === undefined) {
+    const known = resolved.data.repos.map((item) => item.id).join('、');
+    return fail('unknown_repo', `未知的镜像仓库 id「${repoId}」；已配置的是：${known}`);
+  }
+  return { config: resolved.data, repo };
+}
+
+/** 跑一次**经过只读校验**的读命令。所有公开函数都从这里过。 */
+async function read(
+  resolved: ResolvedRepo,
+  args: string[],
+  opts: { maxBuffer?: number; timeoutMs?: number; allowExit?: number[] } = {},
+): Promise<MirrorResult<GitRun>> {
+  if (!isReadOnlyGitArgs(args)) {
+    return fail('not_read_only', `内部错误：只读校验拒绝了一条命令（${args.join(' ')}）`);
+  }
+  const argv = gitArgv(resolved.config, resolved.repo.path, args);
+  const bin = argv[0] ?? 'git';
+  const run = await runGit(argv, opts);
+  if (run.outputLimited) return ok(run); // 由调用方决定要不要当截断
+  // `git grep` 没命中时退出 1：那是答案，不是失败。
+  if (run.exitCode !== null && (opts.allowExit ?? []).includes(run.exitCode)) return ok(run);
+  const failure = runFailure(run, opts.timeoutMs ?? GIT_TIMEOUT_MS, bin);
+  if (failure !== null) return failure;
+  return ok(run);
+}
+
+// ─── 四个读口 ────────────────────────────────────────────────────────────────
+
+/** 配置里的仓库列表（不存在的仓库在这里不出现——它是配置，不是探测）。 */
+export async function listRepos(
+  database: Queryable = appDb,
+): Promise<MirrorResult<RepoRef[]>> {
+  const resolved = await resolveMirrorConfig(database);
+  return resolved.ok ? ok(resolved.data.repos) : resolved;
+}
+
+/**
+ * HEAD 那一行：完整 sha、提交时间（ISO 8601）、标题。
+ *
+ * 空仓（一个提交都没有）返回 `data: null`——那不是错误，是「还没开始」。其余失败
+ * （仓库路径写错、ssh 连不上）照旧是中文失败。
+ */
+export async function head(
+  repoId: string,
+): Promise<MirrorResult<{ sha: string; date: string; subject: string } | null>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+  const run = await read(resolved, ['log', '-1', '--format=%H%x1f%cI%x1f%s', HEAD_REF]);
+  if (!run.ok) {
+    // 空仓：git log 在没有任何提交时退出 128，stderr 是「does not have any commits yet」。
+    if (run.code === 'git_failed' && /does not have any commits|bad revision|unknown revision/i.test(run.message)) {
+      return ok(null);
+    }
+    return run;
+  }
+  const text = run.data.stdout.toString('utf8').replace(/\n+$/, '');
+  if (text === '') return ok(null);
+  const [sha, date, subject] = text.split('\x1f');
+  if (typeof sha !== 'string' || typeof date !== 'string') return ok(null);
+  return ok({ sha, date, subject: subject ?? '' });
+}
+
+/**
+ * HEAD 上的全部文件（已去噪音）。
+ *
+ * `-z` 而不是按行切：git 的路径可以含空格与中文，`--name-only` 的换行输出在这种
+ * 仓里是能读歪的。排序是 ls-tree 自己的（树序 = 路径字典序）。
+ */
+export async function lsTree(
+  repoId: string,
+  opts: { prefix?: string } = {},
+): Promise<MirrorResult<string[]>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+  const args = ['ls-tree', '-r', '--name-only', '-z', HEAD_REF];
+  const prefix = opts.prefix?.trim() ?? '';
+  if (prefix !== '') {
+    const clean = cleanRepoPath(prefix, { allowColon: true });
+    if (clean === null) {
+      return fail('bad_path', `前缀不合法：「${prefix}」（只能是仓库内的相对路径）`);
+    }
+    args.push('--', clean);
+  }
+  const run = await read(resolved, args);
+  if (!run.ok) return run;
+  const names = run.data.stdout
+    .toString('utf8')
+    .split('\0')
+    .filter((name) => name !== '')
+    .filter((name) => !isNoisePath(name));
+  return ok(names);
+}
+
+/** grep 默认最多回 200 条：一次命中几千条对「走查」没有增量。 */
+export const GREP_DEFAULT_MAX = 200;
+
+/**
+ * 在 HEAD 上按**字面量**搜（`-F`）。正则模式会让 `(` `?` 这类字符在中文串里偶发
+ * 报错，而走查要搜的都是业务词/接口名，字面量才是它需要的语义。
+ *
+ * 输出形状是 `HEAD:<path>:<line>:<text>`；路径本身可能带冒号，所以从**行尾方向**
+ * 用「数字 + 冒号」锚定切分。噪音路径在切分之后才丢——否则预算会被 dist 里的
+ * 命中吃掉。
+ */
+export async function grep(
+  repoId: string,
+  pattern: string,
+  opts: { paths?: string[]; max?: number } = {},
+): Promise<MirrorResult<Array<{ path: string; line: number; text: string }>>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+
+  const needle = pattern.trim();
+  if (needle === '') return fail('bad_path', '要搜的内容是空的');
+
+  const args = ['grep', '-n', '-I', '-F', '--no-color', '-e', pattern, HEAD_REF];
+  const pathspecs: string[] = [];
+  for (const raw of opts.paths ?? []) {
+    const clean = cleanRepoPath(raw, { allowColon: true });
+    if (clean === null) return fail('bad_path', `搜索范围不合法：「${raw}」（只能是仓库内的相对路径）`);
+    pathspecs.push(clean);
+  }
+  if (pathspecs.length > 0) args.push('--', ...pathspecs);
+
+  const max = Number.isFinite(opts.max) && (opts.max ?? 0) > 0 ? Math.floor(opts.max as number) : GREP_DEFAULT_MAX;
+  const run = await read(resolved, args, { allowExit: [1] });
+  if (!run.ok) return run;
+
+  const out: Array<{ path: string; line: number; text: string }> = [];
+  const lines = run.data.stdout.toString('utf8').split('\n');
+  for (const line of lines) {
+    if (out.length >= max) break;
+    if (line === '') continue;
+    const match = /^HEAD:(.+?):(\d+):(.*)$/.exec(line);
+    if (match === null) continue;
+    const path = match[1] ?? '';
+    const lineNo = Number(match[2]);
+    if (isNoisePath(path)) continue;
+    out.push({ path, line: Number.isFinite(lineNo) ? lineNo : 0, text: match[3] ?? '' });
+  }
+  return ok(out);
+}
+
+export const DEFAULT_SHOW_MAX_BYTES = 200_000;
+
+/** 截断标记。原文是全的；这行字只说明「你看到的不是全部」。 */
+export function truncationMarker(shown: number, total: number): string {
+  return `\n\n…（已截断：只显示前 ${shown} 字节，全文 ${total} 字节）`;
+}
+
+/**
+ * 把一段字节按 UTF-8 边界切到 `max` 以内。切在半个汉字上会得到一个 `�`，
+ * 而模型会把那个符号当成源码的一部分去抄。
+ */
+export function truncateUtf8(buffer: Buffer, max: number): string {
+  if (buffer.length <= max) return buffer.toString('utf8');
+  let end = max;
+  while (end > 0) {
+    const next = buffer[end] ?? 0;
+    if ((next & 0xc0) !== 0x80) break;
+    end -= 1;
+  }
+  return buffer.subarray(0, end).toString('utf8');
+}
+
+/**
+ * 读一个文件。`maxBytes` 之后截断并**在正文里写明**（调用方决定要不要把这句转述
+ * 给模型）。
+ *
+ * 分两步：先 `cat-file -s` 问大小（顺便验证路径确实存在——`git show` 的报错
+ * 是英文的，而「文件不存在」与「git 坏了」是两件事），再用一个只够装
+ * `maxBytes + 64K` 的缓冲去读正文。文件比缓冲大时 Node 会把子进程杀掉并交回已经
+ * 收到的部分，那正好是我们要的前缀。
+ */
+export async function show(
+  repoId: string,
+  path: string,
+  opts: { maxBytes?: number } = {},
+): Promise<MirrorResult<string>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+
+  const clean = cleanRepoPath(path);
+  if (clean === null) {
+    return fail('bad_path', `路径不合法：「${path}」（只能是仓库内的相对路径，不能以 / 开头、不能含 .. 或 :）`);
+  }
+  const ref = `${HEAD_REF}:${clean}`;
+
+  const sized = await read(resolved, ['cat-file', '-s', ref]);
+  if (!sized.ok) {
+    if (sized.code === 'git_failed' && /does not exist|not a valid object|bad revision/i.test(sized.message)) {
+      return fail('git_failed', `仓库里没有这个文件：${clean}（${HEAD_REF}）`);
+    }
+    return sized;
+  }
+  const sizeText = sized.data.stdout.toString('utf8').trim();
+  const total = Number.parseInt(sizeText, 10);
+  if (!Number.isFinite(total) || total < 0) {
+    return fail('git_failed', `读不出 ${clean} 的大小（cat-file -s 回了「${sizeText}」）`);
+  }
+
+  const maxBytes = Number.isFinite(opts.maxBytes) && (opts.maxBytes ?? 0) > 0
+    ? Math.floor(opts.maxBytes as number)
+    : DEFAULT_SHOW_MAX_BYTES;
+
+  const run = await read(resolved, ['show', ref], { maxBuffer: maxBytes + 64 * 1024 });
+  if (!run.ok) return run;
+  const bytes = run.data.stdout;
+  const shown = Math.min(bytes.length, maxBytes);
+  const text = truncateUtf8(bytes, maxBytes);
+  if (total > shown || run.data.outputLimited) {
+    return ok(text + truncationMarker(shown, Math.max(total, bytes.length)));
+  }
+  return ok(text);
+}
