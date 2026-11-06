@@ -188,3 +188,30 @@ export const appSettings = pgTable('app_settings', {
   value: text('value').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * PRD 快照（P3.2）。
+ *
+ * 为什么要存正文而不是只存链接：PRD 是会改的，而走查/评审要回答的是「**这一版**
+ * 的 PRD 与这份实现能不能对上」。只存 url 的话，同一个 url 明天读到的就是另一份
+ * 文档，昨天的结论再也无法复现。
+ *
+ * 一条 fetch 一行（不是 upsert）：历史版本本身就有用——「这行是照着哪一版写的」
+ * 要能回答，而 hash 相同的行由服务层去重（见 `src/core/prd/snapshots.ts`），
+ * 不在库上做唯一约束。读侧取 `fetched_at` 最新的那一行。
+ *
+ * `fetched_at` 用 `clock_timestamp()` 而不是 `now()`：`now()` 是**事务开始**的时间，
+ * 同一个事务里写两行会拿到同一个值，而这一列正是排序依据。`clock_timestamp()` 是
+ * 语句时间（微秒级），两次相邻的 insert 不会撞在一起。
+ *
+ * `hash` 是 markdown 的 sha256（十六进制），存成文本而不是 bytea：它只用来比对，
+ * 不参与计算。
+ */
+export const prdSnapshots = pgTable('prd_snapshots', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requirementId: uuid('requirement_id').notNull().references(() => requirements.id),
+  url: text('url').notNull(),
+  markdown: text('markdown').notNull(),
+  hash: text('hash').notNull(),
+  fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, (t) => ({ byReq: index('prd_snapshots_req').on(t.requirementId, t.fetchedAt) }));
