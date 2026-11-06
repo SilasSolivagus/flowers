@@ -1,7 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
-import { packFor } from '../uemaster/packs.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
@@ -18,12 +17,11 @@ import {
 /**
  * 当前状态下合法的动作。名字与页面动作条、server action 一一对应。
  *
- * **`evaluate` 留在这个并集里，但没有任何状态会给出它**（P2 Task 4）：D1 裁决说
- * Flowers 后端不调模型，「评估」不是一个点一下就能完成的动作——真做材料的是用户
- * 自己的 agent。所以动作条不再提供它，参考段的「评估材料」那一行接管了这个入口
- * （复制任务包 → 交给 agent）。类型里保留它，是因为 `inbox → design` 仍是领域里
- * 合法的迁移（`src/core/requirements/evaluate.ts` 与 seed 都走它），`runAction`
- * 也还接得住；删掉它等于让动作条与领域对不上账。
+ * **`evaluate` 留在这个并集里，但没有任何状态会给出它**（P2 Task 4）：从动作条上
+ * 拿掉它的理由不是「评估不需要发生」，而是它根本不是一个点一下就能完成的动作
+ * （材料要生成）。P2.6 之后材料由「参考」段那一行的「生成」产出，类型里保留它，
+ * 是因为 `inbox → design` 仍是领域里合法的迁移（`src/core/requirements/evaluate.ts`
+ * 与 seed 都走它），`runAction` 也还接得住；删掉它等于让动作条与领域对不上账。
  */
 export type DetailAction =
   | 'evaluate' | 'submitReview' | 'reject' | 'shelve'
@@ -38,17 +36,18 @@ export type DetailRef = {
   atLabel: string | null;
   present: boolean;
   /**
-   * 这一处材料的任务包正文（`packFor` 的输出，纯函数、服务端算好）。
+   * 这个阶段**正在跑**的那次生成（null = 没有）。
    *
-   * 为什么放在读模型里、而不是页面自己去算或客户端去取：抽屉的「参考」段现在就是
-   * 这个阶段的**入口**——没有产物时那一行是一个「复制任务包」按钮，按下去要拷贝的
-   * 是这段中文。页面在服务端渲染时把它写进 DOM，复制就只是 `navigator.clipboard`
-   * 读一段已经在页面里的字符串：不发请求、不新增接口、不需要客户端知道 packFor。
+   * P2.6 起参考段那一行的按钮是「生成」——服务器自己跑生成器，产物落回
+   * `data/uemaster/`，这一行随即变成链接。「生成中」这个状态因此必须从库里读：
+   * 页面刷新、换一个人打开同一条需求，看到的都得是同一件事；一个只活在客户端
+   * state 里的「生成中」在刷新之后就变成了「生成」，按下去只会撞一句「正在生成中」。
    *
-   * 有产物时这段文本仍然给（读模型不管页面用不用它——页面按 `present` 决定渲染
-   * 链接还是按钮）。
+   * 只给 id：页面需要的动作是「继续轮询这条作业」，其余细节由 `jobStatus` 回答。
+   * 失败不在这里——失败是一次性的提示（行内那句话），刷新之后行就回到「生成」，
+   * 让用户可以重试；把上一次的失败永久挂在那一行会让这条需求看起来永远坏着。
    */
-  pack: string;
+  generation: { id: string } | null;
 };
 
 export type DetailReview = {
@@ -145,9 +144,9 @@ const ATTACH_LABEL: Record<string, string> = {
 function actionsFor(state: State): DetailAction[] {
   switch (state) {
     case 'inbox':
-      // 没有「评估」：D1 之后它不可能成功（后端不调模型），一个必然失败的按钮比
-      // 一个空的动作条更坏。评估的入口搬到了「参考」段的评估材料那一行——复制任务包
-      // 交给用户自己的 agent。收进、拒绝、搁置照旧。
+      // 没有「评估」：它不是一个点一下就能完成的动作（材料要生成），一个必然失败的
+      // 按钮比一个空的动作条更坏。入口在「参考」段评估材料那一行的「生成」。
+      // 收进、拒绝、搁置照旧。
       return ['submitReview', 'reject', 'shelve'];
     case 'design':
       return ['submitReview', 'shelve'];
@@ -270,29 +269,30 @@ function timeUsed(
 
 /**
  * 参考段里「一处 UEmaster 材料」那一行：有产物就是链接 + 那天的日期，没有就是
- * 「还没生成」（`present: false` + 那段任务包正文）。
+ * 「还没生成」（`present: false`）。
  *
- * 没有产物时这一行**仍然渲染**（P2 Task 4）：它不再是「一个空槽位」，而是这一阶段
- * 的入口——行上写着阶段名，右侧一个「复制任务包」按钮，复制的是 `pack`（服务端用
- * `packFor` 算好的中文任务包）。所以 `present` 现在只决定**渲染链接还是按钮**，
- * 不再决定渲染还是不渲染。
+ * 没有产物时这一行**仍然渲染**（P2 Task 4 起）：它不是空槽位，而是这一阶段的
+ * 入口——行上写着阶段名，右侧一个「生成」按钮（P2.6：由服务端跑生成器），
+ * 另外还留着「交回材料」这条人走的路。所以 `present` 只决定**渲染链接还是「还没
+ * 生成」**，不决定渲染还是不渲染。
  *
- * 三行同一种形状，包括 review（P2 之前它在没有产物时显示「PRD 快照」）：评审材料
- * 没有产物时同样要靠复制任务包去要，而 PRD 链接不靠这一行承载——信息段的
- * 「PRD 链接」一直在，抽屉里点得到。
+ * `generation` 是「这个阶段正在跑的那次作业」，由调用方传入。三行同一种形状，
+ * 包括 review（P2 之前它在没有产物时显示「PRD 快照」）：PRD 链接不靠这一行承载——
+ * 信息段的「PRD 链接」一直在，抽屉里点得到。
  */
 function artifactRef(
   stage: DetailRef['stage'],
   label: string,
   artifact: ArtifactRef | undefined,
-  pack: string,
+  runningJobId: string | null,
 ): DetailRef {
+  const generation = runningJobId === null ? null : { id: runningJobId };
   if (!artifact) {
-    return { stage, label, url: null, at: null, atLabel: null, present: false, pack };
+    return { stage, label, url: null, at: null, atLabel: null, present: false, generation };
   }
   const at = artifact.at.toISOString();
   return {
-    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true, pack,
+    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true, generation,
   };
 }
 
@@ -390,26 +390,18 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
   const artifacts = new Map((await listArtifacts(db, id)).map((a) => [a.stage, a]));
 
   /**
-   * 三处任务包：`packFor` 是纯函数（不碰库、不带今天），这里把这条需求的身份喂进去
-   * 就算完。算在服务端，页面只负责把字符串写进 DOM。
+   * 正在跑的生成作业，按 stage 取最新一条。
    *
-   * 为什么三份都算、不管这个状态用不用得上：三行是固定槽位，页面按 `present` 决定
-   * 渲染链接还是按钮，读模型不替它挑。没有 PRD 时 review / inspect 的包会是一段
-   * 「停止：到此停止…」——那也是要复制给用户看的东西（它说的是缺什么），所以照算。
+   * 只查 running：done / failed 是历史，抽屉那一行不需要它们的「当前状态」——
+   * 成功会变成产物链接（`listArtifacts` 已经给了），失败是行内一次性的提示。
+   * `distinct on (stage)` 与 `listArtifacts` 同一个口径：一个 stage 只认最近一次。
    */
-  const packInput = {
-    id: row.id,
-    number: Number(row.number),
-    title: row.title,
-    type: row.type,
-    requester: row.requester,
-    prdUrl: row.prd_url,
-  };
-  const packs = {
-    evaluate: packFor('evaluate', packInput),
-    review: packFor('review', packInput),
-    inspect: packFor('inspect', packInput),
-  };
+  const runningJobs = await db.execute<{ id: string; stage: string }>(sql`
+    select distinct on (stage) id, stage
+      from uemaster_jobs
+     where requirement_id = ${id} and status = 'running'
+     order by stage, created_at desc, id desc`);
+  const running = new Map(runningJobs.rows.map((job) => [job.stage, job.id]));
 
   return {
     id: row.id,
@@ -446,9 +438,9 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
       timeUsed: timeUsed(row.window_start, row.commit_due_at),
     },
     refs: [
-      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), packs.evaluate),
-      artifactRef('review', '评审材料', artifacts.get('review'), packs.review),
-      artifactRef('inspect', '走查材料', artifacts.get('inspect'), packs.inspect),
+      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), running.get('evaluate') ?? null),
+      artifactRef('review', '评审材料', artifacts.get('review'), running.get('review') ?? null),
+      artifactRef('inspect', '走查材料', artifacts.get('inspect'), running.get('inspect') ?? null),
     ],
     review,
     events: eventRes.rows.map((e) => ({

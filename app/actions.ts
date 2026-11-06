@@ -13,6 +13,7 @@ import { bounce } from '../src/core/requirements/bounce';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal';
+import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -85,6 +86,46 @@ export async function attachAction(formData: FormData): Promise<ActionResult> {
     // 不一样了」（时钟推进了、同事先做了一步），不刷就会一直撞同一句话。
     revalidatePath('/');
   }
+}
+
+/**
+ * 生成：参考段那一行右边的「生成」（P2.6）。
+ *
+ * 与其它动作不同，它**不快**：产物要由一个本机 agent CLI 跑几十秒到几分钟。所以
+ * 这个动作只做两件事——开一次作业、把 `jobId` 交回客户端；结果由客户端用
+ * `generationStatusAction` 轮询。请求不挂在那几分钟上，页面也不需要知道生成器的存在。
+ *
+ * 失败照旧原文返还：AppError 的中文（`这个阶段正在生成中…`、`需求不存在`）就是
+ * 界面上那一行字，不改写、不吞。真正的生成器错误（OAuth 过期之类）不在这里出现——
+ * 它们发生在后台，落在 `uemaster_jobs.error` 上，由轮询读到。
+ */
+export type StartGenerationResult = { ok: true; jobId: string } | { ok: false; message: string };
+
+export async function generateAction(formData: FormData): Promise<StartGenerationResult> {
+  const actor = await currentMember();
+  try {
+    const { jobId } = await startGeneration(db, actor, {
+      requirementId: field(formData, 'requirementId'),
+      stage: field(formData, 'stage'),
+    });
+    // 让服务端那一份抽屉也知道「这个阶段正在生成」：刷新 / 换个人打开时，
+    // 那一行不该又变回一个可以再按一次的「生成」。
+    revalidatePath('/');
+    return { ok: true, jobId };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/**
+ * 轮询用的一次读取。查不到（作业被清掉、id 被改坏）返回 null，客户端据此停手。
+ *
+ * 它是一个 server action 而不是 REST 路由：这条链路只有抽屉一个消费者，
+ * 而抽屉已经在用 server action 说同一种话（D1：没有 REST 层）。
+ */
+export async function generationStatusAction(jobId: string): Promise<JobView | null> {
+  return jobStatus(db, jobId);
 }
 
 /** 评估：inbox → design。 */

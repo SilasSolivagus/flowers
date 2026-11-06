@@ -632,39 +632,47 @@ describe('参考段：三处槽位从产物表读', () => {
   });
 
   /**
-   * 三行都带任务包正文（P2 Task 4）。参考段没有产物时是一个「复制任务包」按钮，
-   * 按钮复制的是**服务端已经渲染进页面**的那段文本，所以它必须由读模型给出：
-   * 页面在客户端没有 packFor，也不该为此发一次请求。
+   * P2.6：参考段那一行现在给的是**正在生成的作业**，不再是任务包正文。
+   *
+   * 任务包搬到了服务端（worker 里 `packFor` 自己算），页面不需要它：按钮按下去
+   * 由后台把包喂给 CLI。页面要知道的只有「这个阶段现在有没有人在跑」，因为
+   * 「生成中」必须活过刷新——只放在客户端 state 里的话，一刷新就变成一个可以
+   * 再按一次的「生成」，按下去只能撞「正在生成中」。
    */
-  it('三行都带任务包正文：点名 UEmaster、这条需求与它自己的交付路径', async () => {
-    // 有 PRD 的需求：三份包都是完整的那一版（没 PRD 时评审 / 走查的包会提前「停止」，
-    // 那种形状由下面那条用例盯）。
+  it('三行默认都没有正在生成的作业；只有 running 的那一行带 generation', async () => {
     const id = await seedInReview('feature');
-    const d = (await getRequirementDetail(id))!;
-    expect(d.info.prdUrl).not.toBeNull();
-
+    const before = (await getRequirementDetail(id))!;
     for (const stage of ['evaluate', 'review', 'inspect'] as const) {
-      const ref = d.refs.find((x) => x.stage === stage)!;
-      expect(ref.pack).toContain('UEmaster');
-      expect(ref.pack).toContain(`PAN-${d.number}`);
-      expect(ref.pack).toContain(d.title);
-      expect(ref.pack).toContain(`/uemaster/PAN-${d.number}/${stage}.html`);
-      // 复制出去的文本里必须有 uuid：agent 交回产物时只用得到它（不是 PAN-n）
-      expect(ref.pack).toContain(d.id);
+      expect(before.refs.find((x) => x.stage === stage)!.generation).toBeNull();
     }
+
+    // 直接在库里造一条 running 作业：这条用例盯的是读模型，不是 startGeneration。
+    const job = await db.execute<{ id: string }>(sql`
+      insert into uemaster_jobs (requirement_id, stage, status)
+      values (${id}, 'review', 'running') returning id`);
+    const jobId = job.rows[0]!.id;
+
+    const after = (await getRequirementDetail(id))!;
+    expect(after.refs.find((x) => x.stage === 'review')!.generation).toEqual({ id: jobId });
+    // 另外两行不受影响：一条作业只属于它自己的那个阶段。
+    expect(after.refs.find((x) => x.stage === 'evaluate')!.generation).toBeNull();
+    expect(after.refs.find((x) => x.stage === 'inspect')!.generation).toBeNull();
   });
 
   /**
-   * 缺 PRD 时评审 / 走查的包是一段「停止：到此停止…」。它照样交给页面：那段文字说的
-   * 正是「缺什么」，按钮复制它才有意义——界面不该替他判断「这份包不值得复制」。
+   * 只有 `running` 算「生成中」。done / failed 是历史：成功已经由产物链接回答
+   * （`listArtifacts`），失败是行内一次性的提示——刷新之后那一行该回到「生成」，
+   * 否则一次失败会把这条需求永久画成坏的，也没有重试的入口。
    */
-  it('没有 PRD 时评审 / 走查的包是「停止」，仍然照给', async () => {
-    const r = await seedInbox('房超');
-    const d = (await getRequirementDetail(r.id))!;
-    expect(d.info.prdUrl).toBeNull();
-    expect(d.refs.find((x) => x.stage === 'evaluate')!.pack).not.toContain('停止');
-    for (const stage of ['review', 'inspect'] as const) {
-      expect(d.refs.find((x) => x.stage === stage)!.pack).toContain('停止');
+  it('done / failed 的作业不算「生成中」', async () => {
+    const id = await seedInReview('feature');
+    await db.execute(sql`
+      insert into uemaster_jobs (requirement_id, stage, status, error, finished_at) values
+        (${id}, 'evaluate', 'failed', 'Failed to authenticate: OAuth session expired', now()),
+        (${id}, 'inspect', 'done', null, now())`);
+    const d = (await getRequirementDetail(id))!;
+    for (const stage of ['evaluate', 'review', 'inspect'] as const) {
+      expect(d.refs.find((x) => x.stage === stage)!.generation).toBeNull();
     }
   });
 

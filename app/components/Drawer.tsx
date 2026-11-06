@@ -3,7 +3,7 @@ import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail
 import { formatMonthDay } from '../../src/core/read/board';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
-import { CopyPack } from './CopyPack';
+import { GenerateButton } from './GenerateButton';
 import { AttachForm } from './AttachForm';
 
 /**
@@ -15,9 +15,10 @@ import { AttachForm } from './AttachForm';
  * 三条来自评审的硬口径：
  * 1. **领域里没有的东西不画**。来源、影响面、业务线、描述这些字段在库里不存在，
  *    线稿那一版的 `dl` 里有它们，这里没有——不编、也不画一个空标签框。
- *    读模型的 `refs` 三处槽位（评估材料 / 评审材料 / 走查材料）**三行都渲染**：
- *    没有产物时那一行不是空槽位，而是一个「复制任务包」按钮——材料要靠用户自己的
- *    agent 生成（D1），所以「还没生成」这一态需要一个入口，而不是一行「—」。
+ *   *    读模型的 `refs` 三处槽位（评估材料 / 评审材料 / 走查材料）**三行都渲染**：
+ *    没有产物时那一行不是空槽位，而是一个「生成」按钮——P2.6 起 Flowers 自己把
+ *    任务包喂给本机的 agent CLI，产物落回来这一行就变成链接；「还没生成」是一个入口，
+ *    不是一行「—」。
  * 2. **没有承诺就不给承诺段**。没排期的需求 `commit` 全是 null，渲染一个只有
  *    「—」的承诺段等于告诉读者「这件事有个空承诺」。
  * 3. **一句解释性文案都没有**：段里只有字段名、值、和动作名。
@@ -37,17 +38,21 @@ const PILL: Record<string, string> = {
 };
 
 function RefRow({
-  item, packId, id, number,
-}: { item: DetailRef; packId: string; id: string; number: number }) {
-  // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「复制任务包」。
+  item, id, number,
+}: { item: DetailRef; id: string; number: number }) {
+  // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「生成」。
   // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
   //
   // 两种进法都摆在这一行上，而且**两行都有**：
-  // - 「复制任务包」= 把材料交给用户自己的 agent（MCP 那条路的第一步）；
+  // - 「生成」= 让我们自己跑（P2.6 的主路：服务端把任务包喂给本机 agent CLI，产物落回来）；
   // - 「交回材料」= 人走的那条路：材料在别处跑完了，从这里贴链接或传文件进来。
   // 有产物那一行也留着它们：重做一版是常态（库里同一 stage 允许多行，读侧取最新）。
+  // `item.generation` 是「这个阶段正在跑」的那个作业：有它就从「生成中」开始，
+  // 刷新 / 换人打开都读到同一个状态。
   return (
-    <div className="row3">
+    // data-stage 是给「这一行是哪一处材料」一个稳定名字：生成按钮是异步的，
+    // 走查 / 截图 / 将来的端到端用例都要能点中「评估材料那一行」，而不是按位置数。
+    <div className="row3" data-stage={item.stage}>
       <div className="l">
         <b>{item.label}</b>
         {item.url !== null && (
@@ -56,14 +61,13 @@ function RefRow({
       </div>
       <div className="acts">
         {item.present && <span className="pill ok">{item.atLabel ?? '—'}</span>}
-        <CopyPack packId={packId} />
+        <GenerateButton
+          requirementId={id}
+          stage={item.stage}
+          runningJobId={item.generation?.id ?? null}
+        />
         <AttachForm id={id} number={number} stage={item.stage} />
       </div>
-      {/* 任务包正文：服务端渲染好的那段中文，就在这里。按钮复制的是这个节点的
-          textContent——没有第二个数据源，也没有客户端请求。hidden 只是不画出来，
-          文本仍然是页面 DOM 的一部分（读屏也不会念这三十行）。放在 .row3 里面是为了
-          不打断 CSS 的 `.row3:last-child`（参考段最后一行不该有下边框）。 */}
-      <pre hidden id={packId}>{item.pack}</pre>
     </div>
   );
 }
@@ -158,9 +162,9 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
           )}
 
           {/* ③ 参考：三行固定槽位，三行都渲染（P2 Task 4 起）。
-              有产物那一行是链接 + 日期，没有产物那一行是「复制任务包」——评估 / 评审 /
-              走查三种材料现在都只能靠用户自己的 agent 生成（D1），所以「还没生成」不再
-              是一个空槽位，而是这一阶段的入口。三行形状相同，读的人不用记哪一行特殊。 */}
+              有产物那一行是链接 + 日期，没有产物那一行是「生成」——P2.6 起材料由
+              服务端自己跑生成器产出，所以「还没生成」是一个入口，不是空槽位。
+              三行形状相同，读的人不用记哪一行特殊。 */}
           <section className="dsec">
             <h3>参考</h3>
             {refs.map((item) => (
@@ -169,7 +173,6 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
                 item={item}
                 id={detail.id}
                 number={detail.number}
-                packId={`pack-${detail.id}-${item.stage}`}
               />
             ))}
           </section>

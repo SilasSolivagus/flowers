@@ -1,0 +1,329 @@
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { sql } from 'drizzle-orm';
+import type { Db } from '../../db/client.js';
+import { AppError } from '../errors.js';
+import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import { attachArtifact } from './attach.js';
+import { artifactUrlIn, runGenerator } from './generator.js';
+import { isStage, packFor, type Stage } from './packs.js';
+import { artifactFile } from './store.js';
+
+/**
+ * 生成作业的**起点**（服务层）与**执行体**（worker 里跑的那一段）。
+ *
+ * 两段刻意放在一个文件、却不放在一个进程里：
+ * - `startGeneration` 在请求里跑，只做四件事：校验、防重、落一行 running、把 worker
+ *   甩出去。它必须很快返回——界面拿到的不是结果，而是 `jobId`。
+ * - `runJob` 在 detached 的 `scripts/gen-worker.ts` 里跑：它要活过这次 HTTP 往返
+ *   （CLI 可能跑几分钟），所以不能挂在请求的生命周期上。
+ *
+ * 这样切的好处是**可测**：worker 的那一段是普通异步函数，用例可以直接用 stub 命令
+ * 跑它，不必真的起一个 detached 进程；而「甩进程」那一步只有几行，失败时也有中文出口。
+ */
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+
+/** 默认硬超时：十分钟。够一个 agent 画完流程图 + 线框页，又短到用户等得起。 */
+export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * 一条 running 作业超过「超时 + 一分钟」还没回来，就当它死了。
+ *
+ * worker 自己会在超时那一刻把作业收成 failed（`runJob` 的硬超时）；这一条守的是
+ * **进程被 kill / 机器重启**那种连 worker 都不在的情况。不设它，一条僵死的 running
+ * 行会把那个阶段永久锁住——用户看到「正在生成中」，而其实什么都没在跑。
+ */
+export const STALE_RUNNING_MS = DEFAULT_TIMEOUT_MS + 60 * 1000;
+
+/**
+ * 工作目录与产物根都从**模块位置**推，不认 `process.cwd()`：worker 的 cwd 是我们
+ * 自己设的，但 Next 的 server action 跑在任意被起起来的进程里；同一条规矩与
+ * `store.ts` 一致，产物路径只能有一个答案。
+ */
+export function repoRoot(): string {
+  return REPO_ROOT;
+}
+
+const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
+
+/** 与 `attach.ts` 同一句话、同一个 code：阶段是用户给的，就该拿到中文。 */
+function parseStage(value: unknown): Stage {
+  const stage = asText(value);
+  if (!isStage(stage)) throw new AppError('invalid_stage', BAD_STAGE);
+  return stage;
+}
+
+export type JobStatus = 'running' | 'done' | 'failed';
+
+export type JobView = {
+  id: string;
+  stage: Stage;
+  status: JobStatus;
+  error: string | null;
+  url: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+};
+
+/**
+ * 记一条失败：status + error + finished_at。
+ *
+ * `where status = 'running'` 让这个写入是**幂等**的：超时定时器与 close 事件有可能
+ * 都走到这里，先到的那个说了算，后到的不会把一条已经 done 的作业改回 failed。
+ */
+async function failJob(db: Db, jobId: string, error: string): Promise<void> {
+  await db.execute(sql`
+    update uemaster_jobs
+       set status = 'failed', error = ${error.slice(0, 2000)}, finished_at = now()
+     where id = ${jobId} and status = 'running'`);
+}
+
+/** 写生成结果：成功才有 artifact_id；同样只在 running 上生效。 */
+async function doneJob(db: Db, jobId: string, artifactId: string): Promise<void> {
+  await db.execute(sql`
+    update uemaster_jobs
+       set status = 'done', error = null, artifact_id = ${artifactId}, finished_at = now()
+     where id = ${jobId} and status = 'running'`);
+}
+
+/**
+ * 起一次生成。
+ *
+ * 顺序是有讲究的：先锁需求行 → 看这个阶段有没有在跑的作业 → 落一行 running →
+ * 提交 → 再甩 worker。锁需求行（`for update`）而不是只查一次 running：两个标签页
+ * 同时点「生成」时，那句中文「正在生成中」必须由一个确定的顺序产生，而不是靠运气；
+ * 库里那条 `uemaster_jobs_running_unique` 部分唯一索引是并发兜底（绕过服务层的人
+ * 也撞得回来）。
+ *
+ * 陈旧回收放在「拒绝」之前：一条超过 `STALE_RUNNING_MS` 的 running 是死进程留下的，
+ * 把它收成 failed 再放行，用户不必等下一次重启。
+ */
+export async function startGeneration(
+  db: Db,
+  actor: string,
+  raw: unknown,
+): Promise<{ jobId: string }> {
+  const input = requirePlainObject(raw);
+  const requirementId = parseRequirementId(input);
+  const stage = parseStage(input.stage);
+
+  const jobId = await db.transaction(async (tx) => {
+    const found = await tx.execute<{ id: string }>(
+      sql`select id from requirements where id = ${requirementId} for update`);
+    if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
+
+    const running = await tx.execute<{ id: string; created_at: Date }>(sql`
+      select id, created_at
+        from uemaster_jobs
+       where requirement_id = ${requirementId} and stage = ${stage} and status = 'running'
+       order by created_at desc, id desc
+       limit 1`);
+    const current = running.rows[0];
+
+    if (current) {
+      const age = Date.now() - new Date(current.created_at).getTime();
+      if (age < STALE_RUNNING_MS) {
+        throw new AppError('generation_running', '这个阶段正在生成中，等这次结束再试');
+      }
+      await tx.execute(sql`
+        update uemaster_jobs
+           set status = 'failed', error = '生成超时：后台进程没有回报', finished_at = now()
+         where id = ${current.id} and status = 'running'`);
+    }
+
+    const inserted = await tx.execute<{ id: string }>(sql`
+      insert into uemaster_jobs (requirement_id, stage, status)
+      values (${requirementId}, ${stage}, 'running')
+      returning id`);
+    return inserted.rows[0]!.id;
+  });
+
+  try {
+    spawnWorker(db, jobId, actor);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await failJob(db, jobId, message);
+    throw new AppError('generator_unavailable', message);
+  }
+
+  return { jobId };
+}
+
+/**
+ * 把 worker 甩出去：detached + 三路 ignore + unref。
+ *
+ * 三个 flag 各自解决一件事：
+ * - `detached: true`：worker 自成一个会话/进程组，请求结束（甚至 Next 重启）不会把它带走。
+ * - `stdio: 'ignore'`：它的输出没有读者。让管道连着父进程，父进程一退出就会 EPIPE。
+ * - `unref()`：父进程的事件循环不再为它保活——请求该多快返回就多快返回。
+ *
+ * 为什么用 `node + tsx` 跑 `.ts` 而不是编译出一份 `.js`：仓库里没有「worker 单独构建」
+ * 这一步（`next build` 只产出 Next 的 bundle），而 tsx 已经是 devDependency、被
+ * `npm run seed` / `demo` 天天用。找不到 tsx 时**不静默**：抛中文错误，作业收成 failed。
+ */
+function spawnWorker(db: Db, jobId: string, actor: string): void {
+  const tsx = path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  if (!existsSync(tsx)) {
+    throw new Error('后台执行器不可用：找不到 node_modules/tsx');
+  }
+  const script = path.join(REPO_ROOT, 'scripts', 'gen-worker.ts');
+  const child = spawn(process.execPath, [tsx, script, jobId, actor], {
+    cwd: REPO_ROOT,
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
+  });
+  child.on('error', () => {
+    // 异步的 spawn 失败（ENOENT 之类）不会抛到调用方；作业不能因此永远 running。
+    void failJob(db, jobId, '生成进程没能启动');
+  });
+  child.unref();
+}
+
+/**
+ * 一次「产物文件」的快照：在不在、什么时候写的。
+ *
+ * 为什么要它：产物路径是**固定的**（`data/uemaster/PAN-n/stage.html`，重做覆盖同一份）。
+ * 如果上一版文件还在、这次 agent 什么都没写就退出 0，光看「文件存在」会把旧材料当成
+ * 新生成的结果交回去——那是最坏的一种谎。所以跑之前记 mtime，跑之后要求它变了。
+ */
+async function snapshot(file: string): Promise<number | null> {
+  try {
+    return (await stat(file)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+export type RunJobOptions = {
+  /** 写进 `uemaster_artifacts.created_by`：按按钮的人，或 worker 的默认值。 */
+  actor?: string;
+  timeoutMs?: number;
+  cwd?: string;
+};
+
+/**
+ * worker 的全部逻辑：读作业 → 拼任务包 → 跑生成器 → 验文件 → attach → 收口。
+ *
+ * 三条不可协商的边界：
+ * 1. **绝不把作业留在 running**。任何异常（生成器报错、attach 拒绝、代码 bug）都被
+ *    这一层接住并写成 failed；`runGenerator` 自己还有硬超时。
+ * 2. **只有真的写出来的文件才算成功**。文件不存在、或者 mtime 没变，都是失败，
+ *    原因写给用户看。
+ * 3. **重复进入是安全的**。作业不是 running 就直接返回；UPDATE 都带
+ *    `status = 'running'` 条件。
+ *
+ * 没有 PRD 的评审 / 走查在这里就停：`packFor` 给出的是一段「停止：到此停止…」，
+ * 交给 agent 只会浪费一次调用，还会让它交回一份猜的材料。直接用中文说清缺什么。
+ */
+export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): Promise<void> {
+  const actor = opts.actor?.trim() || '生成器';
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  const found = await db.execute<{
+    id: string; stage: string; status: string;
+    requirement_id: string; number: number; title: string;
+    type: string; requester: string; prd_url: string | null;
+  }>(sql`
+    select j.id, j.stage, j.status,
+           r.id as requirement_id, r.number, r.title, r.type, r.requester, r.prd_url
+      from uemaster_jobs j
+      join requirements r on r.id = j.requirement_id
+     where j.id = ${jobId}`);
+  const job = found.rows[0];
+  if (!job) throw new AppError('not_found', '生成任务不存在');
+  if (job.status !== 'running') return;
+  if (!isStage(job.stage)) {
+    await failJob(db, jobId, BAD_STAGE);
+    return;
+  }
+
+  try {
+    if (job.prd_url === null && job.stage !== 'evaluate') {
+      const noun = job.stage === 'review' ? '评审材料' : '走查材料';
+      await failJob(db, jobId, `缺少 PRD 链接，无法生成${noun}`);
+      return;
+    }
+
+    const pack = packFor(job.stage, {
+      id: job.requirement_id,
+      number: Number(job.number),
+      title: job.title,
+      type: job.type,
+      requester: job.requester,
+      prdUrl: job.prd_url,
+    });
+
+    // 产物路径从包里来（包写死了它），跑之前先记一份快照。
+    const url = artifactUrlIn(pack);
+    const file = artifactFile(url);
+    const before = await snapshot(file);
+
+    const result = await runGenerator(pack, {
+      cwd: opts.cwd ?? REPO_ROOT,
+      timeoutMs,
+    });
+
+    if (!result.ok) {
+      await failJob(db, jobId, result.error);
+      return;
+    }
+
+    const after = await snapshot(file);
+    if (after === null) {
+      await failJob(db, jobId, `生成命令已结束，但产物文件不存在：data${result.url}`);
+      return;
+    }
+    if (before !== null && after === before) {
+      await failJob(db, jobId, `生成命令已结束，但产物文件没有更新：data${result.url}`);
+      return;
+    }
+
+    // attachArtifact 会自己 stat 站内链接（没有文件就是 artifact_missing），
+    // 写库、记事件、必要时把 inbox 推到待设计——这里不重复第二套写入路径。
+    const artifact = await attachArtifact(db, actor, {
+      requirementId: job.requirement_id,
+      stage: job.stage,
+      url: result.url,
+    });
+    await doneJob(db, jobId, artifact.id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await failJob(db, jobId, message);
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * 界面要的那一次读取：这条作业现在怎么样了、成功了链接在哪。
+ *
+ * 非 uuid / 查不到都返回 null（与读模型对「不存在的需求」同一条口径）：这个字符串
+ * 只可能来自页面状态或手改的请求，不值得为它抛一个领域错误。
+ */
+export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> {
+  if (!UUID.test(jobId)) return null;
+  const res = await db.execute<{
+    id: string; stage: Stage; status: JobStatus; error: string | null;
+    url: string | null; created_at: string; finished_at: string | null;
+  }>(sql`
+    select j.id, j.stage, j.status, j.error, j.created_at, j.finished_at, a.url
+      from uemaster_jobs j
+      left join uemaster_artifacts a on a.id = j.artifact_id
+     where j.id = ${jobId}`);
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    stage: row.stage,
+    status: row.status,
+    error: row.error,
+    url: row.url,
+    createdAt: new Date(row.created_at).toISOString(),
+    finishedAt: row.finished_at === null ? null : new Date(row.finished_at).toISOString(),
+  };
+}

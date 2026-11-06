@@ -86,6 +86,48 @@ export const uemasterArtifacts = pgTable('uemaster_artifacts', {
   byReq: index('uemaster_artifacts_req').on(t.requirementId, t.stage, t.createdAt.desc()),
 }));
 
+/**
+ * 一次「让 Flowers 自己生成材料」的作业（P2.6）。
+ *
+ * 为什么作业要落库、而不是一个进程内的 promise：生成由 `claude -p` / `codex exec`
+ * 这种 CLI 跑，几十秒到几分钟；它必须活过发出请求的那次 HTTP 往返（worker 是
+ * detached 的），而界面要能问「那次生成怎么样了」。进程的内存里没有答案，只有这一行有。
+ *
+ * 三条约束各有分工：
+ * - `status` 的 CHECK 让库自己拒绝第四种状态（服务层同时给中文错误，与 artifacts 同一条口径）。
+ * - `(requirement_id, stage) where status='running'` 的唯一索引是**并发兜底**：
+ *   服务层先 `select ... for update` 住需求行再查 running，是为了给用户一句中文；
+ *   这条索引保证即使有人绕过服务层（脚本直连），同一个阶段也不会同时跑两次。
+ * - `artifact_id` 可空且指向 `uemaster_artifacts`：成功才有产物；失败的那一行
+ *   必须留着（error 里是用户要读的原因），不能因为「没产物」就被删掉。
+ *
+ * 行只增不改语义：一次生成一行。`finished_at` 为空就是还在跑（或进程被杀了，
+ * 由下一次 `startGeneration` 的陈旧回收把它收成 failed）。
+ */
+export const uemasterJobs = pgTable('uemaster_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requirementId: uuid('requirement_id').notNull().references(() => requirements.id),
+  stage: text('stage').notNull(),            // evaluate | review | inspect
+  status: text('status').notNull(),          // running | done | failed
+  error: text('error'),                      // 失败原因原文（CLI 的 stderr 尾巴）
+  artifactId: uuid('artifact_id').references(() => uemasterArtifacts.id),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp('finished_at', { withTimezone: true }),
+}, (t) => ({
+  statusCheck: check(
+    'uemaster_jobs_status_check',
+    sql`${t.status} in ('running', 'done', 'failed')`,
+  ),
+  stageCheck: check(
+    'uemaster_jobs_stage_check',
+    sql`${t.stage} in ('evaluate', 'review', 'inspect')`,
+  ),
+  runningUnique: uniqueIndex('uemaster_jobs_running_unique')
+    .on(t.requirementId, t.stage)
+    .where(sql`${t.status} = 'running'`),
+  byReq: index('uemaster_jobs_req').on(t.requirementId, t.stage, t.createdAt.desc()),
+}));
+
 export const events = pgTable('events', {
   // 单调递增：值来自 events_seq_seq，不扫 max。
   seq: integer('seq').primaryKey().default(sql`nextval('events_seq_seq')`),
