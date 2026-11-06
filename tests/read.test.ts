@@ -39,6 +39,32 @@ function memberId(name: string): string {
   return found.id;
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * 所有日期相对「今天」算，不写死某一天。
+ *
+ * 这不是洁癖：读模型里 `isPastDay` 是严格小于，写死 '2026-12-04' 的断言会在
+ * 2026-12-05 那天开始变红，而代码一行没错——那种红是最没人愿意查的红。
+ * `TODAY` 取 UTC 零点的那一天：用例里的日期都按 'YYYY-MM-DD' 写库（服务也是这么
+ * 解析的），相对它加减永远落在同一种基准上。
+ */
+const TODAY = new Date().toISOString().slice(0, 10);
+/** 足够远，任何「还没到」的判断都不会被时区或运行时长碰到。 */
+const FUTURE = shiftDay(TODAY, 30);
+/** 足够远，任何「已经过了」的判断都成立。 */
+const PAST = shiftDay(TODAY, -30);
+
+/** 'YYYY-MM-DD' 加减天数（用例里的日期都是 UTC 零点，直接按天算）。 */
+function shiftDay(day: string, delta: number): string {
+  return new Date(new Date(day).getTime() + delta * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** 读模型把日期格式化成 'MM-DD'；'YYYY-MM-DD'.slice(5) 是同一天的同一种写法。 */
+function md(day: string): string {
+  return day.slice(5);
+}
+
 /**
  * 把一条需求推到「测试中」（brief 里的 seedOneTesting）。
  *
@@ -52,7 +78,7 @@ async function seedOneTesting(opts: {
   title?: string;
   type?: 'commercial' | 'feature';
 } = {}) {
-  const due = opts.commitDueAt ?? '2026-12-04';
+  const due = opts.commitDueAt ?? FUTURE;
   // 版本时间窗与提测日都从承诺完成日推：schedule 要求 提测 <= 承诺 <= 发版，
   // 让助手替用例守住这条次序，用例才能专心写它要断言的日期。
   const windowStart = shiftDay(due, -7);
@@ -77,23 +103,40 @@ async function seedOneTesting(opts: {
   return { id: r.id, number: r.number, releaseId, due, windowStart, testAt };
 }
 
-/** 'YYYY-MM-DD' 加减天数（用例里的日期都是 UTC 零点，直接按天算）。 */
-function shiftDay(day: string, delta: number): string {
-  return new Date(new Date(day).getTime() + delta * 86_400_000).toISOString().slice(0, 10);
-}
-
-/** 建一条停在 inbox 的需求（没类型之外的必填都没填，也永远没有版本）。 */
-async function seedInbox(owner?: string) {
+/** 建一条停在 inbox 的需求（除了标题 / 提出人什么都没填，也永远没有版本）。 */
+async function seedInbox(requester = '房超', owner?: string) {
   const r = await createRequirement(db, '吕品', {
     title: 'PC 剪贴板读取 URL',
     type: 'commercial',
-    requester: '房超',
+    requester,
     ownerMemberId: owner ? memberId(owner) : null,
   });
   return r;
 }
 
-/** 建一条推到 review 的需求，返回 id 与派单到的评审人姓名。 */
+/** 建一条推到 ready 的需求：负责人是 owner，开工日还没到。返回 id。 */
+async function seedReady(owner: string) {
+  const windowStart = shiftDay(TODAY, 7);
+  const releaseId = await makeRelease(`R-${windowStart}`, windowStart, shiftDay(TODAY, 14));
+  const r = await createRequirement(db, '吕品', {
+    title: 'PC 端支持打开分享页',
+    type: 'feature',
+    requester: '孙建宏',
+    ownerMemberId: memberId(owner),
+  });
+  await evaluate(db, '吕品', { requirementId: r.id });
+  await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
+  await reviewPass(db, '吕正豪', { requirementId: r.id });
+  await schedule(db, '吕品', {
+    requirementId: r.id,
+    releaseId,
+    commitTestAt: shiftDay(TODAY, 9),
+    commitDueAt: shiftDay(TODAY, 12),
+  });
+  return r.id;
+}
+
+/** 建一条推到 review 的需求，返回 id 与 type 决定的评审人姓名。 */
 async function seedInReview(type: 'commercial' | 'feature') {
   const r = await createRequirement(db, '吕品', {
     title: type === 'commercial' ? '直链分享限速（二期）' : '导出任务队列改造',
@@ -104,6 +147,16 @@ async function seedInReview(type: 'commercial' | 'feature') {
   await evaluate(db, '吕品', { requirementId: r.id });
   await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
   return r.id;
+}
+
+/** 在某一列里取出某张卡（取不到就炸，免得断言读到 undefined 也「通过」）。 */
+async function cardOf(state: string, id: string, me: string) {
+  const board = await getBoard(me);
+  const column = board.find((c) => c.state === state);
+  if (!column) throw new Error(`看板没有 ${state} 这一列`);
+  const card = column.cards.find((c) => c.id === id);
+  if (!card) throw new Error(`看板 ${state} 列里没有需求 ${id}`);
+  return card;
 }
 
 describe('成员', () => {
@@ -138,13 +191,12 @@ describe('getBoard', () => {
   });
 
   it('卡片带出负责人、等谁、停留天数', async () => {
-    const { id } = await seedOneTesting({ commitDueAt: '2026-12-04' });
-    const board = await getBoard('吕品');
-    const card = board.find((c) => c.state === 'test')!.cards.find((x) => x.id === id)!;
+    const { id, due } = await seedOneTesting();
+    const card = await cardOf('test', id, '吕品');
     expect(card.number).toBeGreaterThan(0);
     expect(card.title).toBe('S3 协议支持');
     expect(card.owner).toBe('房超');
-    expect(card.waiting).toBe('12-04 自动上线');
+    expect(card.waiting).toBe(`${md(due)} 自动上线`);
     expect(card.waitingOn).toBe('clock');
     expect(card.late).toBe(false);
     expect(card.days).toBeGreaterThanOrEqual(0);
@@ -154,12 +206,12 @@ describe('getBoard', () => {
     const { id } = await seedOneTesting();
     await db.execute(sql`
       update requirements set state_entered_at = now() - interval '3 days' where id = ${id}`);
-    const board = await getBoard('吕品');
-    const card = board.find((c) => c.state === 'test')!.cards.find((x) => x.id === id)!;
+    const card = await cardOf('test', id, '吕品');
     expect(card.days).toBe(3);
   });
 
   it('mine 跟着当前成员走，换个身份标签就换', async () => {
+    // inbox 的「补必填」欠在提出人身上，所以这里换的是提出人
     const mine = await seedInbox('房超');
     const other = await seedInbox('王妍');
 
@@ -184,25 +236,23 @@ describe('getBoard', () => {
     expect(cards.every((c) => c.waitingOn === 'person')).toBe(true);
   });
 
-  it('测试中逾期：等的事从时钟变成人', async () => {
-    // 承诺完成日已经过去：时钟还没跑到（或早就该打回），下一步卡在负责人身上
-    const { id } = await seedOneTesting({ commitDueAt: '2020-01-01', owner: '房超' });
-    const board = await getBoard('吕品');
-    const card = board.find((c) => c.state === 'test')!.cards.find((x) => x.id === id)!;
+  it('测试中逾期：逾期标出来，但仍然不欠任何人一个动作', async () => {
+    // 承诺完成日已经过去：卡片该标红（late），但「现在需要你动手」是 false ——
+    // 时钟还没跑到，而打回是可选的，可选动作不产生「你的卡」。
+    const { id } = await seedOneTesting({ commitDueAt: PAST, owner: '房超' });
+    const card = await cardOf('test', id, '房超');
     expect(card.late).toBe(true);
-    expect(card.waiting).toContain('房超');
-    expect(card.waiting).toContain('01-01');
-    expect(card.waitingOn).toBe('person');
+    expect(card.waiting).toContain(md(PAST));
+    expect(card.waitingOn).toBe('clock');
+    expect(card.mine).toBe(false);
   });
 
   it('没有版本的需求照样出现在它那一列', async () => {
-    const r = await seedInbox();
-    const board = await getBoard('吕品');
-    const card = board.find((c) => c.state === 'inbox')!.cards.find((x) => x.id === r.id)!;
-    expect(card).toBeDefined();
+    const r = await seedInbox('房超');
+    const card = await cardOf('inbox', r.id, '吕品');
     expect(card.waiting).toBe('房超 补必填');
     expect(card.owner).toBeNull();
-    // 排队中的需求等的是人（排期），不是日期
+    // 收集列等的是人（提出人补必填），不是日期
     expect(card.waitingOn).toBe('person');
 
     const detail = await getRequirementDetail(r.id);
@@ -210,18 +260,68 @@ describe('getBoard', () => {
   });
 
   it('终态的列等的是「—」，不假装有人在等', async () => {
-    const r = await seedInbox('房超');
+    const r = await seedInbox('房超', '房超');
     await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
-    const board = await getBoard('吕品');
-    const card = board.find((c) => c.state === 'shelved')!.cards.find((x) => x.id === r.id)!;
+    const card = await cardOf('shelved', r.id, '房超');
     expect(card.waiting).toBe('—');
     expect(card.waitingOn).toBe('none');
+    // 恢复是可选的，所以搁置的卡不算「需要你动手」
+    expect(card.mine).toBe(false);
+  });
+});
+
+/**
+ * `mine` 的负向用例。
+ *
+ * 这一组是这次裁决的核心：主色框与「等谁」那一行必须说同一件事。旧实现用
+ * `owner === me || reviewer === me`，于是「等 吕正豪 评审」的卡会被框成负责人（王妍）的，
+ * 一张卡同时说着「等别人」和「你需要动手」。正向用例抓不到这种不一致，只有负向能。
+ */
+describe('mine = 现在欠你一个动作（不是「跟你有关」）', () => {
+  it('待评审的卡不框负责人，只框派单到的评审人', async () => {
+    const feature = await seedInReview('feature'); // owner 王妍，派给吕正豪
+    const asOwner = await cardOf('review', feature, '王妍');
+    expect(asOwner.waiting).toBe('等 吕正豪 评审');
+    expect(asOwner.mine).toBe(false);
+
+    const asReviewer = await cardOf('review', feature, '吕正豪');
+    expect(asReviewer.mine).toBe(true);
+
+    // 另一条线的评审人也不该被框
+    expect((await cardOf('review', feature, '赵越')).mine).toBe(false);
+  });
+
+  it('待开发 / 开发中 / 测试中：负责人也不框，等的是日期', async () => {
+    const ready = await seedReady('房超');
+    const readyCard = await cardOf('ready', ready, '房超');
+    expect(readyCard.owner).toBe('房超');
+    expect(readyCard.waitingOn).toBe('clock');
+    expect(readyCard.mine).toBe(false);
+
+    const testing = await seedOneTesting({ owner: '房超' });
+    const testCard = await cardOf('test', testing.id, '房超');
+    expect(testCard.waitingOn).toBe('clock');
+    expect(testCard.mine).toBe(false);
+  });
+
+  it('待排期 / 待设计框的是负责人，收集框的是提出人', async () => {
+    const { id: designId } = await (async () => {
+      const r = await seedInbox('孙建宏', '房超');
+      await evaluate(db, '吕品', { requirementId: r.id });
+      return r;
+    })();
+    expect((await cardOf('design', designId, '房超')).mine).toBe(true);
+    expect((await cardOf('design', designId, '吕品')).mine).toBe(false);
+
+    const inbox = await seedInbox('王妍');
+    expect((await cardOf('inbox', inbox.id, '王妍')).mine).toBe(true);
+    expect((await cardOf('inbox', inbox.id, '房超')).mine).toBe(false);
   });
 });
 
 describe('getRequirementDetail', () => {
   it('六段齐全：信息 / 承诺 / 参考 / 评审 / 记录 / 动作', async () => {
-    const { id } = await seedOneTesting({ commitDueAt: '2026-12-04' });
+    const { id, due, testAt } = await seedOneTesting();
     const d = (await getRequirementDetail(id))!;
 
     expect(d.id).toBe(id);
@@ -239,11 +339,11 @@ describe('getRequirementDetail', () => {
     });
 
     // 承诺：版本 + 两个日期，且时间已用是个 0..100 的整数
-    expect(d.commit.release).toMatchObject({ name: 'R-2026-12-04' });
-    expect(d.commit.testAt).toContain('2026-12-02');
-    expect(d.commit.dueAt).toContain('2026-12-04');
-    expect(d.commit.testAtLabel).toBe('12-02');
-    expect(d.commit.dueAtLabel).toBe('12-04');
+    expect(d.commit.release).toMatchObject({ name: `R-${due}` });
+    expect(d.commit.testAt).toContain(testAt);
+    expect(d.commit.dueAt).toContain(due);
+    expect(d.commit.testAtLabel).toBe(md(testAt));
+    expect(d.commit.dueAtLabel).toBe(md(due));
     expect(d.commit.timeUsed!.percent).toBeGreaterThanOrEqual(0);
     expect(d.commit.timeUsed!.percent).toBeLessThanOrEqual(100);
 
@@ -273,7 +373,8 @@ describe('getRequirementDetail', () => {
       'requirement.scheduled',
     ]);
     expect(d.events.every((e) => e.label.length > 0 && !e.label.includes('requirement.'))).toBe(true);
-    expect(d.events.at(-1)!.note).toContain('2026-12-04');
+    expect(d.events.at(-1)!.note).toContain(due);
+    expect(d.events.every((e) => /^\d{2}-\d{2}$/.test(e.dateLabel))).toBe(true);
 
     // 动作：测试中只有打回与搁置
     expect(d.actions).toEqual(['bounce', 'shelve']);
@@ -290,6 +391,10 @@ describe('getRequirementDetail', () => {
       'reviewPass', 'reviewReject', 'shelve',
     ]);
 
+    // 待开发 / 开发中不是「只能等」：spec 说每个非终态都能搁置
+    const ready = await seedReady('房超');
+    expect((await getRequirementDetail(ready))!.actions).toEqual(['shelve']);
+
     await shelveRequirement(db, '吕品', { requirementId: inbox.id, reason: '本期不做' });
     const shelved = (await getRequirementDetail(inbox.id))!;
     expect(shelved.actions).toEqual(['restore']);
@@ -305,20 +410,20 @@ describe('getRequirementDetail', () => {
 
 describe('listReleases', () => {
   it('带出在途条数与延期条数，以及每条需求的日期', async () => {
-    await makeRelease('2026.12', '2026-11-20', '2026-12-04');
-    const live = await seedOneTesting({ commitDueAt: '2026-12-04', title: '在期的一条' });
-    const late = await seedOneTesting({ commitDueAt: '2020-01-01', title: '延期的一条' });
+    const live = await seedOneTesting({ title: '在期的一条' });
+    const late = await seedOneTesting({ commitDueAt: PAST, title: '延期的一条' });
 
     const releases = await listReleases();
     const r = releases.find((x) => x.name === `R-${live.due}`)!;
     expect(r.windowStart).toContain(live.windowStart);
-    expect(r.releaseDate).toContain('2026-12-04');
-    expect(r.timeUsed).not.toBeNull();
+    expect(r.releaseDate).toContain(live.due);
     expect(r.inFlight).toBe(1);
     expect(r.late).toBe(0);
+    expect(r.timeUsed).not.toBeNull();
     expect(r.requirements.map((x) => x.title)).toEqual(['在期的一条']);
     expect(r.requirements[0]).toMatchObject({ state: 'test', stateLabel: '测试中' });
-    expect(r.requirements[0]!.commitDueAt).toContain('2026-12-04');
+    expect(r.requirements[0]!.commitDueAt).toContain(live.due);
+    expect(r.requirements[0]!.dueAtLabel).toBe(md(live.due));
 
     const lateRelease = releases.find((x) => x.name === `R-${late.due}`)!;
     expect(lateRelease.late).toBe(1);
@@ -326,10 +431,11 @@ describe('listReleases', () => {
   });
 
   it('已上线的需求不算在途、也不算延期', async () => {
-    const { id, releaseId } = await seedOneTesting({ commitDueAt: '2020-01-01' });
+    const { id, releaseId } = await seedOneTesting({ commitDueAt: PAST });
     await db.execute(sql`update requirements set state = 'live' where id = ${id}`);
     const r = (await listReleases()).find((x) => x.id === releaseId)!;
     expect(r.inFlight).toBe(0);
+    expect(r.shipped).toBe(1);
     expect(r.late).toBe(0);
     expect(r.requirements[0]).toMatchObject({ state: 'live', late: false });
   });

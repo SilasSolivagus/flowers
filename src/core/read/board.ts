@@ -112,53 +112,67 @@ type Row = {
  * 「等谁」：当前状态卡在哪一步、挂在谁或哪个日期上。
  *
  * 这是整块看板的重点，不是装饰：同一列里等的东西不一样才是真的信息
- * （两条都在待评审，一条等功能线、一条等商业线；两条都在测试中，一条等承诺日
- * 自动上线、一条承诺日已经过了、在等负责人决定打回）。
+ * （两条都在待评审，一条等功能线、一条等商业线；两条都在测试中，等的是两个不同的承诺日）。
+ *
+ * 返回值刻意分成三件（文字 / 等的是人还是时钟 / 具体是谁），而不是只返回一句话：
+ * 卡片的主色框（`mine`）**必须由同一个判断派生**（`on === 'person' && who === me`），
+ * 否则会出现「等 吕正豪 评审」的卡被框成负责人王妍的——一张卡同时说着两件事。
+ * 只要 `who` 是这里唯一的人名来源，文字与框就不可能对不上。
  *
  * 缺席的日期不静默成空字符串：那是越过服务直接写库才会有的数据损坏，
- * 卡片上写「缺提测日」比写一个空标签诚实。
+ * 卡片上写「缺提测日」比写一个空标签诚实。这种行 `on: 'none'`——没人欠动作，
+ * 该修的是数据。
  */
-function waitingFor(row: Row, today: number): { waiting: string; waitingOn: WaitingOn } {
-  const owner = row.owner ?? '负责人';
+type Waiting = { text: string; on: WaitingOn; who: string | null };
+
+function waitingFor(row: Row, today: number): Waiting {
   switch (row.state) {
     case 'inbox':
-      return { waiting: `${row.requester} 补必填`, waitingOn: 'person' };
+      // 补必填是提出人的事（提出人是字段，不是账号，所以只可能是这个名字）。
+      return { text: `${row.requester} 补必填`, on: 'person', who: row.requester };
     case 'design':
-      return { waiting: `${owner} 出正式 PRD`, waitingOn: 'person' };
+      return row.owner === null
+        ? { text: '负责人出正式 PRD', on: 'none', who: null }
+        : { text: `${row.owner} 出正式 PRD`, on: 'person', who: row.owner };
     case 'review':
-      return row.reviewer
-        ? { waiting: `等 ${row.reviewer} 评审`, waitingOn: 'person' }
-        : { waiting: '等派单评审人', waitingOn: 'person' };
+      // 评审人由类型派单决定（spec §2），不是负责人：所以待评审的卡框评审人，不框负责人。
+      return row.reviewer === null
+        ? { text: '等派单评审人', on: 'none', who: null }
+        : { text: `等 ${row.reviewer} 评审`, on: 'person', who: row.reviewer };
     case 'queue':
-      return { waiting: `${owner} 排期`, waitingOn: 'person' };
+      return row.owner === null
+        ? { text: '等排期', on: 'none', who: null }
+        : { text: `${row.owner} 排期`, on: 'person', who: row.owner };
     case 'ready': {
       const day = formatMonthDay(row.window_start);
       return day
-        ? { waiting: `等开工日 ${day}`, waitingOn: 'clock' }
-        : { waiting: '缺开工日', waitingOn: 'none' };
+        ? { text: `等开工日 ${day}`, on: 'clock', who: null }
+        : { text: '缺开工日', on: 'none', who: null };
     }
     case 'dev': {
       const day = formatMonthDay(row.commit_test_at);
-      if (!day) return { waiting: '缺提测日', waitingOn: 'none' };
+      if (!day) return { text: '缺提测日', on: 'none', who: null };
+      // 提测日过了还停在开发中：卡片该标红（lateDeadline），但**不欠任何人一个动作**。
+      // 时钟会继续推它，打回是可选的；可选动作不产生「你的卡」（裁决 R-mine）。
       return isPastDay(row.commit_test_at, today)
-        ? { waiting: `提测日已过 ${day}，等提测`, waitingOn: 'person' }
-        : { waiting: `${day} 提测`, waitingOn: 'clock' };
+        ? { text: `提测日已过 ${day}`, on: 'clock', who: null }
+        : { text: `${day} 提测`, on: 'clock', who: null };
     }
     case 'test': {
       const day = formatMonthDay(row.commit_due_at);
-      if (!day) return { waiting: '缺承诺完成日', waitingOn: 'none' };
-      // 承诺日过了还没上线，只有两种可能：时钟没跑到，或者这条该被打了回。
-      // 两种都落在人身上，所以这里等的是人，不是时钟。
+      if (!day) return { text: '缺承诺完成日', on: 'none', who: null };
+      // 同上：承诺日过了也只是「等的东西过期了」，不是「负责人欠一个动作」。
       return isPastDay(row.commit_due_at, today)
-        ? { waiting: `承诺日已过 ${day}，等 ${owner} 打回`, waitingOn: 'person' }
-        : { waiting: `${day} 自动上线`, waitingOn: 'clock' };
+        ? { text: `承诺日已过 ${day}`, on: 'clock', who: null }
+        : { text: `${day} 自动上线`, on: 'clock', who: null };
     }
     case 'live':
-      // 「可发起走查」不是有人在等，是「你可以动」：走查不改状态（spec §3 末行）。
-      return { waiting: '可发起走查', waitingOn: 'none' };
+      // 「可发起走查」不是有人在等，是「你可以动」：走查不改状态（spec §3 末行），也不框。
+      return { text: '可发起走查', on: 'none', who: null };
     case 'rejected':
     case 'shelved':
-      return { waiting: '—', waitingOn: 'none' };
+      // 恢复 / 无可做：都可选，都不框。
+      return { text: '—', on: 'none', who: null };
   }
 }
 
@@ -229,14 +243,23 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
 
   const byState = new Map<State, BoardCard[]>(BOARD_STATES.map((s) => [s, []]));
   for (const row of res.rows) {
-    const { waiting, waitingOn } = waitingFor(row, today);
-    byState.get(row.state)?.push({
+    const cards = byState.get(row.state);
+    // 不写 `byState.get(...)?.push`：状态加进 State 却忘了加进 BOARD_STATES 时，
+    // 那张卡会**静默消失**——一条需求从看板上凭空不见，比一次 500 难查得多。
+    if (!cards) {
+      throw new AppError(
+        'invalid',
+        `看板没有「${row.state}」这一列：读模型的列清单与状态机不同步`,
+      );
+    }
+    const waiting = waitingFor(row, today);
+    cards.push({
       id: row.id,
       number: Number(row.number),
       title: row.title,
       owner: row.owner,
-      waiting,
-      waitingOn,
+      waiting: waiting.text,
+      waitingOn: waiting.on,
       late: lateDeadline({
         state: row.state,
         windowStart: row.window_start,
@@ -244,9 +267,10 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
         dueAt: row.commit_due_at,
       }, today),
       days: daysSinceShanghai(row.state_entered_at, today),
-      // 需要你动手的两种身份：这条需求的负责人，或它派单到的评审人。
-      // 只比姓名，不比 id：actor 在全链路都是姓名（events.actor、服务入参都是）。
-      mine: who.length > 0 && (row.owner === who || row.reviewer === who),
+      // 「现在需要你动手」= 这张卡等的那个人就是你。名字只从 waiting.who 来，
+      // 所以主色框与「等谁」那一行说的是同一件事（旧写法 owner||reviewer 会让
+      // 「等 吕正豪 评审」的卡被框给负责人）。
+      mine: waiting.on === 'person' && waiting.who !== null && waiting.who === who,
     });
   }
 

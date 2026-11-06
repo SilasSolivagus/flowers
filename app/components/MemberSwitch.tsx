@@ -13,7 +13,10 @@ import { useState, type ChangeEvent } from 'react';
 interface MemberSwitchProps {
   /** 服务端从 flowers_actor cookie 读到的当前成员（缺省「吕品」）。 */
   current: string;
-  /** 全部成员姓名，顺序由库里 created_at 决定（与派单取人的顺序一致）。 */
+  /**
+   * 全部成员姓名，顺序来自 `listMembers()` 的 `order by name`（见 src/core/read/member.ts：
+   * 种子一次 insert 建完五个人，created_at 全相同，按它排等于按 uuid 排）。
+   */
   members: string[];
 }
 

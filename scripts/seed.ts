@@ -17,7 +17,14 @@
  *    看板任何时候打开都处在「正在跑」的状态。
  *
  * 产出（与线稿一致）：5 个成员、2 个版本、12 条需求铺满 10 个状态，
- * 其中 5 条属于当前成员（默认「吕品」）。
+ * 其中 4 条是当前成员（默认「吕品」）**现在需要动手**的卡。
+ *
+ * 为什么不是 brief 写的 5 条：`mine` 的口径是「现在欠你一个动作」，而它由「等谁」
+ * 那一行派生（见 read/board.ts 的 waitingFor）。12 条的固定分布里，欠人动作的只有
+ * 收集（提出人）/ 待设计（负责人）/ 待评审（派单评审人）/ 待排期（负责人）；
+ * 待开发 / 开发中 / 测试中 / 已上线 / 终态都不欠人动作（打回、走查、恢复都是可选的）。
+ * 待评审那两条按类型只能派给吕正豪 / 赵越，所以吕品最多 4 条。要 5 条只能改分布
+ * （例如待排期 3 / 开发中 1），那已经不是 brief 那张板了。
  */
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
@@ -205,7 +212,8 @@ async function main() {
   head('造需求（全部走真实服务）');
 
   // 1 收集：只有提出人，没有负责人 —— 等的是「提出人补必填」。
-  const inbox = await create('PC 剪贴板读取 URL', 'commercial', '孙建宏', null);
+  // 提出人就是当前成员：收集列的「补必填」欠在他身上，所以这张卡是「需要你动手」的。
+  const inbox = await create('PC 剪贴板读取 URL', 'commercial', PM, null);
   log(`${padTo(`#${inbox.number}`, 5)}${padTo('PC 剪贴板读取 URL', 26)}createRequirement（停在收集）`);
 
   // 2 待设计（mine）：评估过了，等负责人出正式 PRD。
@@ -293,7 +301,7 @@ async function main() {
     }
   }
   log('');
-  log(`共 ${total} 条，其中当前成员（${DEFAULT_MEMBER}）${mine} 条，逾期 ${late} 条`);
+  log(`共 ${total} 条，其中当前成员（${DEFAULT_MEMBER}）现在需要动手 ${mine} 条，逾期 ${late} 条`);
 
   head('版本（listReleases 真实读模型）');
   for (const release of await listReleases()) {
@@ -321,8 +329,18 @@ async function main() {
     if (actual !== count) failures.push(`状态 ${state}：期望 ${count} 条，实际 ${actual} 条`);
   }
   if (total !== 12) failures.push(`需求总数是 ${total}，期望 12`);
-  if (mine !== 5) failures.push(`当前成员的卡片是 ${mine} 条，期望 5`);
+  // 4 = 收集 1（提出人）+ 待设计 1（负责人）+ 待排期 2（负责人）。见文件头的解释。
+  if (mine !== 4) failures.push(`当前成员「需要你动手」的卡片是 ${mine} 条，期望 4`);
   if (late !== 1) failures.push(`逾期卡片是 ${late} 条，期望 1（开发中那条提测日已过）`);
+
+  // 主色框只该出现在「欠你动作」的那四列：时钟状态与终态一律不框（裁决 R-mine）。
+  const accentOnClock = board
+    .filter((c) => ['ready', 'dev', 'test', 'live', 'rejected', 'shelved'].includes(c.state))
+    .flatMap((c) => c.cards)
+    .filter((c) => c.mine);
+  if (accentOnClock.length > 0) {
+    failures.push(`等日期/终态的卡片不该是「需要你动手」：${accentOnClock.map((c) => c.title).join('、')}`);
+  }
 
   // 同一列里等的东西不一样：这是看板的设计前提，seed 必须演示出来。
   const devWaiting = board.find((c) => c.state === 'dev')!.cards.map((c) => c.waiting);
@@ -340,7 +358,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  log('结论：PASS —— 12 条需求铺满 10 列，5 条属于当前成员');
+  log(`结论：PASS —— 12 条需求铺满 10 列，${mine} 条是当前成员现在要动手的`);
 }
 
 main()
