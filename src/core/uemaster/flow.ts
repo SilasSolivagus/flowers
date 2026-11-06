@@ -152,6 +152,28 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * 布局被拒时再跑一次 `--check`，把报告捞回来（失败路径专用）。
+ *
+ * 为什么值得多花一次 ~60ms：`renderFlowchart` 的返回值是**给模型看的修图工单**，
+ * 而 `-o` 模式在布局不合格时只有一句「交叉 1 / 重叠 0 / 文字溢出 0」，没有坐标。
+ * 报告里的 `*_points` 才说得清「哪两条线在第几像素交叉」。报告拿不到就返回 null，
+ * 调用方退回那句中文原文——多跑一次的代价不能换来一个更差的错误。
+ */
+async function diagnose(args: string[], cwd: string, timeoutMs: number): Promise<Omit<FlowCheck, 'ok' | 'error'> | null> {
+  const again = await run(args, cwd, timeoutMs);
+  if (again.spawnError || again.timedOut) return null;
+  const report = reportIn(again.stdout);
+  if (!isRecord(report)) return null;
+  return {
+    crossings: counter(report, COUNTERS[0]),
+    overlaps: counter(report, COUNTERS[1]),
+    textOverflow: counter(report, COUNTERS[2]),
+    warnings: warningsOf(report),
+    report,
+  };
+}
+
+/**
  * 一份 mermaid 流程图 → 一张查过过的 SVG。
  *
  * 判据只有一条：报告读得懂，且 `crossings`/`overlaps`/`textOverflow` 全为 0。
@@ -183,7 +205,12 @@ export async function renderFlowchart(mermaid: string, options: FlowOptions = {}
     }
     if (run1.code !== 0) {
       const why = tail(run1.stderr) || tail(run1.stdout) || `退出码 ${run1.code ?? run1.signal ?? '?'}`;
-      return { ...empty, error: why };
+      // 布局不合格时引擎**不打印报告**（`-o` 模式直接 SystemExit，只留一句中文），
+      // 而报告里才有 `crossing_points` / `overlap_points` / `textOverflow_points`——
+      // 那正是「改哪里」的全部信息。所以失败时补跑一次 `--check` 把报告捞回来：
+      // 它退出码非 0 但会先打印报告。拿不到报告（形态超限、Python 报错）就退回原文。
+      const diagnosis = await diagnose([python, script, mmd, '--check'], dir, timeoutMs);
+      return diagnosis === null ? { ...empty, error: why } : { ...diagnosis, ok: false, error: why };
     }
 
     const report = reportIn(run1.stdout);

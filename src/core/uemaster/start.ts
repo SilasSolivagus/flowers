@@ -8,8 +8,10 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { attachArtifact } from './attach.js';
+import { composeEvaluation } from './compose.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
+import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
 import { artifactFile } from './store.js';
 
@@ -50,6 +52,32 @@ export function repoRoot(): string {
 }
 
 const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
+
+/**
+ * 这次生成走哪条路。
+ *
+ * 规则只有一条，**只看「配没配」，不看「通不通」**：
+ * - `resolveProviderConfig()` 给出完整三格（接口地址 + Key + 模型名）→ `provider`，
+ *   由 `composeEvaluation` 自己问模型、自己排版、自己写 HTML；
+ * - 否则 → `cli`，沿用 P2.6 的「甩一条 agent CLI」那条路（`packs.ts` 的任务包）。
+ *
+ * 为什么要「看配没配」而不是「先试 provider、失败再退 CLI」：两条路的产物形状不同
+ * （provider 的图是**必须过引擎**的，CLI 的图是 agent 自己画的），静默降级会让同一条
+ * 需求两次生成出两种质量的材料，而用户看不出是哪一种。走哪条路由配置决定，报错时
+ * 也就能说清「你配了什么、我用了什么」。
+ *
+ * 为什么不问「通不通」：探测一次要发一次真实请求、烧一次 token。配置写错的代价由
+ * 第一次生成来暴露，那时错误原文会原样进 `uemaster_jobs.error`——比在按钮上先卡 30 秒好。
+ */
+export type Strategy =
+  | { kind: 'provider'; config: ProviderConfig }
+  | { kind: 'cli' };
+
+export async function resolveStrategy(): Promise<Strategy> {
+  const config = await resolveProviderConfig();
+  return config === null ? { kind: 'cli' } : { kind: 'provider', config };
+}
+
 
 /** 与 `attach.ts` 同一句话、同一个 code：阶段是用户给的，就该拿到中文。 */
 function parseStage(value: unknown): Stage {
@@ -139,20 +167,26 @@ export async function startGeneration(
     // 生成器在不在？放在**防重之后**：用户先要知道「这个阶段已经在跑了」，而不是
     // 先被问「用哪个生成器」。两句话同时成立时，前者是他这次点击的直接结果。
     //
+    // 配了模型接口就**不需要**任何 CLI（见 `resolveStrategy` 的注释）：这时那句
+    // 「未检测到生成器」是假的，必须跳过——否则一个只有 key 的部署永远点不动按钮。
+    //
     // `choose` 与 `none` 都在这里拒绝，作业一行都不落——界面上它们本来就不该走到
     // 这一步（多条时按钮先开选择器，零条时按钮直接禁用），这里是绕过界面的兜底。
-    const resolution = await resolveGenerator(await generatorCommand(tx));
-    if (resolution.kind === 'none') {
-      throw new AppError(
-        'generator_unavailable',
-        '未检测到生成器：到「设置 · 项目 · 生成器」配置一条',
-      );
-    }
-    if (resolution.kind === 'choose') {
-      throw new AppError(
-        'generator_unconfigured',
-        '还没选生成器：在「生成」里选一个，按「测试并使用」',
-      );
+    const strategy = await resolveStrategy();
+    if (strategy.kind === 'cli') {
+      const resolution = await resolveGenerator(await generatorCommand(tx));
+      if (resolution.kind === 'none') {
+        throw new AppError(
+          'generator_unavailable',
+          '未检测到生成器：到「设置 · 项目 · 生成器」配置一条，或在「设置」里配好模型接口',
+        );
+      }
+      if (resolution.kind === 'choose') {
+        throw new AppError(
+          'generator_unconfigured',
+          '还没选生成器：在「生成」里选一个，按「测试并使用」',
+        );
+      }
     }
 
     const inserted = await tx.execute<{ id: string }>(sql`
@@ -266,6 +300,21 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     if (job.prd_url === null && job.stage !== 'evaluate') {
       const noun = job.stage === 'review' ? '评审材料' : '走查材料';
       await failJob(db, jobId, `缺少 PRD 链接，无法生成${noun}`);
+      return;
+    }
+
+    // ── 路 A：配了模型接口 —— 自己问模型、自己排版、自己写 HTML ──
+    //
+    // 这一段没有「文件有没有变」的检查：`composeEvaluation` 的产物是它**刚刚**
+    // 写出来的（写文件在 attach 之前），而且图已经过了引擎。作业的形状不变：
+    // 成功 done + artifact_id，失败 failed + 那句中文。
+    const strategy = await resolveStrategy();
+    if (strategy.kind === 'provider') {
+      const composed = await composeEvaluation(db, actor, {
+        requirementId: job.requirement_id,
+        stage: job.stage,
+      });
+      await doneJob(db, jobId, composed.artifactId);
       return;
     }
 
