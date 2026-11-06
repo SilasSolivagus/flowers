@@ -75,11 +75,24 @@ env = { FLOWERS_MCP_ACTOR = "codex" }
 ### 手动起一次
 
 ```bash
-npm run mcp          # = tsx mcp/server.ts，等 stdin 上的 JSON-RPC
+npm run mcp:build     # = tsc -p tsconfig.mcp.json → dist/
+npm run mcp           # = node dist/mcp/server.js，等 stdin 上的 JSON-RPC
 npx tsx scripts/mcp-smoke.ts <需求 id>   # 用 SDK 的 client 连上去跑一遍三个工具
 ```
 
-`npm run mcp` 只有在仓库根（或任何能找到这个 tsx 的目录）才起得来，但**它起来之后
+`npm run mcp` **不经过 `tsx`**：那是 devDependency，`npm ci --omit=dev` 之后根本不存在，
+生产里 `npm run mcp` 会直接坏在「找不到 tsx」上。改成先编译再跑之后，生产只要求
+`node_modules`（`@modelcontextprotocol/sdk`、`pg`、`drizzle-orm`、`zod` 都是 dependencies）
+与一次 `npm run mcp:build`——**生产部署的顺序是先 build、后 mcp**。
+
+为什么编译这条路成立：领域层用的全是 `./x.js` 这种带扩展名的相对导入，编译后它们在
+`dist/` 里就是真实文件（`rootDir` 是仓库根，于是 `dist/mcp/server.js` 引用的
+`../src/core/...` 落在 `dist/src/core/...`）；Node 直接跑就行。**Node 的「原生 type
+stripping」做不到这一点**：它不做扩展名改写、不做目录解析，`import './packs.js'` 会去找
+一个不存在的 `.js`。客户端的配置因此也可以写成 `node /绝对路径/dist/mcp/server.js`——
+上面那两份 `npx tsx …` 的配置只在开发态（装了 devDependencies）成立。
+
+`npm run mcp` 只有在仓库根才找得到 `dist/`（也可以给绝对路径），但**它起来之后
 cwd 就不再影响任何判断**：验产物看的是模块位置，不是它站在哪。
 
 smoke 脚本另有一个作用：它**从任务包正文里抠出交付路径**再写文件，等于在验证

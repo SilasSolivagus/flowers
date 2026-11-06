@@ -96,12 +96,21 @@ uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<st
 Flowers 里那个「桥」是 `mcp/server.ts`，**只讲 stdio**，不是 HTTP 端口：
 
 ```bash
-npm run mcp                      # = tsx mcp/server.ts，等 stdin 上的 JSON-RPC
+npm run mcp:build                # = tsc -p tsconfig.mcp.json，编译到 dist/
+npm run mcp                      # = node dist/mcp/server.js，等 stdin 上的 JSON-RPC
 
-# 或者直接接进客户端（在仓库根跑一次）
+# 或者直接接进客户端（在仓库根跑一次，开发态用 tsx 省掉编译）
 claude mcp add flowers -e FLOWERS_MCP_ACTOR=claude-code -- npx tsx mcp/server.ts
 codex mcp add flowers --env FLOWERS_MCP_ACTOR=codex -- npx tsx mcp/server.ts
 ```
+
+**生产（`npm ci --omit=dev`）先 `mcp:build` 再 `mcp`。** `tsx` 是 devDependency，
+装生产依赖时根本不存在，所以 `npm run mcp` 不经过它：`tsc -p tsconfig.mcp.json` 把
+`mcp/` 与 `src/` 编成 `dist/`（`rootDir` 是仓库根，所以 `dist/mcp/server.js` 引用的
+`../src/core/...` 落地就是 `dist/src/core/...`），再让 Node 直接跑那些文件。领域层用的是
+`./x.js` 这种**带扩展名**的相对导入——编译后它们就是真实存在的文件，这正是这条路能成立、
+而 Node 的「原生 type stripping」做不到的原因（它不做扩展名与目录解析）。客户端也可以
+直接写 `node /绝对路径/dist/mcp/server.js`。
 
 三个工具（`uemaster_plan` / `uemaster_attach` / `requirement_show`）的参数、失败文案、
 cwd 与产物根的关系、`claude` / `codex` 两份完整配置：见 [`docs/mcp.md`](docs/mcp.md)。
@@ -132,8 +141,8 @@ npx tsx scripts/mcp-smoke.ts     # 用官方 SDK 的 client 起子进程，按 a
 
 1. 抽屉「参考」段每一行右边有**复制任务包**：复制出来是一段完整的中文任务包（画什么、
    装哪两个 skill、写到哪个文件、怎么交回），贴给任何能跑 skill 的 agent 就行，不必先
-   接 MCP。但**交回**这一步目前只有 `uemaster_attach` 一个入口（界面上没有「粘贴链接」），
-   所以完全绕开 MCP 是走不完整圈的——见文末「还糙的地方」。
+   接 MCP。同一行右边还有**交回材料**：把材料贴成链接或直接传那个 `.html`（≤5 MB），
+   服务端会把它落到 `data/uemaster/` 并验证文件真在——所以完全绕开 MCP 也走得完整圈。
 2. 干脆不评估：`提交评审` 直接 `收集 → 待评审`。这条路**永远开着**，评估是加速器，不是关卡。
 
 ## 领域怎么组织的
@@ -213,20 +222,20 @@ npm run seed -- --reset
 
 以下是 P2 收口时**已知且故意没修**的（都能在代码里指到具体位置）：
 
-1. **交回材料只有 MCP 一个入口。** 复制任务包能解决「拿包」，解决不了「交回」：
-   界面上没有「粘贴产物链接」的地方，`uemaster_attach` 只有 MCP 一条路。没接 MCP 的人
-   只能把材料做完再回来接一次，或者干脆走 `提交评审`。
+1. **交回材料的两条路还不等价。** MCP 那条能指定任意站内路径或外链；抽屉那条只收
+   `/uemaster/` 下的站内路径（传文件时自己拼名字）。「传文件」在浏览器里没有被真的按过
+   一次（本机浏览器没有配置上传目录），multipart 那一段只在用例里验过。
 2. **`scripts/mcp-smoke.ts` 会留痕。** 它 attach 一条真产物（actor=`claude-code`，把需求
    推进待设计），但收尾只删占位文件、不删 `uemaster_artifacts` 那一行——抽屉里因此会出现
    一个 404 链接。跑完要 `npm run seed -- --reset` 复位。
-3. **死链不追溯**（R-P2-5）：`listArtifacts` 不 stat 文件。手工删掉 `public/uemaster/` 下的
+3. **死链不追溯**（R-P2-5）：`listArtifacts` 不 stat 文件。手工删掉 `data/uemaster/` 下的
    文件之后，抽屉照样给出链接，点开是 404——读模型不依赖文件系统，这是当时的取舍。
 4. **「最新一份」同毫秒会飘**（R-P2-4）：重做产生的多行按 `created_at desc` 取第一行，
    时间戳相同时用 uuid 兜底。要真修得给表加 `seq` 列。
 5. **没有产物历史视图**：旧行留在库里，读侧只给最新一条，界面上没有任何入口能翻到上一版。
 6. **`evaluateAction` 是个无入口的 action**：动作条已经不渲染「评估」，但
    `app/actions.ts` 的 dispatcher 里还挂着 `evaluate`（状态机本身仍允许 收集 → 待设计）。
-7. **走查不会自动触发**：`inspect` 的包得有人手动要；看板上已上线卡片那句
-   「可发起走查」（`src/core/read/board.ts:191`）只是提示文字，点了没反应。
+7. **走查仍然是手动的**：`inspect` 的包得有人自己拿，系统不会催。看板那句现在至少
+   说的是事实（`待走查` / `已走查 · MM-DD`），但它不替你发起什么。
 8. **截图里的产物是手写的占位 HTML**（1351 字节）：P2 的验证只证明「包 → 文件 → attach →
    抽屉 → 状态」这条链路，不证明 UEmaster 出的图好看。

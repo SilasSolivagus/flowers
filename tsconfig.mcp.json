@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "incremental": false,
+    "plugins": []
+  },
+  "include": ["mcp", "src"],
+  "exclude": ["node_modules", "dist", ".next", "drizzle", "tests", "scripts", "app"]
+}

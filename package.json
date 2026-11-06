@@ -12,7 +12,8 @@
     "dev": "next dev -p 3000 --webpack",
     "build": "next build --webpack",
     "start": "next start -p 3000",
-    "mcp": "tsx mcp/server.ts",
+    "mcp": "node dist/mcp/server.js",
+    "mcp:build": "tsc -p tsconfig.mcp.json",
     "seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
