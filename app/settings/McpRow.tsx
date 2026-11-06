@@ -56,7 +56,7 @@ function snippets(endpoint: string, token: string): Array<{ client: string; line
   ];
 }
 
-const SCOPE_TEXT: Record<Scope, string> = { read: '只读', write: '读写', admin: '管理' };
+const SCOPE_TEXT: Record<Scope, string> = { read: '只读', write: '读写' };
 
 export function McpRow({ endpoint, tokens }: { endpoint: string; tokens: McpTokenRow[] }) {
   const router = useRouter();

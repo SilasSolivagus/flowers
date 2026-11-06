@@ -5,8 +5,7 @@ import { AppError } from '../src/core/errors.js';
 import { SERVICES } from '../mcp/services.js';
 import {
   BAD_TOKEN, MISSING_TOKEN, authenticate, bearerOf, hashToken, listTokens, mintToken,
-  revokeToken, scopeAllows,
-} from '../mcp/tokens.js';
+  SCOPES, revokeToken, scopeAllows } from '../mcp/tokens.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 
 /**
@@ -152,12 +151,13 @@ describe('authenticate', () => {
 });
 
 describe('scope', () => {
-  it('read ⊂ write ⊂ admin', () => {
+  it('read ⊂ write（没有 admin 这一级）', () => {
     expect(scopeAllows('write', 'read')).toBe(true);
     expect(scopeAllows('read', 'write')).toBe(false);
-    expect(scopeAllows('admin', 'write')).toBe(true);
-    expect(scopeAllows('admin', 'read')).toBe(true);
     expect(scopeAllows('read', 'read')).toBe(true);
+    expect(scopeAllows('write', 'write')).toBe(true);
+    // 只有两级：词表里不该再有第三级（多一个没消费者的权限，迟早有人去申请）。
+    expect(SCOPES).toEqual(['read', 'write']);
   });
 });
 

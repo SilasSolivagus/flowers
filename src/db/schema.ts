@@ -204,7 +204,7 @@ export const appSettings = pgTable('app_settings', {
  *   而每次请求都要验一次，慢哈希会把每个 tools/call 拖上几十毫秒。
  * - **撤销是软删除**（`revoked_at`，不改行、不删行）：时间线上那句「这个 agent 交的材料」
  *   要能追到它当时用的是哪个 token。「删掉」会让这条线索断在一个不存在的主键上。
- * - `scopes` 是**单值**，不是数组：read ⊂ write ⊂ admin 是包含关系，一次给两级
+ * - `scopes` 是**单值**，不是数组：read ⊂ write 是包含关系，一次给两级
  *   等于给高的那一级。列名取复数是因为它取值来自那三个词的集合（与服务层
  *   `Scope` 类型同一份词表），不是因为它存了多个。
  *
@@ -216,13 +216,13 @@ export const mcpTokens = pgTable('mcp_tokens', {
   tokenHash: text('token_hash').notNull(),
   memberId: uuid('member_id').notNull().references(() => members.id),
   label: text('label').notNull(),
-  scopes: text('scopes').notNull(),          // read | write | admin
+  scopes: text('scopes').notNull(),          // read | write
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
 }, (t) => ({
   scopeCheck: check(
     'mcp_tokens_scopes_check',
-    sql`${t.scopes} in ('read', 'write', 'admin')`,
+    sql`${t.scopes} in ('read', 'write')`,
   ),
   hashUnique: uniqueIndex('mcp_tokens_hash_unique').on(t.tokenHash),
   byMember: index('mcp_tokens_member').on(t.memberId),

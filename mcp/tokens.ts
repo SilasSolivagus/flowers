@@ -20,24 +20,22 @@ import { parseId } from '../src/core/validate.js';
  *    「这个请求根本不是我们的客户端」，不该换来一次数据库往返。只有形状对了才去查
  *    `token_hash`（唯一索引），查不到或 `revoked_at` 非空都是同一句话——
  *    分开说「不存在」与「已撤销」等于告诉试探者哪个 token 曾经是真的。
- * 3. **scope 是包含关系**（read ⊂ write ⊂ admin）。`admin` 今天没有任何工具需要，
- *    这一点写在 `SCOPE_LABEL` 的注释里，不是靠「暂时用不到」这句话含糊过去。
+ * 3. **scope 是包含关系**（read ⊂ write）。**没有 admin 这一级**：今天没有任何工具
+ *    需要它，留一个用不到的更高级权限，迟早有人以为它「更管用」而去申请。等真有
+ *    管理类工具再加，加的时候顺带改库里的 CHECK 约束。
  */
 
 /** token 的取值集合。库里有一条 CHECK 约束逐字守着它（schema.ts 的 mcpTokens）。 */
-export const SCOPES = ['read', 'write', 'admin'] as const;
+export const SCOPES = ['read', 'write'] as const;
 export type Scope = (typeof SCOPES)[number];
 
 /**
- * 三级权限的高低。数值只用来比较，不落库。
+ * 两级权限的高低。数值只用来比较，不落库。
  *
- * read：只读工具（看板、详情、PRD、任务包）；
- * write：一切会推进状态、会写 `events.actor` 的工具；
- * admin：今天**没有一个工具**要求它，保留这一级是为了「以后有管理类工具时不必改词表」。
- * 现在就有 token 拿到 admin，是因为 read ⊂ write ⊂ admin——它写着「这个人可以写」，
- * 不写着「这个人能删库」。要不要给 token 开一条真正的管理权限，等真有那个工具再说。
+ * read：只读工具（看板、详情、PRD 快照、任务包）——**保证不写库**；
+ * write：一切会写 `events.actor`、会推进状态、会落产物的工具。
  */
-const RANK: Record<Scope, number> = { read: 0, write: 1, admin: 2 };
+const RANK: Record<Scope, number> = { read: 0, write: 1 };
 
 /** `held` 够不够干 `needed` 这件事。 */
 export function scopeAllows(held: Scope, needed: Scope): boolean {
@@ -48,7 +46,6 @@ export function scopeAllows(held: Scope, needed: Scope): boolean {
 const SCOPE_LABEL: Record<Scope, string> = {
   read: '读',
   write: '写',
-  admin: '管理',
 };
 
 export function scopeLabel(scope: Scope): string {
@@ -168,7 +165,7 @@ export type Minted = {
 };
 
 const BAD_LABEL = '给这个 token 起个名字（例如 claude-code），列表里才分得清是谁的';
-const BAD_SCOPE = '权限只能是 read、write、admin 之一';
+const BAD_SCOPE = '权限只能是 read、write 之一';
 const BAD_MEMBER = '成员不存在';
 
 /**

@@ -1,6 +1,6 @@
 # P4.1 · Flowers 的 MCP 端点（HTTP）
 
-**状态**：完成。`/mcp` 上线（Streamable HTTP，无状态），十四个工具覆盖整套状态机，
+**状态**：完成。`/mcp` 上线（Streamable HTTP，无状态），十五个工具覆盖整套状态机，
 token 绑定成员，设置页可生成 / 撤销，`npx tsc --noEmit` 干净，`npx vitest run`
 656 passed / 1 skipped（基线 609 + 新增 47），`npm run build` 通过，stdio 那条老入口
 仍然可用，工具定义两边共用同一份。
@@ -51,15 +51,15 @@ owner 已定的三件事，本文件不再讨论：**HTTP 传输**、**整套状
 | `token_hash` | sha256 十六进制，**唯一索引**。原文 `flw_` + 32 字节随机（base64url，43 字符）只出现一次 |
 | `member_id` | FK → `members`（`on delete no action`：删人之前先想清楚他的 token 怎么办） |
 | `label` | 生成时必填，列表里认人用 |
-| `scopes` | `read` \| `write` \| `admin`，有 CHECK 约束 |
+| `scopes` | `read` \| `write` \| `write`，有 CHECK 约束 |
 | `created_at` / `revoked_at` | 撤销 = 写 `revoked_at`，**不删行** |
 
 三条判断：
 
 - **为什么 sha256 不是 bcrypt/argon2**：token 是 32 字节随机值，没有字典可查；每个
   `tools/call` 都要验一次，慢哈希买不到安全只买到延迟。
-- **为什么 scopes 是单值**：read ⊂ write ⊂ admin 是包含关系，一次给两级等于给高的那一级
-  （`mcp/tokens.ts` 的 `RANK` / `scopeAllows`）。`admin` **今天没有任何工具要求**——
+- **为什么 scopes 是单值**：read ⊂ write ⊂ write 是包含关系，一次给两级等于给高的那一级
+  （`mcp/tokens.ts` 的 `RANK` / `scopeAllows`）。`write` **今天没有任何工具要求**——
   这一点写在代码注释里，而不是编一个「管理工具」出来。
 - **为什么绑定成员**：选项 C 下 agent 能排期、能打回，每次动作都要在 `events.actor` 写下
   「谁承诺了哪一天」。共享密钥会让那一行失去意义。
@@ -247,7 +247,7 @@ $ # read token 调写工具（走 MCP 协议）
 ```
 mcp/tokens.ts            token → 身份（hash / scope / 撤销 / 列表）
 mcp/services.ts          工具 → 领域服务的唯一调用表（可 spy，用于断言 actor 与「没被调」）
-mcp/tools.ts             十四个工具的定义 + LEGAL_FROM + runTool（scope 检查与错误翻译）
+mcp/tools.ts             十五个工具的定义 + LEGAL_FROM + runTool（scope 检查与错误翻译）
 mcp/build.ts             createServer(identity)：两个入口共用
 mcp/http.ts              handleMcpRequest：鉴权 → 建 server → Streamable HTTP
 mcp/path.ts              /mcp 路径常量（设置页只 import 它，不拖 SDK 进 bundle）
@@ -280,7 +280,7 @@ docs/mcp.md              重写
 4. **一个成员可以有很多 token，无法「给某个客户端单独限额」。** label 只是标签，不是
    身份的一部分。真需要按客户端区分时，得给 `mcp_tokens` 加 `client` 维度，或在反代上
    按 token 前缀分流。
-5. **`admin` 是空的。** 词表里有、CHECK 允许、UI 不让选（只给只读 / 读写）、没有任何工具
+5. **`write` 是空的。** 词表里有、CHECK 允许、UI 不让选（只给只读 / 读写）、没有任何工具
    要求它。这是刻意的，但读代码的人容易以为漏了什么——`tokens.ts` 的 `RANK` 注释和
    `docs/mcp.md` 各写了一遍。
 6. **设置页的 URL 依赖 `x-forwarded-*`。** 反代没传 `x-forwarded-proto` 时会按「本机 → http、

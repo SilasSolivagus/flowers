@@ -93,10 +93,14 @@ export const attachInput = z.object({
 /** `requirement_show`：只要需求 ID。 */
 export const showInput = z.object({ requirementId: requirementIdSchema });
 
-/** `requirement_prd`：要不要重新读一遍源文档（默认用最近一次快照）。 */
+/** `requirement_prd`：只读最近一次快照，**不写库**。 */
 export const prdInput = z.object({
   requirementId: requirementIdSchema,
-  refresh: z.boolean({ invalid_type_error: 'refresh 只能是 true 或 false' }).optional(),
+});
+
+/** `requirement_prd_refresh`：去源文档现读一版并落快照（会写库，所以要 write）。 */
+export const prdRefreshInput = z.object({
+  requirementId: requirementIdSchema,
 });
 
 /**
@@ -290,22 +294,58 @@ async function planTool(identity: Identity, raw: unknown): Promise<string[]> {
 }
 
 /** 读 PRD：默认用最近一次快照，没有（或 refresh）时现读一次源文档。 */
-async function prdTool(identity: Identity, raw: unknown): Promise<string[]> {
-  const { requirementId, refresh } = parseInput(prdInput, raw);
+/**
+ * 只读版：**不写库**。
+ *
+ * 为什么要拆开：`read` 权限的语义是「不会改变任何东西」。早前这一版在没有快照时会
+ * 顺手调 `readPrd` 落一版快照 + 记事件——一个只读 token 因此能写库。语义要么守，
+ * 要么就别叫只读。
+ */
+/**
+ * 写版：现读一版源文档并落快照（`readPrd` 会写 `prd_snapshots` + 记 `prd.fetched`）。
+ * 与只读版拆开之后，`read` token 再也碰不到写路径。
+ */
+async function prdRefreshTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId } = parseInput(prdRefreshInput, raw);
 
   const detail = await SERVICES.getRequirementDetail(requirementId);
   if (detail === null) throw new AppError('not_found', NO_REQUIREMENT);
 
-  let snapshot = refresh === true ? null : await SERVICES.latestSnapshot(db, requirementId);
-  let source: 'snapshot' | 'live' = 'snapshot';
+  const got = await SERVICES.readPrd(db, identity.member, { requirementId });
+  if (!got.ok) throw new AppError(got.code, got.message);
+  const snapshot = got.data.snapshot;
+
+  return [
+    JSON.stringify({
+      requirementId,
+      number: detail.number,
+      title: detail.title,
+      state: detail.state,
+      url: snapshot.url,
+      hash: snapshot.hash,
+      fetchedAt: snapshot.fetchedAt.toISOString(),
+      chars: snapshot.markdown.length,
+      source: 'live',
+    }, null, 2),
+    snapshot.markdown,
+  ];
+}
+
+async function prdTool(_identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId } = parseInput(prdInput, raw);
+
+  const detail = await SERVICES.getRequirementDetail(requirementId);
+  if (detail === null) throw new AppError('not_found', NO_REQUIREMENT);
+
+  const snapshot = await SERVICES.latestSnapshot(db, requirementId);
   if (snapshot === null) {
-    // 没有快照过（或明确要重读）：走 `readPrd`，它读源文档、落一版快照、记一条
-    // `prd.fetched` 事件。失败码与中文原样往上抛——两处翻译一定会分叉。
-    const got = await SERVICES.readPrd(db, identity.member, { requirementId });
-    if (!got.ok) throw new AppError(got.code, got.message);
-    snapshot = got.data.snapshot;
-    source = 'live';
+    throw new AppError(
+      'no_prd_snapshot',
+      '这条需求还没有 PRD 快照（只读工具不拉取）。用 requirement_prd_refresh 读一版，'
+        + '或在 Flowers 里点一次「读 PRD」。',
+    );
   }
+  const source: 'snapshot' | 'live' = 'snapshot';
 
   return [
     JSON.stringify({
@@ -483,15 +523,27 @@ export const TOOLS: readonly ToolDef[] = [
   }),
   tool({
     name: 'requirement_prd',
-    title: '读 PRD 正文',
+    title: '读 PRD 正文（快照）',
     scope: 'read',
     action: null,
     inputSchema: prdInput,
-    purpose: '取这条需求的 PRD markdown（评审 / 走查要读的那份）。默认用最近一次快照，'
-      + '没有快照（或 refresh=true）时现读源文档并落一版快照——那一步会写库。'
+    purpose: '取这条需求最近一次 PRD 快照的 markdown（评审 / 走查要读的那份）。'
+      + '**只读，不写库**：还没有快照时明确报错，并提示用 requirement_prd_refresh。'
       + '返回两段：第一段是元信息 JSON（url、hash、取于何时），第二段是正文原文。',
     call: prdTool,
   }),
+  tool({
+    name: 'requirement_prd_refresh',
+    title: '读一版 PRD（会写库）',
+    scope: 'write',
+    action: null,
+    inputSchema: prdRefreshInput,
+    purpose: '去 PRD 源文档（企业微信文档）现读一版，落成新快照并记一条 prd.fetched 事件。'
+      + '**会写库**，所以要写权限。快照只在内容变了时新增一行（同 hash 不重复存）。'
+      + '返回结构与 requirement_prd 相同。',
+    call: prdRefreshTool,
+  }),
+
   tool({
     name: 'uemaster_plan',
     title: '取 UEmaster 任务包',

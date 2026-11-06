@@ -33,7 +33,7 @@ export function mcpActor(): string {
 /**
  * stdio 的身份：actor 从环境变量来，**权限给 write**。
  *
- * 为什么不是 admin：今天没有任何工具要求 admin（见 tokens.ts 的 RANK 注释），
+ * 权限只有两级：没有 admin（今天没有任何工具需要它，见 tokens.ts 的 RANK 注释），
  * 给一个没有消费者的级别只会让人以为这里有一道没开的管理门。
  * 为什么不需要 token：能起这个进程的人已经有仓库和 `DATABASE_URL`——他本来就能
  * 直接改库，再给他一把 token 是仪式，不是边界。**HTTP 那条才是需要鉴权的那条**：

@@ -93,7 +93,7 @@ curl -s https://<host>/mcp \
 | `token_hash` | **sha256 十六进制，只存这个**。原文（`flw_` + 32 字节随机）只在生成时出现一次 |
 | `member_id` | FK → `members`。**这就是身份**：请求 → token → 成员 → `actor` |
 | `label` | 生成时必填的名字（`claude-code` / `cursor` / `ci`） |
-| `scopes` | `read` \| `write` \| `admin`（包含关系：read ⊂ write ⊂ admin） |
+| `scopes` | `read` \| `write` \| `write`（包含关系：read ⊂ write ⊂ write） |
 | `created_at` / `revoked_at` | 撤销是**软删除**：写 `revoked_at`，不删行 |
 
 为什么 sha256 而不是 bcrypt/argon2：token 是 32 字节的随机值，没有字典可查，也没有
@@ -113,8 +113,8 @@ SERVICES.schedule(db, identity.member, { requirementId, releaseId, commitTestAt,
 拿到的是 `签字人不是这条需求派单到的评审人`——**这跟界面上点同一个按钮的结果一模一样**，
 因为两边调的是同一个服务。
 
-`admin` 今天**没有任何工具要求**：权限这一级留着是为了「以后有管理类工具时不必改词表」，
-现在给 token admin 只是「这个人可以写」。没有管理工具就不要编一个出来。
+`write` 今天**没有任何工具要求**：权限这一级留着是为了「以后有管理类工具时不必改词表」，
+现在给 token write 只是「这个人可以写」。没有管理工具就不要编一个出来。
 
 ### 撤销
 

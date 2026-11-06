@@ -117,8 +117,8 @@ describe('工具表', () => {
       'requirement_list', 'requirement_show', 'requirement_prd', 'uemaster_plan',
     ]);
     expect(toolByName('requirement_create')!.scope).toBe('write');
-    // 没有工具要 admin：这一级今天没有消费者（tokens.ts 的 RANK 注释里写着）。
-    expect(names.some((name) => toolByName(name)!.scope === 'admin')).toBe(false);
+    // 只有两级权限：任何工具的 scope 都落在 read / write 之内。
+    expect(names.every((name) => ['read', 'write'].includes(toolByName(name)!.scope))).toBe(true);
     expect(toolByName('nope')).toBeNull();
   });
 
@@ -184,21 +184,22 @@ describe('读工具', () => {
     expect(readPrd).not.toHaveBeenCalled();
   });
 
-  it('requirement_prd：没有 PRD 链接时是一句点名它的中文（不发任何网络请求）', async () => {
+  it('requirement_prd：没有快照时明说，并指向 requirement_prd_refresh（只读工具不拉取）', async () => {
     const id = await inInbox();
     const got = await call('requirement_prd', { requirementId: id });
     expect(got.isError).toBe(true);
-    expect(textOf(got)).toContain('没有 PRD 链接');
+    expect(textOf(got)).toContain('还没有 PRD 快照');
+    expect(textOf(got)).toContain('requirement_prd_refresh');
   });
 
-  it('requirement_prd：refresh=true 越过快照（这里同样在读到链接前就失败）', async () => {
+  it('requirement_prd_refresh：没有 PRD 链接时是一句点名它的中文（不发任何网络请求）', async () => {
     const id = await inInbox();
     await saveSnapshot(db, '吕品', {
       requirementId: id, url: 'https://doc.example.com/prd', markdown: '# PRD',
     });
     const readPrd = vi.spyOn(SERVICES, 'readPrd');
 
-    const got = await call('requirement_prd', { requirementId: id, refresh: true });
+    const got = await call('requirement_prd_refresh', { requirementId: id });
     // 库里没有 prd_url，所以 readPrd 立刻回 missing_prd_url——但它确实被调到了，
     // 这就证明 refresh 没有偷偷用快照顶包。
     expect(readPrd).toHaveBeenCalledWith(db, '吕品', { requirementId: id });

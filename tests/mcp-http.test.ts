@@ -114,11 +114,11 @@ function textOf(result: unknown): string {
 }
 
 describe('/mcp 端到端（Streamable HTTP，无状态）', () => {
-  it('initialize → tools/list：十四个工具，描述里带权限与合法状态', async () => {
+  it('initialize → tools/list：十五个工具，描述里带权限与合法状态', async () => {
     const client = await connect(writeToken);
     try {
       const list = await client.listTools();
-      expect(list.tools).toHaveLength(14);
+      expect(list.tools).toHaveLength(15);
       expect(list.tools.map((tool) => tool.name)).toContain('requirement_restore');
 
       const scheduleTool = list.tools.find((tool) => tool.name === 'requirement_schedule')!;
