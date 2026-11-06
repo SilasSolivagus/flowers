@@ -1,0 +1,99 @@
+/* 版本页（/releases）自己的样式。
+ *
+ * 只在本页 import，不动 app/globals.css（另一个任务正在改共享样式表）。甘特用的
+ * `.ghead / .grow / .glines / .grel / .barx` 是 globals.css 里已经移植过来的那组类，
+ * 这里只补它们在本页需要的两件事：
+ *   1. 轴按**天**排（移植版是 6 段等分的周轴）：列数由页面给的 `--g-days` 决定，
+ *      所以列模板只能写在这份文件里，且选择器全部挂在 `.vpage` 之下——不泄漏给别的页；
+ *   2. 窄屏横向滚动、左栏贴住、延期条改成虚线（移植版的 `.barx.neg` 是实心红条）。
+ * 颜色一律 var(--c-*)；`color-mix` 只用来调底色深浅。 */
+
+.vpage{--g-gut:200px;--g-dayw:20px}
+
+/* 标题 + 版本切换：切换是链接（?release=<id>），不是客户端 state。 */
+.vpage .vbar{display:flex;align-items:center;gap:12px;margin:0 0 12px}
+.vpage .vbar h2{margin:0;font:600 var(--t-title-2) var(--f-sans);color:var(--c-text-1)}
+.vpage .vsw{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.vpage .vsw a{text-decoration:none}
+.vpage .vsw a:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
+
+/* 甘特 + 右侧两块面板。1024 以下叠成一列：三列并排时甘特只剩不到 400px，
+   16 天的轴会被压到每列 12px。 */
+.vpage .vver{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;align-items:start}
+.vpage .vside{display:flex;flex-direction:column;gap:12px}
+
+.vpage .panel{background:var(--c-surface);border:1px solid var(--c-line);border-radius:var(--r-sm);overflow:hidden}
+.vpage .ph{display:flex;align-items:center;height:var(--h-table-head);padding:0 12px;
+           border-bottom:1px solid var(--c-line);font:600 var(--t-caption) var(--f-sans);
+           letter-spacing:.06em;color:var(--c-text-3)}
+
+/* 时间窗：三行「标签 / 数字」。 */
+.vpage .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0;padding:12px;
+           font:400 var(--t-body-s) var(--f-sans)}
+.vpage .kv dt{color:var(--c-text-3)}
+.vpage .kv dd{margin:0;text-align:right;font-family:var(--f-num);color:var(--c-text-1)}
+
+/* 进度：一个大的时间百分比 + 三个计数。 */
+.vpage .kpi{display:flex;align-items:flex-end;gap:8px;padding:12px 12px 0}
+.vpage .kpi b{font:600 30px/34px var(--f-num);color:var(--c-accent);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.vpage .kpi span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);padding-bottom:4px}
+.vpage .k3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px;
+           font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.vpage .k3 div{display:flex;flex-direction:column;gap:2px}
+.vpage .k3 b{font:600 var(--t-title-2)/1 var(--f-num);color:var(--c-text-1)}
+
+/* ── 甘特 ─────────────────────────────────────────────
+   整块是一条横向滚动容器：轴上每天最窄 --g-dayw，窄屏滚、不压扁。
+   `--g-days` 由页面按版本时间窗给（2026.11 = 16 天、2026.12 = 24 天）。
+   `.ghead` / `.gbody` 的 min-width 让百分比位置按**内容**宽算——不给的话，窄屏时
+   `.grel` 的 `100%` 指的是视口宽，线会落在所有条的左边。 */
+.vpage .gscroll{overflow-x:auto;overscroll-behavior-x:contain}
+.vpage .ghead,
+.vpage .gbody{min-width:calc(var(--g-gut) + var(--g-days) * var(--g-dayw))}
+.vpage .ghead,
+.vpage .grow{grid-template-columns:var(--g-gut) repeat(var(--g-days),minmax(var(--g-dayw),1fr))}
+.vpage .glines{left:var(--g-gut);grid-template-columns:repeat(var(--g-days),1fr)}
+/* 没有需求的版本也留一行高度：轴和发版日线还在，面板不会塌成一条标题。 */
+.vpage .gbody{min-height:var(--h-row)}
+
+/* 左栏（编号 + 标题）在横向滚动时贴住左边：滚到第 20 天时还知道这行是哪条需求。 */
+.vpage .glbl{align-self:stretch;position:sticky;left:0;z-index:3;background:var(--c-surface);
+             border-right:1px solid var(--c-line)}
+.vpage .ghead .lbl{position:sticky;left:0;z-index:2;background:var(--c-surface);
+                   border-right:1px solid var(--c-line)}
+.vpage .grow:hover .glbl{background:var(--c-surface-2)}
+
+/* 行本身是一个链接（点开看板上的抽屉，与卡片同一个入口）。 */
+.vpage a.grow{color:inherit;text-decoration:none}
+.vpage a.grow:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
+
+/* 列头：日号。发版日那一列加重——它就是竖虚线所在的那一列。 */
+.vpage .ghead .wk{justify-content:center;padding:0 2px;overflow:hidden;white-space:nowrap;font-size:10px}
+.vpage .ghead .wk.rel{color:var(--c-text-2);font-weight:600}
+
+/* 条。移植版给的四档底色留着（accent / positive / negative / line-strong），这里补两处：
+   - `pool`（已上线、待开工）是浅灰底，移植版的条内文字是 on-accent（白）→ 看不见，改深色；
+   - `neg`（延期）从实心红条改成**虚线 + 淡底**：线稿的口径是「虚线粗条 = 已延期」，
+     而且实心红条会和「已上线条」抢同一块视觉重量。 */
+.vpage .barx{overflow:hidden}
+.vpage .barx span{font:600 10px/1 var(--f-num);padding-right:4px}
+.vpage .barx.pool{background:color-mix(in srgb, var(--c-text-1) 10%, var(--c-surface))}
+.vpage .barx.pool span{color:var(--c-text-3)}
+.vpage .barx.neg{background:color-mix(in srgb, var(--c-negative) 16%, var(--c-surface));
+                 border:1px dashed var(--c-negative)}
+.vpage .barx.neg span{color:var(--c-negative)}
+
+@media (max-width:1023px){
+  .vpage .vver{grid-template-columns:minmax(0,1fr)}
+}
+
+/* 手机：左栏收窄到 140px（编号 46px + 一截标题，贴住左边不滚走），剩下的宽度
+   交给横向滚动。不改日宽——20px 已经是「列头两个字 + 条还能看出长度」的下限。
+   140 是量出来的：390 宽下面板内宽 308，留 168 给轴 = 8.4 列，第 9 列故意露出半格，
+   那就是「这里能横着滑」唯一需要的提示，不必写一行说明。 */
+@media (max-width:767px){
+  .vpage{--g-gut:140px}
+  .vpage .vbar{gap:8px}
+  .vpage .ghead .wk{font-size:9px}
+  .vpage .kpi b{font-size:26px;line-height:30px}
+}
