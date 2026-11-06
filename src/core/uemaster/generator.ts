@@ -445,7 +445,10 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
 export const TEST_PACK = '生成一个 HTML 文档，<title>flowers</title>，正文一行 hello';
 
 /** 小测的硬超时：10 秒。等得起，又短到在一行里能说清「它没动」。 */
-export const TEST_TIMEOUT_MS = 10_000;
+// 45 秒：10 秒对真实 agent CLI 太短——codex 在 10 秒内连 401 都说不完（实测 15 秒才吐
+// refresh token 错误），而一个能用的小模型跑出几百字节 HTML 也要 20 秒上下。测试是用户
+// 主动点的、可以等，宁可多等也不要给出「超时」这种假阴性。
+export const TEST_TIMEOUT_MS = 45_000;
 
 export type TestResult =
   | { ok: true; size: number; ms: number; mode: 'file' | 'stdout' }
