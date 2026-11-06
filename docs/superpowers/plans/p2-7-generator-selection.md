@@ -7,7 +7,7 @@ P2.6 把「这条机器上恰好能用的那个 CLI」写成了产品规则：`F
 2. **一条显式的命令契约**（`{prompt}` 或 stdin；产物写文件或打 stdout）；
 3. **一个就地测试**（设置页那一行的「测试」）：只有它知道一条命令**现在**能不能跑。
 
-本次提交：见 `git log` 的 `feat(uemaster): 生成器改成探测 + 选择，设置页加一行就地测试`
+本次提交：`510a048` —— `feat(uemaster): 生成器改成「探测 → 选择 → 测试」，claude 不再是默认`
 （本文与它同一次提交）。
 
 `src/core` 的六个领域服务（create / evaluate / review / schedule / bounce / terminal）
