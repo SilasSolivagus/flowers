@@ -195,6 +195,19 @@ describe('产物新鲜度', () => {
     expect(detail!.refs.find((r) => r.stage === 'review')!.present).toBe(false);
   });
 
+  it('数出版本数：同一阶段存两行就是两版（读侧仍只认最新一行）', async () => {
+    const req = await makeDescribed();
+    for (const url of ['https://m.example.com/a.html', 'https://m.example.com/b.html']) {
+      await attachArtifact(db, '吕品', { requirementId: req.id, stage: 'evaluate', url });
+    }
+    const detail = await getRequirementDetail(req.id);
+    const ref = detail!.refs.find((r) => r.stage === 'evaluate')!;
+    expect(ref.versions).toBe(2);
+    expect(ref.url).toBe('https://m.example.com/b.html');
+    // 没有产物的那两行是 0，不是 1
+    expect(detail!.refs.find((r) => r.stage === 'review')!.versions).toBe(0);
+  });
+
   it('unknown：attach 时没给指纹 → 版本未知（不猜）', async () => {
     const { id } = await describeWithArtifact('evaluate', null);
     const detail = await getRequirementDetail(id);
@@ -359,6 +372,41 @@ describe('版本 CRUD', () => {
     // 库里照存
     const rows = await db.execute<{ n: number }>(sql`select count(*)::int as n from releases`);
     expect(Number(rows.rows[0]!.n)).toBe(2);
+  });
+
+  it('与更晚的版本重叠也警告，且点名的是那一版（不是「上一个版本」）', async () => {
+    await createRelease(db, '吕品', {
+      name: '2026.11', windowStart: '2026-10-01', releaseDate: '2026-10-15',
+    });
+    // 更晚的那一版：发版日 12-15，在要建的那一版（发版 11-28）之后，
+    // 所以它**不是**「上一个版本」，但它与 11-14 → 11-28 真的重叠着。
+    await createRelease(db, '吕品', {
+      name: '2026.12', windowStart: '2026-11-20', releaseDate: '2026-12-15',
+    });
+    const third = await createRelease(db, '吕品', {
+      name: '2026.13', windowStart: '2026-11-14', releaseDate: '2026-11-28',
+    });
+
+    // 防撞车报的是相交的那一版……
+    expect(third.warning).toBe('与「2026.12」重叠：11-20 → 11-28');
+    // ……而「上一个版本」仍然是发版日最近的那一个：两个定义各管各的。
+    expect(third.previous).toMatchObject({ name: '2026.11' });
+    expect(third.overlapping).toMatchObject({ name: '2026.12' });
+  });
+
+  it('同时撞上两版时报发版日最近的那一条', async () => {
+    await createRelease(db, '吕品', {
+      name: 'A', windowStart: '2026-11-01', releaseDate: '2026-11-10',
+    });
+    await createRelease(db, '吕品', {
+      name: 'B', windowStart: '2026-11-05', releaseDate: '2026-11-20',
+    });
+    // 11-04 → 11-18 同时与 A（11-01→11-10）和 B（11-05→11-20）相交；
+    // 发版日离 11-18 最近的是 B（11-20，差 2 天；A 差 8 天）。
+    const third = await createRelease(db, '吕品', {
+      name: 'C', windowStart: '2026-11-04', releaseDate: '2026-11-18',
+    });
+    expect(third.warning).toBe('与「B」重叠：11-05 → 11-18');
   });
 
   it('首尾相接不算重叠', async () => {

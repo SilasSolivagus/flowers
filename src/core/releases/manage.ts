@@ -60,7 +60,7 @@ export function parseDayOrThrow(text: string): Date {
  * 了 drizzle 与 db/client）。测试从这一个入口拿，读起来仍然像「版本服务的一部分」。
  */
 export { dayLabel, overlapOf } from './window.js';
-import { overlapLine } from './window.js';
+import { overlapLine, pickOverlapping } from './window.js';
 
 type ReleaseRow = {
   id: string;
@@ -108,17 +108,66 @@ export async function previousRelease(
 }
 
 /**
+ * 与这一版**时间窗相交**的、发版日最近的那一个版本；没有就 null。
+ *
+ * 为什么它和 `previousRelease` 是两个函数（owner 的裁决，2026-11-07）：
+ * - **「上一个版本」是上下文**（帮我补日期）：永远是发版日最近的那一个，与这一版
+ *   撞不撞车无关。
+ * - **重叠检测是防撞车**：必须扫**全部**活着的版本。只看「上一个」会漏报——现网
+ *   2026.13（11-14 → 11-28）与 2026.12（11-14 → 12-07）真的重叠着，而 2026.12 的
+ *   发版日在这一版之后，按「上一个」的定义根本看不见它。这条漏报就是两个定义必须
+ *   分开的证据。
+ *
+ * 命中多条时取**发版日离这一版最近**的那一条（`|release_date - 本版发版日|` 最小；
+ * 打平时取更晚的那一条——「前面已经有一版要发」比「上一版还没收尾」更值得先说）。
+ *
+ * 相交判据与 `window.ts` 的 `overlapOf` 逐字一致（半开区间：首尾相接不算）：
+ * `window_start < 本版发版日 and release_date > 本版开窗日`。
+ */
+export async function overlappingRelease(
+  db: Db,
+  entered: { windowStart: string; releaseDate: string },
+  excludeId: string | null = null,
+): Promise<ReleaseSummary | null> {
+  const start = parseDayOrThrow(entered.windowStart);
+  const end = parseDayOrThrow(entered.releaseDate);
+
+  const res = await db.execute<ReleaseRow>(sql`
+    select id, name, window_start, release_date
+      from releases
+     where deleted_at is null
+       and (${excludeId}::uuid is null or id <> ${excludeId}::uuid)
+       and window_start < ${end.toISOString()}
+       and release_date > ${start.toISOString()}
+     order by release_date, name`);
+  if (res.rows.length === 0) return null;
+
+  // 「谁最近」只写在 `window.ts` 的 `pickOverlapping` 里：界面在用户敲日期时也要算
+  // 同一件事，而客户端组件 import 不了这个文件（它连着 db）。SQL 只负责把相交的
+  // 那几行取出来，挑哪一条由那个纯函数决定——两处共用一份判定。
+  const picked = pickOverlapping(entered, res.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    windowStart: new Date(row.window_start).toISOString(),
+    releaseDate: new Date(row.release_date).toISOString(),
+  })));
+  return picked === null ? null : picked as ReleaseSummary;
+}
+
+/**
  * 重叠警告的那一句话：点名版本与重叠的那一段。没有重叠就是 null。
  *
  * 文案本身在 `window.ts`（`overlapLine`）：界面上那行**行内提示**与服务返回的
  * `warning` 必须是同一句话，否则「敲日期时看到的那句」与「保存后看到的那句」会长得
  * 不一样——同一件事的两种说法是最容易让人怀疑数据的一种坏。
+ *
+ * 入参是**相交的那一版**（`overlappingRelease` 的结果），不是「上一个版本」。
  */
 export function overlapWarning(
   entered: { windowStart: string; releaseDate: string },
-  previous: ReleaseSummary | null,
+  overlapping: ReleaseSummary | null,
 ): string | null {
-  return overlapLine(entered, previous);
+  return overlapLine(entered, overlapping);
 }
 
 /** 入参里的一个描述值 → 落库写法：字符串去空白、空串归 null。 */
@@ -159,6 +208,14 @@ export type ReleaseWriteResult = {
   warning: string | null;
   /** 用来算这条警告的那个「上一个版本」，界面那行策略文案也用它。 */
   previous: ReleaseSummary | null;
+  /**
+   * 与这一版时间窗相交、发版日最近的那一个版本（`null` = 没撞上任何版本）。
+   *
+   * 与 `previous` **不一定相同**：相交的可能是更晚的那一版。两个值都回给调用方，
+   * 界面那行策略用 `previous`、它自己的行内提示用 `overlapLine(entered, overlapping)`
+   * ——同一个判定、同一句话，两处不会各说各的。
+   */
+  overlapping: ReleaseSummary | null;
 };
 
 /**
@@ -179,8 +236,10 @@ export async function createRelease(
   const goal = toStored(input.goal, '版本目标');
   const note = toStored(input.note, '备注');
 
+  // 两件事各问各的：`previous` 是策略行的上下文，`overlapping` 是防撞车（见两者注释）。
   const previous = await previousRelease(db, dates.releaseDate);
-  const warning = overlapWarning(dates, previous);
+  const overlapping = await overlappingRelease(db, dates);
+  const warning = overlapWarning(dates, overlapping);
 
   return withPgErrors(() => db.transaction(async (tx) => {
     const inserted = await tx.execute<{ id: string }>(sql`
@@ -200,7 +259,7 @@ export async function createRelease(
       },
     });
 
-    return { id, warning, previous };
+    return { id, warning, previous, overlapping };
   }));
 }
 
@@ -223,7 +282,8 @@ export async function updateRelease(
   const note = toStored(input.note, '备注');
 
   const previous = await previousRelease(db, dates.releaseDate, id);
-  const warning = overlapWarning(dates, previous);
+  const overlapping = await overlappingRelease(db, dates, id);
+  const warning = overlapWarning(dates, overlapping);
 
   return withPgErrors(() => db.transaction(async (tx) => {
     const updated = await tx.execute<{ id: string }>(sql`
@@ -241,7 +301,7 @@ export async function updateRelease(
       payload: { id, name, windowStart: dates.windowStart, releaseDate: dates.releaseDate },
     });
 
-    return { id, warning, previous };
+    return { id, warning, previous, overlapping };
   }));
 }
 

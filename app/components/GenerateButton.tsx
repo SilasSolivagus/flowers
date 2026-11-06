@@ -42,7 +42,7 @@ const POLL_MS = 1500;
 const GIVE_UP_MS = 11 * 60 * 1000;
 
 export function GenerateButton({
-  requirementId, stage, runningJobId, generator, present, fresh,
+  requirementId, stage, runningJobId, generator, present, fresh, versions,
 }: {
   requirementId: string;
   stage: string;
@@ -60,6 +60,13 @@ export function GenerateButton({
    */
   present: boolean;
   fresh: boolean;
+  /**
+   * 这个阶段已经存过几版（0 = 没有产物）。
+   *
+   * 有它才能回答「我在覆盖第几版」——一个数字，不是一句说明：界面上那格是
+   * 抽屉里的「第 N 版」pill，悬停那句警告里也带同一个数字。
+   */
+  versions: number;
 }) {
   const router = useRouter();
   const [jobId, setJobId] = useState<string | null>(runningJobId);
@@ -201,9 +208,8 @@ export function GenerateButton({
         className="btn gen"
         type="button"
         title={present
-          ? (fresh
-            ? '已有一份当前版本的产物，重新生成会再存一版'
-            : '已有一份旧版本的产物，重新生成会再存一版')
+          ? `${fresh ? '已有一份当前版本的产物' : '已有一份旧版本的产物'}；`
+            + `这次会存成第 ${versions + 1} 版（共 ${versions} 版）`
           : undefined}
         onClick={() => {
           if (generator.state === 'choose') setAsking(true);

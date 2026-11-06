@@ -16,6 +16,13 @@ export type ArtifactRef = {
    * 那一行。
    */
   inputHash: string | null;
+  /**
+   * 这个 stage 一共存过几版（= `uemaster_artifacts` 里同一 (需求, stage) 的行数）。
+   *
+   * 读侧只认最新一行，但「我在覆盖第几版」是人在按下「重新生成」之前要知道的事实
+   * ——回给界面的是一个数字，不是一句说明（P4-02 的 labels-only 口径）。
+   */
+  versions: number;
 };
 
 /** stage 的固定次序：读模型按它排三行，不按时间。 */
@@ -38,11 +45,17 @@ const RANK = new Map<Stage, number>(STAGES.map((stage, i) => [stage, i]));
 export async function listArtifacts(db: Db, requirementId: string): Promise<ArtifactRef[]> {
   const id = parseRequirementId({ requirementId });
 
+  /**
+   * `count(*) over (partition by stage)` 与 `distinct on` 在同一个 select 里是安全的：
+   * PG 的求值顺序是 窗口函数 → DISTINCT → ORDER BY，所以窗口数的是**这一组的总行数**，
+   * 而 `distinct on` 随后只留下一行。多一次分组扫描换来「不用第二次查询就问出版本数」。
+   */
   const res = await db.execute<{
-    stage: Stage; url: string; at: Date; input_hash: string | null;
+    stage: Stage; url: string; at: Date; input_hash: string | null; versions: number;
   }>(sql`
-    select stage, url, at, input_hash from (
-      select distinct on (stage) stage, url, created_at as at, id, input_hash
+    select stage, url, at, input_hash, versions from (
+      select distinct on (stage) stage, url, created_at as at, id, input_hash,
+             count(*) over (partition by stage) as versions
         from uemaster_artifacts
        where requirement_id = ${id}
        order by stage, created_at desc, id desc
@@ -54,6 +67,7 @@ export async function listArtifacts(db: Db, requirementId: string): Promise<Arti
       url: row.url,
       at: new Date(row.at),
       inputHash: row.input_hash,
+      versions: Number(row.versions),
     }))
     .sort((a, b) => (RANK.get(a.stage) ?? 0) - (RANK.get(b.stage) ?? 0));
 }

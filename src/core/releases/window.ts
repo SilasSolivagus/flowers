@@ -43,10 +43,46 @@ export function previousLine(previous: Window & { name: string } | null): string
   return `上一个版本：${previous.name} ${dayLabel(previous.windowStart)} → ${dayLabel(previous.releaseDate)}`;
 }
 
-/** 重叠警告的那一句话（点名版本与重叠的那一段）；没有重叠就是 null。 */
-export function overlapLine(entered: Window, previous: (Window & { name: string }) | null): string | null {
-  if (previous === null) return null;
-  const overlap = overlapOf(entered, previous);
+/** 一个有时间窗的版本（策略行与重叠句都只要这三格 + id）。 */
+export type NamedWindow = Window & { name: string; id?: string };
+
+/**
+ * 与给定窗口相交的版本里，**发版日最近**的那一个；都不相交就 null。
+ *
+ * 为什么是「最近」而不是「第一个」：一个人可能同时撞上两版（上一版还没收尾、下一版
+ * 已经开窗），这时该先说哪一条？说发版日离自己最近的那一条——它才是这个日期真正
+ * 会撞上的那一版。
+ *
+ * 打平时取发版日更晚的那一条：`candidates` 若按发版日升序给，「严格小于才换」自然
+ * 留下后者。
+ */
+export function pickOverlapping(
+  entered: Window,
+  candidates: readonly NamedWindow[],
+): NamedWindow | null {
+  const target = new Date(entered.releaseDate).getTime();
+  let best: NamedWindow | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    if (overlapOf(entered, candidate) === null) continue;
+    const distance = Math.abs(new Date(candidate.releaseDate).getTime() - target);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * 重叠警告的那一句话（点名版本与重叠的那一段）；没有重叠就是 null。
+ *
+ * 入参是**相交的那一版**（`pickOverlapping` 的结果），不是「上一个版本」——两者是
+ * 两件事，见 `manage.ts` 的 `overlappingRelease` 注释。
+ */
+export function overlapLine(entered: Window, overlapping: NamedWindow | null): string | null {
+  if (overlapping === null) return null;
+  const overlap = overlapOf(entered, overlapping);
   if (overlap === null) return null;
-  return `与「${previous.name}」重叠：${dayLabel(overlap.start)} → ${dayLabel(overlap.end)}`;
+  return `与「${overlapping.name}」重叠：${dayLabel(overlap.start)} → ${dayLabel(overlap.end)}`;
 }

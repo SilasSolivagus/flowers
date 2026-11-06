@@ -45,6 +45,8 @@ export type DetailRef = {
    * 是因为「当前指纹」要那一行需求的描述，只有这里取得到。
    */
   freshness: Freshness;
+  /** 这个阶段存过几版（0 = 还没生成过）。按钮上的「第 N 版」用它。 */
+  versions: number;
   /**
    * 这个阶段**正在跑**的那次生成（null = 没有）。
    *
@@ -331,13 +333,15 @@ function artifactRef(
     // 给 'unknown' 而不是留空：类型只有三态，而这一格只在 `present` 时被读。
     return {
       stage, label, url: null, at: null, atLabel: null, present: false,
-      freshness: 'unknown', generation,
+      freshness: 'unknown', versions: 0, generation,
     };
   }
   const at = artifact.at.toISOString();
   return {
     stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true,
-    freshness: freshnessOf(artifact.inputHash, currentHash), generation,
+    freshness: freshnessOf(artifact.inputHash, currentHash),
+    versions: artifact.versions,
+    generation,
   };
 }
 

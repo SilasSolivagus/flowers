@@ -2,7 +2,9 @@
 
 import { useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { overlapLine, previousLine } from '../../src/core/releases/window';
+import {
+  overlapLine, pickOverlapping, previousLine, type NamedWindow,
+} from '../../src/core/releases/window';
 import { createReleaseAction, deleteReleaseAction, updateReleaseAction } from '../actions';
 import type { EntryResult } from '../actions';
 
@@ -26,8 +28,21 @@ import type { EntryResult } from '../actions';
 export type ReleaseFormProps = {
   mode: 'create' | 'edit';
   closeHref: string;
-  /** 「上一个版本」（服务端按 `previousRelease` 算好）。null = 还没有版本。 */
-  previous: { name: string; windowStart: string; releaseDate: string } | null;
+  /**
+   * 「上一个版本」：**上下文**，按发版日取最近的那一个（服务端 `previousRelease`）。
+   * null = 还没有版本。它只用来写顶上那行策略，**不**参与重叠判定。
+   */
+  previous: NamedWindow | null;
+  /**
+   * 全部活着的版本：**防撞车**的候选集（owner 2026-11-07 的裁决）。
+   *
+   * 为什么要把整份清单给到客户端：用户改日期的那一刻就要看到警告，而那件事不能
+   * 每敲一个键往返一次服务端。挑哪一条由 `pickOverlapping` 决定——服务端算 `warning`
+   * 用的是同一个函数，所以「敲的时候看到的那句」与「保存后看到的那句」永远一样。
+   */
+  candidates: readonly NamedWindow[];
+  /** 编辑时排除自己（否则「把这一版往后挪」会立刻得到一条与自身重叠的警告）。 */
+  selfId?: string;
   /**
    * 新建时的默认时间窗（今天 → 两周后）。空着日期也能看到那行策略文案——它是
    * 上下文，不该等用户敲完才出现；敲了之后行内重叠警告跟着变。
@@ -53,7 +68,7 @@ function dateValue(iso: string | null): string {
 }
 
 export function ReleaseForm({
-  mode, closeHref, previous, defaults, initial,
+  mode, closeHref, previous, candidates, selfId, defaults, initial,
 }: ReleaseFormProps) {
   const router = useRouter();
   const [name, setName] = useState(initial?.name ?? '');
@@ -86,15 +101,18 @@ export function ReleaseForm({
   const close = () => router.push(closeHref);
 
   /**
-   * 行内重叠警告：进入窗口有值就当场算。
+   * 行内重叠警告：进入窗口有值就当场算，扫**全部**活着的版本（排除自己）。
    *
-   * 传 `previous` 而不是查库：上一版在打开表单那一刻就定了（那是「上下文」，不该
-   * 随着用户敲日期变来变去——用户改的是**这一版**的窗口）。
+   * 不是拿 `previous` 算——那是「上一个版本」，按发版日取最近的一个；而撞车要看的是
+   * 所有版本（可能撞上更晚的那一版）。两者是两个问题，两个定义，见 `manage.ts`。
    */
   const entered = windowStart !== '' && releaseDate !== ''
     ? { windowStart, releaseDate }
     : null;
-  const warning = entered === null ? null : overlapLine(entered, previous);
+  const overlapping = entered === null
+    ? null
+    : pickOverlapping(entered, candidates.filter((item) => item.id !== selfId));
+  const warning = entered === null ? null : overlapLine(entered, overlapping);
 
   const remove = async () => {
     if (initial === undefined) return;

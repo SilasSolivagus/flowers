@@ -73,6 +73,11 @@ function RefRow({
         {item.present && item.freshness === 'unknown' && (
           <span className="pill no">版本未知</span>
         )}
+        {/* 「这是第几版」：同一 (需求, 阶段) 存过几行就是几版。`1` 不显示——
+            每一行都挂一个「第 1 版」只是噪音，只有重做过之后它才是信息。 */}
+        {item.present && item.versions > 1 && (
+          <span className="pill no">第 {item.versions} 版</span>
+        )}
         <GenerateButton
           requirementId={id}
           stage={item.stage}
@@ -80,6 +85,7 @@ function RefRow({
           generator={generator}
           present={item.present}
           fresh={item.freshness === 'fresh'}
+          versions={item.versions}
         />
         <AttachForm id={id} number={number} stage={item.stage} />
       </div>

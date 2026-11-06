@@ -71,6 +71,18 @@ export default async function ReleasesPage({
     ? await previousRelease(db, current.releaseDate, current.id)
     : null;
 
+  /**
+   * 重叠判定的候选集：**全部活着的版本**（`listReleases` 已经过滤掉软删除的那些）。
+   * 传整份清单而不是「服务端先挑好一条」：用户改日期时要当场重算，而每敲一个键往返
+   * 一次服务端是不划算的——挑哪一条由 `pickOverlapping` 决定，两边同一个函数。
+   */
+  const candidates = releases.map((r) => ({
+    id: r.id,
+    name: r.name,
+    windowStart: r.windowStart,
+    releaseDate: r.releaseDate,
+  }));
+
   return (
     <main className="view pad vpage">
       <div className="vbar">
@@ -141,6 +153,7 @@ export default async function ReleasesPage({
           mode="create"
           closeHref="/releases"
           previous={previous}
+          candidates={candidates}
           defaults={{ windowStart: defaultStart, releaseDate: defaultEnd }}
         />
       )}
@@ -149,6 +162,8 @@ export default async function ReleasesPage({
           mode="edit"
           closeHref={`/releases?release=${current.id}`}
           previous={previousForEdit}
+          candidates={candidates}
+          selfId={current.id}
           initial={{
             id: current.id,
             name: current.name,
