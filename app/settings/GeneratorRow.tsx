@@ -26,6 +26,11 @@ import { GeneratorSelect } from '../components/GeneratorSelect';
  * 为什么没有「清除」按钮：撤销的入口是「把命令行删空」（服务层把空串当「没设」，
  * 这一行就退回「未配置」，抽屉里那次提问会重新出现）。P2.7 有一个显式的「清除」，
  * 它对第一次用的人是多余的，而这一行的口径是「三个控件」。
+ *
+ * P2.10：配了模型接口时，行首多一格值 `平台统一模型 · <模型名>`，右边的下拉 / 测试 /
+ * 高级前面多一个 `CLI` 标签。理由：那时真正会被执行的是 provider，而这一格之前只
+ * 描述 CLI——一个配好 key 的部署打开设置页，看到的仍是「未配置」。三个 CLI 控件照旧
+ * 留着（撤掉模型接口后它们立刻是活的），标签只是说清它们治的是哪条路。
  */
 
 export function GeneratorRow({ view }: { view: GeneratorView }) {
@@ -138,10 +143,20 @@ export function GeneratorRow({ view }: { view: GeneratorView }) {
       <div className="i gen-row">
         <div className="l"><b>生成器</b></div>
         <div className="v gen-actions">
+          {/* 活着的那条路写在最左边：`平台统一模型 · gpt-5.4-mini`。后面那个 `CLI`
+              标签是给右边那三个控件的——它们治的是另一条路，provider 在时仍然可改
+              （撤掉模型接口之后它就立刻变成活的）。没有解释句，只有值与标签。 */}
+          {view.provider !== null && (
+            <span className="gen-src">{`平台统一模型 · ${view.provider.model}`}</span>
+          )}
           {view.source === 'env' && <span className="pill no">环境变量</span>}
+          {view.provider !== null && <span className="pill no">CLI</span>}
           <GeneratorSelect
             options={view.options}
             value={selected}
+            // provider 在时这一格是「另一条路」，行首已经说了活着的是谁：那一格的
+            // 空值说「未选」，不说「未配置」——后者会让整行读起来像没配。
+            emptyLabel={view.provider !== null ? '未选' : undefined}
             onChange={(id) => void change(id)}
           />
           <button

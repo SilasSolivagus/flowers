@@ -15,15 +15,21 @@ import type { CandidateId, CandidateOption } from '../../src/core/uemaster/candi
  *
  * `value === null` 时多一个「未配置」选项并选中它：设置页在还没选过的时候要能
  * 如实显示这个状态，而不是假装已经选了列表里的第一行（那会是「现在会跑什么」的谎）。
+ *
+ * `emptyLabel` 只改那一行的字（P2.10）：配了模型接口时这一格治的是**另一条路**，
+ * 行首已经写着「平台统一模型 · x」、旁边还有 `CLI` 标签，再显示一个「未配置」
+ * 会让整行读起来像没配——那一格的诚实说法是「未选」。
  */
 export function GeneratorSelect({
-  options, value, onChange, disabled,
+  options, value, onChange, disabled, emptyLabel = '未配置',
 }: {
   options: CandidateOption[];
   /** 当前选中的 id；null = 还没配置。 */
   value: CandidateId | null;
   onChange: (id: CandidateId) => void;
   disabled?: boolean;
+  /** `value === null` 时那一行的字；默认「未配置」。 */
+  emptyLabel?: string;
 }) {
   return (
     <select
@@ -33,7 +39,7 @@ export function GeneratorSelect({
       disabled={disabled}
       onChange={(event) => onChange(event.target.value as CandidateId)}
     >
-      {value === null && <option value="">未配置</option>}
+      {value === null && <option value="">{emptyLabel}</option>}
       {options.map((option) => (
         <option key={option.id} value={option.id}>{option.text}</option>
       ))}

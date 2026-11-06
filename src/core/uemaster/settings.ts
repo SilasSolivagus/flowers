@@ -8,6 +8,7 @@ import {
 } from './candidates.js';
 import { detect } from './detect.js';
 import { resolveGenerator } from './generator.js';
+import { resolveProviderConfig } from './provider.js';
 
 /**
  * 生成器设置：`app_settings` 里那两个键的**唯一**读写口。
@@ -107,17 +108,34 @@ export async function writeTest(db: Queryable, test: GeneratorTest): Promise<voi
  * 界面要的全部生成器事实，一次读齐。
  *
  * 三块拼起来：库里的（saved / test）、PATH 里的（candidates / options）、以及按解析
- * 顺序算出的结论（state / source / command）。页面与设置页都只调这一个函数——两处
- * 显示同一格事实时，不可能一处说「未配置」、另一处说「claude」。
+ * 顺序算出的结论（state / source / command / provider）。页面与设置页都只调这一个
+ * 函数——两处显示同一格事实时，不可能一处说「未配置」、另一处说「claude」。
  *
  * P2.8 起 `candidates` 不再被当成选项表用：它是**探测结论**（PATH 里有谁），
  * `options` 才是选项（七行全在，探测只决定后缀）。所以「装了四个」与「能选七个」
  * 是两件事，各自有各自的字段。
+ *
+ * **P2.10 的修正：结论必须与 `resolveStrategy()` 一致。** 服务端跑哪条路由
+ * `resolveStrategy()` 决定（配齐了三格模型接口就走 provider，不看 CLI），而这一格
+ * 之前只按 CLI 那条路算 `state`——于是「配了 key」的部署按下生成，界面还在问
+ * 「用哪个 CLI」，问的是一条永远不会被走的路。现在这里先问同一件事：provider 在，
+ * `state` 就是 `ready`、`source` 就是 `'provider'`，与 `choose` / `none` 无关。
+ *
+ * 为什么直接叫 `resolveProviderConfig()` 而不是 `resolveStrategy()`：策略住在 `start.ts`，
+ * 而 `start.ts` 已经 import 本文件——反向再 import 一次就是一个 settings ↔ start 的环，
+ * 还会把 worker 那一整套（compose / attach / packs / spawn）拖进设置页的模块图。判定本身
+ * 只有一句（`config === null` 就是 CLI），两条写法同源，语义不会分叉。
+ *
+ * 与 `provider.ts` 之间确实多了一条边（它 import 本文件的 `providerSettings`），是一个
+ * 只在函数体里互相引用的环：两边的模块顶层都不调用对方，加载顺序因此无关紧要。
  */
 export async function generatorView(db: Queryable): Promise<GeneratorView> {
   const [saved, test] = await Promise.all([generatorCommand(db), readTest(db)]);
   const resolution = await resolveGenerator(saved);
   const detected = await detect();
+  // 只取能露的两格：`apiKey` 在 `resolveProviderConfig()` 的返回值里，但绝不进视图。
+  const config = await resolveProviderConfig();
+  const provider = config === null ? null : { model: config.model, baseUrl: config.baseUrl };
 
   const candidates: CandidateView[] = detected.map((item) => viewOf(item.candidate));
   const known: CandidateView[] = CANDIDATES.map(viewOf);
@@ -133,10 +151,15 @@ export async function generatorView(db: Queryable): Promise<GeneratorView> {
     test,
   };
 
-  if (resolution.kind === 'ready') {
-    return { state: 'ready', source: resolution.source, command: resolution.command, ...common };
+  // 配了模型接口：按钮立刻跑（`ready`），不再问 CLI。`command` 留 null——这一版没有
+  // 命令可跑，把 CLI 那条塞进来会让界面以为它会被执行。
+  if (provider !== null) {
+    return { state: 'ready', source: 'provider', command: null, provider, ...common };
   }
-  return { state: resolution.kind, source: null, command: null, ...common };
+  if (resolution.kind === 'ready') {
+    return { state: 'ready', source: resolution.source, command: resolution.command, provider: null, ...common };
+  }
+  return { state: resolution.kind, source: null, command: null, provider: null, ...common };
 }
 
 // ─── P2.9：LLM 直连的三条键 ─────────────────────────────────────────────────

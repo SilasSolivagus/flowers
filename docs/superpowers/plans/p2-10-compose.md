@@ -402,3 +402,131 @@ export async function resolveStrategy(): Promise<Strategy> {
 6. **失败信息里没有「试了几次」之外的诊断。** 引擎报告已经带回来了，但只有最后一次；
    三次尝试的全过程（每版 mermaid + 每份报告）没有留下来，事后想问「它到底歪在哪」
    只能靠用户截图。
+
+## provider 接入 UI
+
+### 症状（实测，不是推测）
+
+`app_settings` 三格齐（`provider.baseUrl` / `provider.apiKey` / `provider.model`），服务端
+`resolveStrategy()` 确实返回 `provider` —— 但抽屉里按下「生成」弹的是 CLI 选择器
+（「DeepSeek Harness · 已安装 / …」）。
+
+原因在视图那一层，不在策略那一层：`generatorView()` 只按 `resolveGenerator(saved)`（CLI 那条路）
+算 `state`。于是同一个部署里出现两句话——服务端说「我走 provider」，按钮说「你用哪个 CLI」。
+被问的那条路（CLI）根本不会被执行，CLI 一个都没装时按钮还会直接禁用（`none`），
+一个只有 key 的部署连点都点不动。
+
+### 修正：视图与策略同源
+
+```ts
+// settings.ts · generatorView()
+const config = await resolveProviderConfig();          // 与 resolveStrategy() 同一个判定
+const provider = config === null ? null : { model: config.model, baseUrl: config.baseUrl };
+if (provider !== null) return { state: 'ready', source: 'provider', command: null, provider, ...common };
+if (resolution.kind === 'ready') return { state: 'ready', source: resolution.source, command: resolution.command, provider: null, ...common };
+return { state: resolution.kind, source: null, command: null, provider: null, ...common };
+```
+
+- 没有 import `resolveStrategy()`：它住在 `start.ts`，而 `start.ts` 已经 import 本文件，
+  反向再连一次就是 settings ↔ start 的环，还会把 worker 那一整套（compose / attach /
+  packs / spawn）拖进设置页的模块图。判定只有一句，直接复用 `resolveProviderConfig()`。
+- 与 `provider.ts` 之间多了一条边（它 import 本文件的 `providerSettings`），但两边都只在
+  函数体里引用对方、模块顶层互不调用，加载顺序无关紧要。
+- `resolveStrategy` / `compose.ts` / `provider.ts` / `start.ts` 一行未改。
+
+### 视图契约（`GeneratorView`）
+
+| 字段 | provider 在 | provider 不在 |
+| --- | --- | --- |
+| `state` | 恒为 `'ready'`（不会被 CLI 的 `choose` / `none` 覆盖） | 照旧：CLI 解析的结论 |
+| `source` | `'provider'` | `'env'` / `'settings'` / `null`（与今天一致） |
+| `provider` | `{ model, baseUrl }` | `null` |
+| `command` | `null`（这一版没有命令可跑） | CLI 真会执行的那条 / `null` |
+| `candidates` / `known` / `options` / `defaultId` / `savedId` / `saved` / `test` | 全部照旧（它们描述 CLI 那条路，provider 撤掉之后立刻是活的） | 照旧 |
+
+`apiKey` 不在 `GeneratorView`、也不在 `ProviderView` 上——它只存在于 `ProviderConfig`
+（服务端）里，没有一个字段能把它送进响应体。这一条不靠约定，靠类型。
+
+### 设置行（`app/`settings/GeneratorRow.tsx`）
+
+一行，标签 + 值，没有解释句：
+
+```
+生成器        平台统一模型 · gpt-5.4-mini   [CLI] [未选 ▾]  测试  高级
+```
+
+- `平台统一模型 · <model>` 是活着的那条路（`.gen-src`：字重 500、`--c-text-1`，不加背景——
+  一个色块会把这一行读成两段）。
+- `CLI` 那个 `pill no` 标签标的是右边三个控件：它们治的是另一条路，provider 在时仍然可改。
+- provider 在、CLI 没选过时，下拉的空值写「未选」而不是「未配置」（`GeneratorSelect` 新增
+  `emptyLabel`）：行首已经说了活着的是谁，再说一次「未配置」会让整行读起来像没配。
+- provider 不在时这三个控件与文案**一个字都没变**（`emptyLabel` 缺省仍是「未配置」）。
+- 截图：`p2-10-provider-settings.png`。
+
+### GenerateButton（只验证，未改）
+
+- `asking` 只在 `generator.state === 'choose'` 时置真；`ready` 那条分支直接 `start()`。
+  provider 在时 `state` 恒为 `ready`，所以**对话框没有一条路会被打开**——实测：
+  15:57:43 按「生成」，15:57:44.7 库里就有 running 作业，框没出现。
+- 失败文案走的是同一条路：`generateAction` → 作业 `failed` + `error` → 轮询取回
+  `status.error` → `生成失败：<原文>` 渲染在 `[data-stage]` 那一行里。实测（把
+  `provider.baseUrl` 临时指到 `http://127.0.0.1:9/v1`，作业 1.1s 收口）：
+
+  ```
+  评估材料   生成失败：请求失败：fetch failed（bad port）   重试   交回材料
+  ```
+
+  文案是 provider 的原文（`provider.ts` 的 `transportText`），不是「生成失败」四个字；
+  截图：`p2-10-provider-failure.png`。测完把 `baseUrl` 写回真值，三格复原。
+
+### 用例（`tests/generator.test.ts` 新增 3 条）
+
+| 用例 | 断言 |
+| --- | --- |
+| 三格齐全 + PATH 空 | `state: 'ready'`、`source: 'provider'`、`command: null`、`provider: { model, baseUrl }`；`known/options` 仍 7 行、`candidates` 仍空、`saved` 仍 null；`JSON.stringify(view)` 里搜不到 key、`sk-`、`apiKey` |
+| CLI 也存过一条 | provider 赢（`source: 'provider'`、`command: null`），`saved` / `savedId` 原样留着；把 `model` 清空（三格缺一）→ 立刻回到 `source: 'settings'` + `command: 'dsh headless {prompt}'` + `provider: null` |
+| provider 不在 | `choose` / `none` 与今天完全一致，`provider: null` |
+
+key 的断言按**序列化整串**搜，不逐字段：逐字段只能证明「我想到的那个字段没有它」。
+
+```
+ ✓ tests/generator.test.ts (…) 
+ Test Files  15 passed (15)
+      Tests  422 passed (422)        ← 419 + 这 3 条
+```
+
+`npx tsc --noEmit` 干净。
+
+### 真跑一次（owner 的 key，`router.aionclaw.ai`）
+
+| 项 | 值 |
+| --- | --- |
+| 需求 / 阶段 | `PAN-1`（PC 剪贴板读取 URL，商业类）/ `evaluate` |
+| 按下「生成」 | 15:57:43 |
+| 作业落库（running） | 15:57:44.732（次日 UTC 07:57:44.732） |
+| 作业收口（done） | 15:57:52.462 → **7.7 秒** |
+| 产物 | `data/uemaster/PAN-1/evaluate.html`，20,093 B，`/uemaster/PAN-1/evaluate.html` |
+| 抽屉那一行（跑完之后） | `评估材料  /uemaster/PAN-1/evaluate.html  11-06  生成  交回材料` |
+| 记录 | 提交评估材料 → 评估完成，进入待设计（卡片从「收集」移到「待设计」） |
+
+跑之前同一条需求还跑过一次 **13.8 秒**（15:54:25 → 15:54:39，19,769 B）。两次都在
+按钮的那一次点击之后 1 秒内就落了 running 行——中间没有对话框。
+
+截图：`p2-10-provider-drawer.png`。
+
+### 还粗糙的地方
+
+1. **`generatorView` 读配置用的是全局 `appDb`，不认入参 `db`。** `resolveProviderConfig()`
+   走的是同一个连接池，所以今天两种写法同解；哪天要在事务里算这一格，就得把配置当参数传进来。
+2. **provider 路没有「测试」按钮。** 行上那个「测试」测的仍是 CLI（存的那条命令）。provider
+   通不通只能由第一次生成暴露——这是 `resolveStrategy`「只看配没配、不看通不通」的直接后果，
+   写错的代价是一次失败（今天实测 1.1 秒拿到原文），不是一次探测烧 token。
+3. **env 配的 provider 与库里配的 provider 在视图里分不出来。** 两者都是 `平台统一模型 · x`；
+   行上原来那个「环境变量」标签只标 CLI 那条路（`FLOWERS_GEN_CMD`）。
+4. **两条路都活着时没有「这次走 CLI」的开关。** 切换的唯一办法是撤掉三格里的任意一格
+   （provider 因此整份作废，不会出现「半份 provider」）。
+5. **失败行上没有重试次数与耗时。** `composeEvaluation` 内部可能修图/重发（最多 3 次），
+   但 `uemaster_jobs.error` 只留最后一句中文，事后想问「它到底试了几次」只能看日志。
+6. **`state === 'ready'` 现在不再等价于「`command` 非空」。** 别的调用方若还按这个前提写，
+   会在 provider 路上读到 `null`——当前只有 `GenerateButton` 与设置行读它，两处都已按
+   `provider` 字段分流；将来加第三个读点时别把这句当契约。

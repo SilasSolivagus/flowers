@@ -15,7 +15,7 @@ import {
 } from '../src/core/uemaster/generator.js';
 import { packFor } from '../src/core/uemaster/packs.js';
 import {
-  generatorCommand, generatorView, readTest, saveGeneratorCommand, writeTest,
+  generatorCommand, generatorView, readTest, saveGeneratorCommand, saveProviderSettings, writeTest,
 } from '../src/core/uemaster/settings.js';
 import { runJob, startGeneration } from '../src/core/uemaster/start.js';
 import { createRequirement } from '../src/core/requirements/create.js';
@@ -435,6 +435,87 @@ describe('设置（app_settings）', () => {
     expect(none.state).toBe('none');
     expect(none.command).toBeNull();
     expect(none.candidates).toEqual([]);
+  });
+
+  /**
+   * P2.10：`generatorView` 必须与 `resolveStrategy()` 说同一句话。
+   *
+   * 这三个用例钉的是那条 bug 本身——服务端明明会走 provider（`resolveStrategy`
+   * 返回 `provider`），视图却只按 CLI 那条路算 `state`，于是按钮弹出一个问「用哪个
+   * CLI」的框，问的是一条永远不会被走的路。
+   */
+  describe('provider 在：视图跟着路走，CLI 那几格照旧', () => {
+    const KEY = 'sk-live-ABC.123/x+y';
+    const BASE_URL = 'https://router.example.test/v1';
+    const MODEL = 'gpt-5.4-mini';
+
+    beforeEach(() => {
+      // env 排在最前（`resolveProviderConfig` 的顺序）：别的用例文件可能留了残值，
+      // 不清掉的话这里的「库里配了三格」会被 env 抢先。
+      delete process.env.FLOWERS_PROVIDER_BASE_URL;
+      delete process.env.FLOWERS_PROVIDER_API_KEY;
+      delete process.env.FLOWERS_PROVIDER_MODEL;
+    });
+
+    it('三格齐全：state=ready、source=provider，且序列化之后搜不到 key', async () => {
+      await saveProviderSettings(db, { baseUrl: BASE_URL, apiKey: KEY, model: MODEL });
+      // PATH 里一个 CLI 都没有——按老逻辑这是 `none`（按钮禁用 + 「未检测到生成器」）。
+      process.env.PATH = await pathWith([]);
+
+      const view = await generatorView(db);
+      expect(view).toMatchObject({
+        state: 'ready',
+        source: 'provider',
+        // provider 路没有命令可跑：塞一条 CLI 进来会让界面以为它会被执行。
+        command: null,
+        provider: { model: MODEL, baseUrl: BASE_URL },
+      });
+      // CLI 那几格不被 provider 影响：七行仍在、探测结论仍在、saved / test 仍是它们自己。
+      expect(view.known).toHaveLength(7);
+      expect(view.options).toHaveLength(7);
+      expect(view.candidates).toEqual([]);
+      expect(view.saved).toBeNull();
+      expect(view.defaultId).toBeNull();
+
+      // key 不许出现在视图的任何角落（含 baseUrl / model / 错误文案）。按序列化整串搜：
+      // 逐字段断言只能证明「我想到的那些字段没有它」，整串搜索证明「一个都没有」。
+      const serialized = JSON.stringify(view);
+      expect(serialized.includes(KEY)).toBe(false);
+      expect(serialized.includes('sk-')).toBe(false);
+      expect(serialized.includes('apiKey')).toBe(false);
+      expect(serialized.includes('api_key')).toBe(false);
+    });
+
+    it('CLI 存过一条也好、没存也好：state 只由 provider 决定，saved 原样留着', async () => {
+      await saveGeneratorCommand(db, 'dsh headless {prompt}');
+      await saveProviderSettings(db, { baseUrl: BASE_URL, apiKey: KEY, model: MODEL });
+      process.env.PATH = await pathWith(['claude', 'dsh']);
+
+      const view = await generatorView(db);
+      // 两条路都齐的时候 provider 赢——这正是 `resolveStrategy()` 的判定顺序。
+      expect(view).toMatchObject({ state: 'ready', source: 'provider', command: null });
+      // 设置页的「高级」仍要看到那一条：它不是死的，只是这一版没被走。
+      expect(view.saved).toBe('dsh headless {prompt}');
+      expect(view.savedId).toBe('dsh');
+
+      // 三格里缺一格（模型名清空）= 整份作废（`providerSettings` 的口径），立刻回到
+      // CLI 那条路的结论上：不是「半份 provider」。
+      await saveProviderSettings(db, { model: '' });
+      const back = await generatorView(db);
+      expect(back).toMatchObject({
+        state: 'ready', source: 'settings', command: 'dsh headless {prompt}', provider: null,
+      });
+    });
+
+    it('provider 不在：与今天完全一样（choose / none 各自照旧）', async () => {
+      process.env.PATH = await pathWith(['claude', 'dsh']);
+      const choose = await generatorView(db);
+      expect(choose).toMatchObject({ state: 'choose', source: null, command: null, provider: null });
+
+      process.env.PATH = await pathWith([]);
+      const none = await generatorView(db);
+      expect(none).toMatchObject({ state: 'none', source: null, command: null, provider: null });
+    });
   });
 });
 

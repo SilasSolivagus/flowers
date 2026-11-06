@@ -310,19 +310,36 @@ export function testLabel(test: GeneratorTest): string {
 }
 
 /**
+ * 配好的模型接口里**能露给界面的两格**。
+ *
+ * 只有模型名与接口地址：`apiKey` 不在这张类型上，因此它没有一条路能进响应体、
+ * 事件或界面（`provider.ts` 的脱敏只管错误文本，这一条管的是视图本身）。
+ */
+export type ProviderView = { model: string; baseUrl: string };
+
+/**
  * 界面需要的全部生成器事实：现在会跑什么、从哪来的、有哪些可选、上次测成什么样。
  *
- * `state` 与 `source` 是一对：`ready` 时 `command` 就是真会执行的那条；
- * `choose` 时是「第一次用，还没选」——界面要打开那个一次性的小对话框；
- * `none` 时按钮禁用（一句原因 + 一条可抄的命令，见设置页）。
+ * `state` 与 `source` 是一对：`ready` 时要么 `command` 就是真会执行的那条（CLI 路），
+ * 要么 `provider` 非空（直连模型路，没有命令可跑）；`choose` 时是「第一次用，还没选」
+ * ——界面要打开那个一次性的小对话框；`none` 时按钮禁用（一句原因 + 一条可抄的命令，
+ * 见设置页）。
  *
- * `options` 是下拉的全部七行（探测只标注，不过滤）；`defaultId` 是它的预选。
+ * **`state` 只看哪条路是活的**（P2.10 的修正）：配齐了三格模型接口，`state` 恒为
+ * `ready`、`source` 恒为 `'provider'`——那时 `choose` / `none` 说的是另一条路
+ * （CLI）的状态，而那条路不会被执行，把它摆在按钮上就是在问一件不会发生的事。
+ *
+ * `options` / `candidates` / `saved` / `test` 描述的是 **CLI 那一条路**，与 provider
+ * 在不在无关：设置页要能随时改它（provider 撤掉之后它就是活的），所以它们照旧。
  */
 export type GeneratorView = {
   state: 'ready' | 'choose' | 'none';
-  source: 'env' | 'settings' | null;
-  /** 真会执行的命令（`state === 'ready'` 时非空）。 */
+  /** 这一版会执行哪条路：provider（直连模型）/ env、settings（CLI）/ null（都没有）。 */
+  source: 'provider' | 'env' | 'settings' | null;
+  /** CLI 路真会执行的命令；provider 路没有命令，所以是 null（`ready` 也不例外）。 */
   command: string | null;
+  /** 配齐了的模型接口；没有就是 null。有值时 `state` 必为 `ready`、`source` 必为 `'provider'`。 */
+  provider: ProviderView | null;
   /** 库里存着的那条（没有就是 null）——设置页的「高级」用它当初始值。 */
   saved: string | null;
   /** PATH 里探测到的候选（探测结论，不是选项表）。 */

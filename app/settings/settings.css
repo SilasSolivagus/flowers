@@ -46,6 +46,9 @@
 .gen-row .l{flex:1 1 auto}
 .gen-actions{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .gen-actions .gen-sel{max-width:280px}
+/* 活着的那条路（P2.10）：`平台统一模型 · gpt-5.4-mini`。它与右边三个控件同在一行，
+   所以只加字重与颜色（值该比控件更先被读到），不加背景——一个色块会把行读成两段。 */
+.gen-src{color:var(--c-text-1);font-weight:500;white-space:nowrap}
 .gen-detail{padding-top:0;padding-bottom:12px}
 .gen-msg{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-3);overflow-wrap:anywhere;white-space:pre-wrap}
 .gen-msg.bad{color:var(--c-negative)}
