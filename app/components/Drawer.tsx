@@ -4,6 +4,7 @@ import { formatMonthDay } from '../../src/core/read/board';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
 import { CopyPack } from './CopyPack';
+import { AttachForm } from './AttachForm';
 
 /**
  * 需求抽屉：读模型那六段的直接渲染。
@@ -35,9 +36,16 @@ const PILL: Record<string, string> = {
   voided: 'no',
 };
 
-function RefRow({ item, packId }: { item: DetailRef; packId: string }) {
+function RefRow({
+  item, packId, id, number,
+}: { item: DetailRef; packId: string; id: string; number: number }) {
   // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「复制任务包」。
   // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
+  //
+  // 两种进法都摆在这一行上，而且**两行都有**：
+  // - 「复制任务包」= 把材料交给用户自己的 agent（MCP 那条路的第一步）；
+  // - 「交回材料」= 人走的那条路：材料在别处跑完了，从这里贴链接或传文件进来。
+  // 有产物那一行也留着它们：重做一版是常态（库里同一 stage 允许多行，读侧取最新）。
   return (
     <div className="row3">
       <div className="l">
@@ -46,9 +54,11 @@ function RefRow({ item, packId }: { item: DetailRef; packId: string }) {
           <span><a className="att" href={item.url} target="_blank" rel="noreferrer">{item.url}</a></span>
         )}
       </div>
-      {item.present
-        ? <span className="pill ok">{item.atLabel ?? '—'}</span>
-        : <CopyPack packId={packId} />}
+      <div className="acts">
+        {item.present && <span className="pill ok">{item.atLabel ?? '—'}</span>}
+        <CopyPack packId={packId} />
+        <AttachForm id={id} number={number} stage={item.stage} />
+      </div>
       {/* 任务包正文：服务端渲染好的那段中文，就在这里。按钮复制的是这个节点的
           textContent——没有第二个数据源，也没有客户端请求。hidden 只是不画出来，
           文本仍然是页面 DOM 的一部分（读屏也不会念这三十行）。放在 .row3 里面是为了
@@ -154,7 +164,13 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
           <section className="dsec">
             <h3>参考</h3>
             {refs.map((item) => (
-              <RefRow key={item.stage} item={item} packId={`pack-${detail.id}-${item.stage}`} />
+              <RefRow
+                key={item.stage}
+                item={item}
+                id={detail.id}
+                number={detail.number}
+                packId={`pack-${detail.id}-${item.stage}`}
+              />
             ))}
           </section>
 

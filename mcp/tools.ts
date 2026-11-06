@@ -53,7 +53,7 @@ export const planInput = z.object({
  * `uemaster_attach`：要交回的链接。
  *
  * url 这里**只**要求是个字符串、不是空白：真正的合法性（scheme、站内路径、跳不跳得出
- * public/、文件在不在）全部归 `attachArtifact` 管，那里会报 `invalid_url` /
+ * 产物根、文件在不在）全部归 `attachArtifact` 管，那里会报 `invalid_url` /
  * `artifact_missing`。schema 里再判一遍前缀，只会让同一件事有两个出口。
  */
 export const attachInput = z.object({

@@ -91,7 +91,7 @@ server.registerTool(
   {
     title: '交回 UEmaster 产物',
     description:
-      '把已经生成好的产物链接交出：站内路径（形如 /uemaster/PAN-7/evaluate.html，项目根目录 public/ 下必须真有这个文件）'
+      '把已经生成好的产物链接交出：站内路径（形如 /uemaster/PAN-7/evaluate.html，项目根目录 data/uemaster/ 下必须真有这个文件）'
       + '或 http(s) 完整链接。会写一条 uemaster.attached 事件，抽屉「参考」段随即出现链接。',
     inputSchema: attachInput,
     annotations: { readOnlyHint: false, idempotentHint: false },

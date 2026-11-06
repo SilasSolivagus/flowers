@@ -15,10 +15,10 @@ Flowers 自己**不调模型**：评估 / 评审 / 走查这三处要的材料�
 前置：`npm install`、`npm run db:up && npm run db:migrate`、库里有数据（`npm run seed`）。
 
 **server 从哪个目录启动都行**：交付链接是站内路径（`/uemaster/PAN-9/evaluate.html`），
-`attach` 拿它去验文件时，基准是**本仓库的** `public/`——这个基准从 `src/core/uemaster/`
-自己的位置推出来（往上三层就是仓库根），不读 `process.cwd()`。所以 agent 客户端把
-server 起在自己的项目目录里也不会莫名其妙报「产物文件不存在」。cwd 只影响一件事：
-用相对路径写 `mcp/server.ts` 时，得能从这个 cwd 找到这个脚本。
+`attach` 拿它去验文件时，基准是**本仓库的** `data/uemaster/`——这个基准从
+`src/core/uemaster/store.ts` 自己的位置推出来（往上三层就是仓库根），不读 `process.cwd()`。
+所以 agent 客户端把 server 起在自己的项目目录里也不会莫名其妙报「产物文件不存在」。
+cwd 只影响一件事：用相对路径写 `mcp/server.ts` 时，得能从这个 cwd 找到这个脚本。
 
 ### Claude Code
 
@@ -90,7 +90,7 @@ smoke 脚本另有一个作用：它**从任务包正文里抠出交付路径**�
 | 工具 | 参数 | 做什么 | 会不会写库 |
 | --- | --- | --- | --- |
 | `uemaster_plan` | `requirementId`, `stage` | 读需求 → 返回该阶段的任务包（中文、可直接执行：画什么、写到哪个文件、怎么交回）。附带需求身份（`PAN-n`、uuid、状态、类型） | **不写**。不改状态、不写事件 |
-| `uemaster_attach` | `requirementId`, `stage`, `url` | 把产物链接交回来。站内路径必须真有文件（`public/` 下），否则 `artifact_missing` | 写：一行 `uemaster_artifacts` + 一条 `uemaster.attached` 事件。`stage=evaluate` 且需求还在**收集**时，同一个事务里再把它推进到**待设计**（多一条 `requirement.evaluated`；没有类型则 `missing_type`，整条 attach 回滚） |
+| `uemaster_attach` | `requirementId`, `stage`, `url` | 把产物链接交回来。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing` | 写：一行 `uemaster_artifacts` + 一条 `uemaster.attached` 事件。`stage=evaluate` 且需求还在**收集**时，同一个事务里再把它推进到**待设计**（多一条 `requirement.evaluated`；没有类型则 `missing_type`，整条 attach 回滚） |
 | `requirement_show` | `requirementId` | 现状：状态、类型、提出人、负责人、PRD、已有产物、还缺哪几个 stage、当前状态下合法的动作 | 不写 |
 
 `stage` 只有三个值：`evaluate`（评估）/ `review`（评审）/ `inspect`（走查）。
@@ -117,12 +117,21 @@ claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
 1. `requirement_show` 看这条需求要什么、还缺哪个 stage。
 2. `uemaster_plan` 拿任务包（里面写着需求、PRD、装哪两个 skill、产出形状、写到哪、怎么交回）。
 3. agent 照包做：装 UEmaster 的 `flow-canvas` / `flow-walkthrough`，生成**单个自足的 HTML**。
-4. 文件落到包指定的路径 `public/uemaster/PAN-<n>/<stage>.html`。
+4. 文件落到包指定的路径 `data/uemaster/PAN-<n>/<stage>.html`。
 5. `uemaster_attach` 交回 `/uemaster/PAN-<n>/<stage>.html` —— 抽屉「参考」段立刻出现这一行，点得开。
 
    **评估材料就是那道门的通行证**：需求还在「收集」里时交回 `stage=evaluate`，它会在同一个
    事务里被推进到「待设计」——用户不再需要在动作条上点一个按钮（那个按钮已经去掉了）。
    已经在「待设计」或更后面的需求补一份新评估，只换材料，不会被打回。
+
+文件本身不由 Next 的静态根服务：`data/uemaster/` 不在 `public/` 里，读它的是动态路由
+`app/uemaster/[...path]/route.ts`，每个响应都带 `Content-Security-Policy: sandbox;
+default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:` 与
+`X-Content-Type-Options: nosniff`。原因是产物是**同源的第三方内容**：从静态根直接服务，
+它里面的 `<script>` 会带着本站 cookie 跑，一份交回来的 HTML 就能改本站。`sandbox` 把它
+关进不透明源（读不到 `document.cookie`、storage、带凭据的接口）；代价是脚本不执行，
+所以 `flow-walkthrough` 那种「点左边节点切右边页面」的交互在站内是死的——双击本地文件
+打开仍然是活的。
 
 没有 PRD 的需求：评估照做（推断处标「PRD 未提供」），评审与走查的包会直接让你停下并把
 「缺少 PRD 链接」回报给用户——这两份材料的输入就是 PRD，没有它做出来的东西是编的。
@@ -136,8 +145,8 @@ claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
 | 需求 id 打错 / 不存在 | `需求不存在` |
 | `stage` 不是三个值之一 | `阶段只能是 evaluate、review、inspect 之一` |
 | `requirementId` 不是 uuid / 没传 | `需求 ID 格式不正确` |
-| 站内路径没文件 | `产物文件不存在：public/uemaster/PAN-9/evaluate.html —— 先把文件写到…` |
-| 链接不是 http(s) 也不是站内路径 | `产物链接必须是以 http:// 或 https:// 开头的完整链接，或以 / 开头的站内路径` |
+| 站内路径没文件 | `产物文件不存在：data/uemaster/PAN-9/evaluate.html —— 先把文件写到…` |
+| 链接不是 http(s) 也不是站内路径 | `产物链接必须是以 http:// 或 https:// 开头的完整链接，或以 /uemaster/ 开头的站内路径` |
 
 参数形状的错（上个表前三条里 schema 能判的部分）由 MCP 层在调用工具**之前**拦下，
 文案里会多一层 SDK 自己的前缀（`MCP error -32602: Input validation error: …`），中文还在后面；

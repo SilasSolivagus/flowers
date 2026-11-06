@@ -9,7 +9,7 @@
  * 会坏的那一层是 stdio——JSON-RPC 握手、zod schema 与客户端看到的工具列表、
  * 异常有没有变成 `isError` 而不是把连接打崩。那三件事只有在另一个进程里跑才测得出来。
  *
- * 脚本里那一步「从包正文里抠出 public/uemaster/... 路径并写文件」不是作弊，它就是
+ * 脚本里那一步「从包正文里抠出 data/uemaster/... 路径并写文件」不是作弊，它就是
  * agent 要做的事：**任务包自己说得清要写到哪**。抠不出来，说明包没写清。
  */
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -27,7 +27,7 @@ const ACTOR = 'claude-code';
  * 仓库根：本脚本在 `<仓库>/scripts/`，往上两层。
  *
  * 这个脚本要能在**任意目录**下跑起来，因为那正是它要验的东西：MCP server 从哪个 cwd
- * 启动都不该影响产物校验（`attach` 按模块位置找 `public/`）。所以 tsx 在哪、server
+ * 启动都不该影响产物校验（`attach` 按模块位置找产物根）。所以 tsx 在哪、server
  * 脚本在哪、产物文件写到哪，三处都按仓库根算，不按 cwd；而子进程的 cwd 故意保留成
  * 调用方的 cwd——从 /tmp 跑一遍，就是最真实的那个场景。
  */
@@ -47,10 +47,10 @@ function head(title: string): void {
   console.log(`\n──── ${title} ──────────────────────────────────────────────`);
 }
 
-/** 从任务包正文里抠「交付：写到 public/uemaster/PAN-n/<stage>.html」。 */
+/** 从任务包正文里抠「交付：写到 data/uemaster/PAN-n/<stage>.html」。 */
 function packFile(pack: string): string {
-  const hit = pack.match(/public\/uemaster\/PAN-\d+\/[a-z]+\.html/);
-  if (!hit) throw new Error('任务包里没有 public/uemaster/... 路径——包没写清交付位置');
+  const hit = pack.match(/data\/uemaster\/PAN-\d+\/[a-z]+\.html/);
+  if (!hit) throw new Error('任务包里没有 data/uemaster/... 路径——包没写清交付位置');
   return hit[0];
 }
 
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
     console.log(planned.text);
 
     head('3. 按包里的交付行写文件（agent 干的活）');
-    // 包里写的是仓库相对路径（`public/uemaster/...`）；落到磁盘时按仓库根解析，
+    // 包里写的是仓库相对路径（`data/uemaster/...`）；落到磁盘时按仓库根解析，
     // 与 attach 的解析口径一致——所以本脚本可以在 /tmp 里跑。
     const rel = packFile(planned.text);
     const file = path.join(REPO_ROOT, rel);
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     await writeFile(file, '<!doctype html><meta charset="utf-8"><h1>占位产物</h1>', 'utf8');
     console.log(`  写成 ${file}`);
 
-    const url = `/${rel.replace(/^public\//, '')}`;
+    const url = `/${rel.replace(/^data\//, '')}`;
     head(`4. uemaster_attach  url=${url}`);
     const attached = await call(client, 'uemaster_attach', { requirementId, stage: 'evaluate', url });
     console.log(`isError=${attached.isError}`);
@@ -173,7 +173,7 @@ async function main(): Promise<void> {
     console.log('  refs:', JSON.stringify(detail?.refs ?? null, null, 2));
   } finally {
     await client.close();
-    // 占位文件不进仓库：public/uemaster/ 是 .gitignore 里的运行期目录，用完就删。
+    // 占位文件不进仓库：data/uemaster/ 是 .gitignore 里的运行期目录，用完就删。
     // `--keep` 留着它，给「抽屉里点得开」这类要人眼看一步的验证用。
     if (written !== null && !process.argv.includes('--keep')) {
       await rm(written, { force: true });

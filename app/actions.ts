@@ -13,6 +13,7 @@ import { bounce } from '../src/core/requirements/bounce';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal';
+import { attachFromForm } from './attach-form';
 
 /**
  * 抽屉里那九个动作的服务端入口。
@@ -60,6 +61,28 @@ async function run(call: (actor: string) => Promise<unknown>): Promise<ActionRes
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
   } finally {
+    revalidatePath('/');
+  }
+}
+
+/**
+ * 交回材料：抽屉「参考」段那三行右边的入口（人走的那条路，MCP 是另一条）。
+ *
+ * 「取字段 → 存文件 → attach」在 `app/attach-form.ts`（普通函数，不进 `'use server'`）：
+ * 那个模块能被用例用真 FormData 跑一遍，而这里只留三件 Next 专有的东西——身份、
+ * 失效、把 `AppError` 翻成一句话。
+ */
+export async function attachAction(formData: FormData): Promise<ActionResult> {
+  const actor = await currentMember();
+  try {
+    await attachFromForm(db, actor, formData);
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    // 与 `run()` 同一条规矩：失败也刷。最常见的两种拒绝恰恰是「服务端已经和页面
+    // 不一样了」（时钟推进了、同事先做了一步），不刷就会一直撞同一句话。
     revalidatePath('/');
   }
 }

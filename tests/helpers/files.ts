@@ -6,21 +6,21 @@ import { fileURLToPath } from 'node:url';
  * 站内产物文件的测试助手。
  *
  * `attachArtifact` 现在会 stat 站内链接（没有文件就是 `artifact_missing`），所以
- * 任何「attach 一个 /uemaster/... 」的用例都必须先在 public/ 下造出那个文件。
- * 解析口径与服务层**同一套**：本文件在 `<仓库>/tests/helpers/files.ts`，往上两层
- * 是仓库根，`public/` 就在它下面。
+ * 任何「attach 一个 /uemaster/... 」的用例都必须先在磁盘上造出那个文件。
+ * 解析口径与服务层**同一套**（P2.5 起产物根是 `data/uemaster/`，不再是 `public/`）：
+ * 本文件在 `<仓库>/tests/helpers/files.ts`，往上两层是仓库根，`data/` 就在它下面。
  *
  * 为什么这里也不认 `process.cwd()`：有一条用例专门把 cwd 换到 /tmp 去验「产物根
- * 跟着模块走」。助手要是还按 cwd 找 public/，那条用例造出来的文件就会落在 /tmp 里，
+ * 跟着模块走」。助手要是还按 cwd 找根，那条用例造出来的文件就会落在 /tmp 里，
  * 测的就不是服务层，而是助手自己。常量在模块加载时算一次，之后的 chdir 影响不到它。
  */
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-export const PUBLIC_ROOT = path.join(REPO_ROOT, 'public');
+export const DATA_ROOT = path.join(REPO_ROOT, 'data');
 
-/** 站内路径 → 磁盘路径。 */
+/** 站内路径 → 磁盘路径（`/uemaster/PAN-7/x.html` → `data/uemaster/PAN-7/x.html`）。 */
 export function siteFile(url: string): string {
-  return path.resolve(PUBLIC_ROOT, `.${url}`);
+  return path.resolve(DATA_ROOT, `.${url}`);
 }
 
 /** 造一个产物文件（父目录一并建）。 */
@@ -49,11 +49,11 @@ export async function artifactExists(url: string): Promise<boolean> {
 }
 
 /**
- * 清掉整个 `public/uemaster/` 树。
+ * 清掉整个 `data/uemaster/` 树。
  *
- * 只在测试里调用：`.gitignore` 已经把 `public/uemaster/` 划成运行期产物，测试造的
+ * 只在测试里调用：`.gitignore` 已经把 `data/uemaster/` 划成运行期产物，测试造的
  * 文件不该留在一个跑完的仓库里；更要紧的是**下一条用例要能确定地问「这个文件不在」**。
  */
 export async function cleanArtifacts(): Promise<void> {
-  await rm(path.join(PUBLIC_ROOT, 'uemaster'), { recursive: true, force: true });
+  await rm(path.join(DATA_ROOT, 'uemaster'), { recursive: true, force: true });
 }

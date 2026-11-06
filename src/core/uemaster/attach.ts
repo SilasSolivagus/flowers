@@ -1,6 +1,4 @@
 import { stat } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
@@ -9,9 +7,9 @@ import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { evaluateInTx } from '../requirements/evaluate.js';
 import type { Locked } from '../requirements/lock.js';
 import { isStage, type Stage } from './packs.js';
+import { ARTIFACT_PREFIX, BAD_URL, artifactFile } from './store.js';
 
 const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
-const BAD_URL = '产物链接必须是以 http:// 或 https:// 开头的完整链接，或以 / 开头的站内路径';
 const NO_REQUIREMENT = '需求不存在';
 
 /**
@@ -59,10 +57,15 @@ function decodedLayers(url: string): string {
 }
 
 /**
- * 产物链接的两种合法形状：完整 http(s) 链接，或以 `/` 开头的站内路径。
+ * 产物链接的两种合法形状：完整 http(s) 链接，或以 `/uemaster/` 开头的站内路径。
  *
- * 为什么站内路径是必需的形状：agent 把文件写在 `public/uemaster/...`，交回来的
- * 就是 `/uemaster/PAN-7/evaluate.html`；要求它拼一个绝对域名只会拼错。
+ * 为什么站内路径是必需的形状：文件写在项目里的 `data/uemaster/`，交回来的就是
+ * `/uemaster/PAN-7/evaluate.html`（由 `app/uemaster/[...path]/route.ts` 服务）；
+ * 要求它拼一个绝对域名只会拼错。
+ *
+ * 为什么站内路径的口径从「以 / 开头」收紧成「以 /uemaster/ 开头」：静态根已经不是
+ * 产物的家了，`/foo/bar.html` 这种名字在这个系统里不再指向任何可服务的文件——
+ * 收下它只会造出一条「attach 说成功、点开 404」的链接，而那种坏每一层都「没错」。
  *
  * 为什么连 `javascript:` / `data:` 一起收在 invalid_url 里：抽屉会把这个值直接
  * 渲染成 <a href>，那两种 scheme 一旦落库就是一个储存型脚本执行点。
@@ -77,46 +80,21 @@ function parseUrl(value: unknown): string {
   const decoded = decodedLayers(url);
   if (FORBIDDEN_IN_URL.test(decoded)) throw new AppError('invalid_url', BAD_URL);
   // 解码后以 `//` 开头：浏览器会当协议相对 URL，等于打开站外页面。
-  const siteRelative = url.startsWith('/') && !decoded.startsWith('//');
+  const siteRelative = url.startsWith(ARTIFACT_PREFIX) && !decoded.startsWith('//');
 
   if (!/^https?:\/\//i.test(url) && !siteRelative) throw new AppError('invalid_url', BAD_URL);
   return url;
 }
 
 /**
- * 仓库根：**从本模块自己的位置**往上数，不认 `process.cwd()`。
- *
- * 本文件住在 `<仓库>/src/core/uemaster/attach.ts`，所以 `../../../` 就是仓库根。
- * 为什么不能用 cwd：这个模块的第二个调用方是 MCP server（`mcp/server.ts`），而
- * MCP server 是被**别人的客户端**起的——Claude Code 在哪个目录里开会话，那个目录
- * 就是 cwd。按 cwd 找 `public/` 就等于「从 /tmp 启动的 server 永远报产物文件不存在」，
- * 而文件明明在仓库里；文档里那句 `bash -lc 'cd <仓库> && exec …'` 就是在给这个 bug
- * 打补丁，补丁的代价是「必须从仓库根启动」这条隐形约束。
- *
- * 为什么是「模块位置」而不是某个环境变量：交付链接是站内路径，它描述的本来就是
- * **这个仓库**的 public/，与调用方站在哪里无关。写成模块相对，MCP server、测试、
- * 页面三处自动一致，不需要谁记得配一个 `FLOWERS_ROOT`。
- */
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-
-/** 站内路径的解析基准。`public/` 是 Next 的静态根，也是产物唯一允许落地的位置。 */
-const PUBLIC_ROOT = path.join(REPO_ROOT, 'public');
-
-/**
  * 站内链接 → 磁盘路径。
  *
- * 站内路径的解析基准是**仓库根目录下的 public/**（`REPO_ROOT`，见上）：`/uemaster/PAN-7/evaluate.html`
- * 对应 `public/uemaster/PAN-7/evaluate.html`。`path.resolve` 会把 `..` 折叠掉，所以
- * 折完还要回头确认仍落在 public 里——否则 `/uemaster/../../.env` 能读到仓库任意文件。
+ * 解析基准不再是 `public/`，而是 `data/uemaster/`（见 `store.ts` 的文件头）：产物
+ * 从静态根搬出来的理由是安全——同源第三方 HTML 里的脚本会带着本站 cookie 执行。
+ * 围栏（`..`、绝对路径、落在根外）在 `artifactFile` 里，与路由那一层共用一份实现：
+ * 这个函数被两个入口调用（MCP 的 attach、抽屉的 attach），路径判据只能有一处。
  */
-function siteFile(url: string): string {
-  const abs = path.resolve(PUBLIC_ROOT, `.${url}`);
-  const rel = path.relative(PUBLIC_ROOT, abs);
-  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new AppError('invalid_url', BAD_URL);
-  }
-  return abs;
-}
+const siteFile = artifactFile;
 
 /**
  * 站内链接必须有文件在后面。
@@ -127,7 +105,7 @@ function siteFile(url: string): string {
  */
 async function assertSiteFileExists(url: string): Promise<void> {
   const file = siteFile(url);
-  const rel = `public${url}`;
+  const rel = `data${url}`;
   try {
     const info = await stat(file);
     if (info.isFile()) return;
@@ -144,7 +122,8 @@ async function assertSiteFileExists(url: string): Promise<void> {
  * 记一份 UEmaster 产物：校验 + 落库 + 事件（+ 收集里的评估材料顺带推进到待设计）。
  *
  * 只存链接、不存正文（spec §5）：正文是 HTML，进库就成了「谁负责渲染、谁负责清理」
- * 的新问题；而 agent 写文件的位置是确定的 `public/uemaster/`，链接已经够用。
+ * 的新问题；而文件的位置是确定的（`data/uemaster/`，经 `/uemaster/...` 这条路由
+ * 带着 sandbox CSP 出去），链接已经够用。
  *
  * 同一 (requirement, stage) 允许多行：重做一次就是一条新版本，读侧取最新。
  * 不 update 旧行——历史版本是「当初评审看的什么」的证据。

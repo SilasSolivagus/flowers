@@ -142,10 +142,10 @@ describe('packFor', () => {
     expect(p).toContain('stage=evaluate');
   });
 
-  it('交付指向本项目根目录下的 public/uemaster/PAN-n/<stage>.html，并要求调 uemaster_attach', () => {
+  it('交付指向本项目根目录下的 data/uemaster/PAN-n/<stage>.html，并要求调 uemaster_attach', () => {
     for (const stage of STAGES) {
       const p = packFor(stage, BASE);
-      expect(p).toContain(`public/uemaster/PAN-7/${stage}.html`);
+      expect(p).toContain(`data/uemaster/PAN-7/${stage}.html`);
       expect(p).toContain(`/uemaster/PAN-7/${stage}.html`);
       expect(p).toContain('uemaster_attach');
       expect(p).toContain('本项目根目录');
@@ -307,7 +307,7 @@ describe('attachArtifact', () => {
     expect(await artifactCount()).toBe(0);
   });
 
-  it('站内路径不能跳出 public/', async () => {
+  it('站内路径不能跳出产物根', async () => {
     const { id } = await newRequirement();
     const e = await caught(attachArtifact(db, '吕品', {
       requirementId: id, stage: 'evaluate', url: '/uemaster/../../package.json',
@@ -323,7 +323,7 @@ describe('attachArtifact', () => {
       requirementId: id, stage: 'evaluate', url,
     }));
     expect(e).toMatchObject({ code: 'artifact_missing' });
-    expect(e.message).toContain('public/uemaster/PAN-7/evaluate.html');
+    expect(e.message).toContain('data/uemaster/PAN-7/evaluate.html');
     expect(e.message).toContain('先');
     expect(await artifactCount()).toBe(0);
     expect((await eventTypes()).filter((t) => t === 'uemaster.attached')).toEqual([]);
@@ -346,7 +346,7 @@ describe('attachArtifact', () => {
    * 不从 `process.cwd()`。
    *
    * 真实场景：MCP server 是被 agent 客户端起的，cwd 通常是客户端自己的项目目录。
-   * 按 cwd 找 `public/`，就会把「文件明明在仓库里」报成 `artifact_missing`；文档里
+   * 按 cwd 找产物根，就会把「文件明明在仓库里」报成 `artifact_missing`；文档里
    * 那句 `bash -lc 'cd <仓库> && exec …'` 正是在给这个 bug 打补丁。这条用例把 cwd
    * 换到 /tmp 再 attach：解析基准对了才可能成功。用完必须把 cwd 放回去——它是整个
    * 进程的状态，漏掉会污染后面所有按相对路径读文件的用例。
@@ -357,7 +357,7 @@ describe('attachArtifact', () => {
     const before = process.cwd();
     try {
       process.chdir('/tmp');
-      // 助手与服务层同一条口径，所以这个文件确实落在仓库的 public/uemaster/ 下。
+      // 助手与服务层同一条口径，所以这个文件确实落在仓库的 data/uemaster/ 下。
       await writeArtifact(url);
       expect(await artifactExists(url)).toBe(true);
 
@@ -368,12 +368,12 @@ describe('attachArtifact', () => {
       expect(await artifactCount()).toBe(1);
 
       // 行为不变：同样的 cwd 下，文件真的不在时仍然是 artifact_missing，且报的是
-      // 站内路径（public/uemaster/...），而不是某个 /tmp 下的路径。
+      // 磁盘上的相对位置（data/uemaster/...），而不是某个 /tmp 下的路径。
       const e = await caught(attachArtifact(db, '吕品', {
         requirementId: id, stage: 'inspect', url: '/uemaster/PAN-7/inspect.html',
       }));
       expect(e).toMatchObject({ code: 'artifact_missing' });
-      expect(e.message).toContain('public/uemaster/PAN-7/inspect.html');
+      expect(e.message).toContain('data/uemaster/PAN-7/inspect.html');
       expect(await artifactCount()).toBe(1);
     } finally {
       process.chdir(before);

@@ -32,7 +32,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  // attach 现在会 stat 站内链接，这些用例在 public/uemaster/ 下造了真文件。
+  // attach 现在会 stat 站内链接，这些用例在 data/uemaster/ 下造了真文件。
   await cleanArtifacts();
   await pool.end();
 });

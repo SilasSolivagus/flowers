@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   // 不是删掉一项配置；这里要的是关掉，不是挪位置。
   devIndicators: false,
   experimental: {
+    // 抽屉的「交回材料」走 server action，表单里带一个文件。Next 默认的
+    // bodySizeLimit 是 1 MB，我们自己的上限是 5 MB（`store.ts`）——不抬这一格，
+    // 2 MB 的产物会在**到达**领域层之前就被 Next 拒掉，界面于是拿不到那句
+    // 「文件不能超过 5 MB」的判定，而是撞一个通用错误。多留 1 MB 余量给
+    // multipart 边界与其它字段，让「谁说了算」始终是领域层。
+    serverActions: { bodySizeLimit: '6mb' },
     // 领域层（src/core）用的是 NodeNext 风格的相对导入：`import ... from './errors.js'`。
     // 这是 Node 直接跑 .ts（tsx / vitest）时唯一正确的写法，也是 P1 全仓的统一风格。
     // Turbopack 不做 extensionAlias（Next 16 把它列在「Turbopack 不支持」里），

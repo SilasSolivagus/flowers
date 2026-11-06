@@ -79,14 +79,17 @@ Flowers 敢说「我们不调 LLM」的前提，也是下面那条限制的来�
 ```bash
 uemaster_plan   { requirementId, stage }         # ① 拿任务包（纯读，不改状态）
 # ② agent 照包干：装 flow-canvas / flow-walkthrough，跑 UEmaster，写单个自足 HTML 到
-#    public/uemaster/PAN-<n>/<stage>.html
+#    data/uemaster/PAN-<n>/<stage>.html
 uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<stage>.html 交回来
 ```
 
 `stage` 只有三个值：`evaluate` / `review` / `inspect`（评估 / 评审 / 走查）。交回之后抽屉
 「参考」段对应那一行立刻从「复制任务包」变成链接 + 日期，记录段多一条
-`uemaster.attached`。站内路径必须真有文件（`public/` 下），否则 `artifact_missing`——
-包自己写着该往哪写，写不对就是没干活。
+`uemaster.attached`。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing`——
+包自己写着该往哪写，写不对就是没干活。文件不在 `public/` 里：`/uemaster/...` 由动态路由
+`app/uemaster/[...path]/route.ts` 服务，每个响应带 `Content-Security-Policy: sandbox`
+——产物是同源的第三方 HTML，它的脚本不该带着本站 cookie 跑（代价：脚本不执行，
+点节点切页面的交互站内是死的）。
 
 ### 入口是 MCP server
 
@@ -101,7 +104,7 @@ codex mcp add flowers --env FLOWERS_MCP_ACTOR=codex -- npx tsx mcp/server.ts
 ```
 
 三个工具（`uemaster_plan` / `uemaster_attach` / `requirement_show`）的参数、失败文案、
-cwd 与 `public/` 的关系、`claude` / `codex` 两份完整配置：见 [`docs/mcp.md`](docs/mcp.md)。
+cwd 与产物根的关系、`claude` / `codex` 两份完整配置：见 [`docs/mcp.md`](docs/mcp.md)。
 想不接客户端先验一遍：
 
 ```bash

@@ -98,7 +98,7 @@ const SPEC: Record<Stage, Spec> = {
       '     不要照 PRD 修图，实现跟 PRD 不一样的照实画。',
       '  2. 与 PRD 版的差异清单：基线是本需求已交回的那一版评审材料——',
       '     stage=review 的最新产物，没有就退到 stage=evaluate 的最新产物，',
-      '     路径形如 public/uemaster/PAN-7/review.html，先确认这个文件在项目里存在再动手；',
+      '     路径形如 data/uemaster/PAN-7/review.html，先确认这个文件在项目里存在再动手；',
       '     然后同一条流程两边逐节点对比，每条标一个档位——',
       '     一致（两边都有且一样）、缺失（PRD 里有、实现里没有）、溢出（实现里有、PRD 里没写）。',
       '     每条都要带位置：PRD 侧写小节号或原文摘句，实现侧写文件路径或节点编号。',
@@ -180,7 +180,7 @@ export function packFor(stage: Stage, req: PackInput): string {
       + '它们是纯提示词 + 排版脚本，不需要模型 key。',
     '产出：',
     ...spec.output,
-    `交付：把文件写到本项目根目录下的 public/uemaster/${name}/${stage}.html，`
+    `交付：把文件写到本项目根目录下的 data/uemaster/${name}/${stage}.html，`
       + `然后调用 uemaster_attach，把站内路径 /uemaster/${name}/${stage}.html`
       + ` 和需求 ID ${id} 一起交回（工具收的就是以 / 开头的站内路径，或 http(s) 完整链接）。`
       + '文件必须是单个自足的 HTML：样式与脚本内联、不引 CDN、不引任何相对资源，双击就能在浏览器里打开。',
