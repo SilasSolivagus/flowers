@@ -33,6 +33,18 @@ import { GeneratorSelect } from '../components/GeneratorSelect';
  * 留着（撤掉模型接口后它们立刻是活的），标签只是说清它们治的是哪条路。
  */
 
+/**
+ * 生效的那一份是谁的（P2.12）：`平台统一模型` / `我的模型` / `环境变量`。
+ *
+ * 三个词各自指向一个能改的地方：平台那三格在 `/settings?tab=project`，自己那三格在
+ * `/settings?tab=me`，环境变量在这台机器的启动环境里。写同一句会让前两个分不清。
+ */
+function scopeLabel(scope: 'env' | 'member' | 'platform'): string {
+  if (scope === 'member') return '我的模型';
+  if (scope === 'env') return '环境变量';
+  return '平台统一模型';
+}
+
 export function GeneratorRow({ view }: { view: GeneratorView }) {
   const router = useRouter();
   const [advanced, setAdvanced] = useState(false);
@@ -147,7 +159,9 @@ export function GeneratorRow({ view }: { view: GeneratorView }) {
               标签是给右边那三个控件的——它们治的是另一条路，provider 在时仍然可改
               （撤掉模型接口之后它就立刻变成活的）。没有解释句，只有值与标签。 */}
           {view.provider !== null && (
-            <span className="gen-src">{`平台统一模型 · ${view.provider.model}`}</span>
+            // 「这一份是谁的」必须说清（P2.12）：配了自己 key 的人在这里看到的是自己的
+            // 模型名，若仍写「平台统一模型」，他会以为全组都在用他这把 key。
+            <span className="gen-src">{`${scopeLabel(view.provider.scope)} · ${view.provider.model}`}</span>
           )}
           {view.source === 'env' && <span className="pill no">环境变量</span>}
           {view.provider !== null && <span className="pill no">CLI</span>}

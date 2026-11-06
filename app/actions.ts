@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { db } from '../src/db/client';
 import { AppError } from '../src/core/errors';
 import type { DetailAction } from '../src/core/read/detail';
-import { currentMember } from '../src/core/read/member';
+import { currentMember, memberIdByName } from '../src/core/read/member';
 import { evaluate } from '../src/core/requirements/evaluate';
 import { submitReview } from '../src/core/requirements/submit-review';
 import { reviewPass, reviewReject } from '../src/core/requirements/review';
@@ -17,6 +17,10 @@ import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/s
 import { testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
 import { generatorCommand, saveGeneratorCommand, writeTest } from '../src/core/uemaster/settings';
 import { testLabel, type GeneratorTest } from '../src/core/uemaster/candidates';
+import {
+  configOf, memberProviderParts, saveMemberProviderSettings,
+} from '../src/core/uemaster/member-provider';
+import { probeProvider, resolveProviderConfig } from '../src/core/uemaster/provider';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -326,4 +330,114 @@ export async function applyGeneratorAction(formData: FormData): Promise<Generato
   revalidatePath('/settings');
   revalidatePath('/');
   return { ok: true, message: testLabel(test) };
+}
+
+// ─── P2.12：我的模型 key（成员作用域的三格） ────────────────────────────────
+
+/**
+ * 「我的」那一行的两个动作：保存，与就地测一次。
+ *
+ * 身份只有一条来源：`currentMember()`（cookie 里的名字），再换成 `members.id`——
+ * 键是 `member.<id>.provider.*`（见 member-provider.ts 的「三条硬规矩」）。这一层
+ * 不接任何「谁的 key」参数：能改的永远只有自己那三格，所以也不存在越权的写法。
+ *
+ * 两个动作都不碰 `src/core` 里的领域服务（这一层只写 `app_settings`），也不记 key：
+ * key 从 FormData 进来、进 `Authorization` 头、进库，别处没有它的名字。
+ */
+async function actingMemberId(): Promise<string> {
+  const actor = await currentMember();
+  const id = await memberIdByName(actor);
+  if (id === null) throw new AppError('member_unknown', `当前成员「${actor}」不在名册上`);
+  return id;
+}
+
+/**
+ * 保存自己那三格。
+ *
+ * **key 留空 = 不改**。这是这一格唯一与别处不同的口径，理由是界面：key 输入框
+ * 永远不预填（它不回显），所以「我只想改模型名」时那个框必然是空的——把空当成
+ * 「清掉这条 key」，等于每次改模型都顺手删掉自己的 key。要清掉整份配置就清
+ * 地址与模型（空串等于没设，三格不齐整层就作废，退回平台那一份）。
+ */
+export async function saveMemberKeyAction(formData: FormData): Promise<ActionResult> {
+  try {
+    const memberId = await actingMemberId();
+    const apiKey = field(formData, 'key');
+    await saveMemberProviderSettings(db, memberId, {
+      baseUrl: field(formData, 'baseUrl'),
+      model: field(formData, 'model'),
+      ...(apiKey.trim() === '' ? {} : { apiKey }),
+    });
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    revalidatePath('/settings');
+  }
+}
+
+export type MemberKeyTest = {
+  ok: boolean;
+  /** 那一行要显示的字：`通过 · 412ms · 21 tokens`，或服务端原文（已脱敏）。 */
+  label: string;
+  /** 这次通过是否同时把它存了下来（界面据此刷新、收起表单）。 */
+  saved: boolean;
+};
+
+/**
+ * 就地测一次，**测的是屏上这一份**：
+ * - 表单开着 → 测那三格里填的（key 空着就沿用已存的那把，改模型不必重打 key）；
+ * - 表单关着 → 测他自己存的那一份；
+ * - 他自己一格都没有 → 测平台那一份（那时这一行显示「平台统一模型 · x」，
+ *   「测试」问的就是那个 x 通不通）。
+ *
+ * **通过即存，失败什么都不改。** 这不是「测完再点保存」的两步，而是既有那条
+ * 「测试并使用」（`applyGeneratorAction`）的同一条规矩：失败的配置不该先在库里
+ * 生效、再去撞下一次生成。于是 owner 要的两个动作各自成立——填一个错的 key 按
+ * 「测试」，错误原文进那一行、库里那份配置原封不动（那一行不会变成「已配置」）；
+ * 填一个能用的按「测试」，通过、存下、刷新后那一行就是自己的模型。
+ *
+ * 15 秒超时（`PROBE_TIMEOUT_MS`）：10 秒会把冷的网关判成错，45 秒让人以为页面卡了。
+ * 失败**原文照登**，只有 `complete()` 已经做过的那一次脱敏（key → ***）。
+ */
+export async function testMemberKeyAction(formData: FormData): Promise<MemberKeyTest> {
+  const actor = await currentMember();
+  const memberId = await memberIdByName(actor);
+  if (memberId === null) return { ok: false, label: `当前成员「${actor}」不在名册上`, saved: false };
+
+  const typed = {
+    baseUrl: field(formData, 'baseUrl').trim(),
+    model: field(formData, 'model').trim(),
+    key: field(formData, 'key').trim(),
+  };
+  const fromForm = typed.baseUrl !== '' || typed.model !== '' || typed.key !== '';
+  const parts = await memberProviderParts(db, memberId);
+
+  // 表单里空着的那几格退回**已存**的那几格（而不是平台的）：一个人在补 key 的时候
+  // 不该被要求把地址与模型再抄一遍。
+  const cfg = fromForm
+    ? configOf({
+      baseUrl: typed.baseUrl || (parts.baseUrl ?? ''),
+      apiKey: typed.key || (parts.apiKey ?? ''),
+      model: typed.model || (parts.model ?? ''),
+    })
+    : await resolveProviderConfig(actor);
+
+  const probe = await probeProvider(cfg ?? { baseUrl: '', apiKey: '', model: '' });
+
+  if (!probe.ok) return { ok: false, label: probe.label, saved: false };
+  if (!fromForm || cfg === null) return { ok: true, label: probe.label, saved: false };
+
+  try {
+    await saveMemberProviderSettings(db, memberId, {
+      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model,
+    });
+  } catch (error) {
+    // 存不下去时**不要说「通过」**：那一行会显示通过，而库里其实没变。
+    if (error instanceof AppError) return { ok: false, label: error.message, saved: false };
+    throw error;
+  }
+  revalidatePath('/settings');
+  return { ok: true, label: probe.label, saved: true };
 }

@@ -1,6 +1,7 @@
 import { db } from '../src/db/client';
 import { getBoard } from '../src/core/read/board';
 import { getRequirementDetail } from '../src/core/read/detail';
+import { currentMember } from '../src/core/read/member';
 import { listReleases } from '../src/core/read/version';
 import { generatorView } from '../src/core/uemaster/settings';
 import { Board } from './components/Board';
@@ -29,11 +30,14 @@ export default async function BoardPage({
   // 抽屉里那三行「生成」要知道**现在会跑哪条命令**（P2.7）：一条都没有时按钮禁用，
   // 多条时按下先开选择器。这件事只跟开着的抽屉有关，所以抽屉没开就不读——看板本身
   // 不需要知道生成器的存在。
-  const [columns, detail, generator] = await Promise.all([
+  // `generator` 要问**当前成员**（P2.12）：他自己配了 key，抽屉里那三行「生成」的
+  // 结论就得按他那一份算，而不是按平台的算。与 `getBoard()` 内部取的是同一个 cookie。
+  const [columns, detail, actor] = await Promise.all([
     getBoard(),
     openId === null ? Promise.resolve(null) : getRequirementDetail(openId),
-    openId === null ? Promise.resolve(null) : generatorView(db),
+    currentMember(),
   ]);
+  const generator = openId === null ? null : await generatorView(db, actor);
 
   // 版本列表只给排期表单用：抽屉里没有「排期」这个动作时不查（版本页有自己的口径）。
   const releases = detail !== null && detail.actions.includes('schedule')

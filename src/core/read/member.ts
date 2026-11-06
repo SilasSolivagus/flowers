@@ -32,6 +32,23 @@ export async function listMembers(): Promise<Member[]> {
 }
 
 /**
+ * 名字 → id。找不到（cookie 里是个不在名册上的人）就是 null。
+ *
+ * 为什么身份层到处只有名字：P1 的 `actor` 是自由文本（spec §2：提出人是字段，不是
+ * 账号），cookie 里存的、`created_by` 写的都是名字。但**给成员存东西**的键不能用名字：
+ * 名字里可以有 `.`、空格、任意标点，而键的形状是 `member.<id>.provider.baseUrl`——
+ * 一个带点的名字会让这个键读起来有两种切法。所以落库一律用 `members.id`，
+ * 名字只在入口处查一次。
+ */
+export async function memberIdByName(name: string): Promise<string | null> {
+  const trimmed = name.trim();
+  if (trimmed === '') return null;
+  const res = await db.execute<{ id: string }>(sql`
+    select id from members where name = ${trimmed} order by id limit 1`);
+  return res.rows[0]?.id ?? null;
+}
+
+/**
  * cookie → 当前成员名。
  *
  * 客户端写的是 `encodeURIComponent(名字)`，所以要先解码；解不出来（人手改过的坏值）

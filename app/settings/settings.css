@@ -52,3 +52,15 @@
 .gen-detail{padding-top:0;padding-bottom:12px}
 .gen-msg{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-3);overflow-wrap:anywhere;white-space:pre-wrap}
 .gen-msg.bad{color:var(--c-negative)}
+
+/* 我的模型 key 那一格（P2.12）：表单开在这一行下面，三格各自一行。
+   三格用 label 包住（可点、可读），左列宽度按「接口地址」四个字定，右列吃掉剩下的。
+   仍然是标签 + 值，没有一句解释；按钮只有保存与取消，与行上那两个（测试 / 改）分开。 */
+/* `.sg .i` 是 flex（0,2,0），所以这一条要写到同样具体才盖得住：表单是**三行**，
+   不是一行——三格横着排会挤成一串（第一版就是这样：接口地址只露得出前 20 个字符）。 */
+.sg .i.mk-form{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px;padding-top:0;padding-bottom:12px}
+.mk-f{display:grid;grid-template-columns:64px minmax(0,1fr);align-items:center;gap:8px}
+.mk-f > span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+/* key 那一格用等宽字会让圆点看起来像代码；密码框统一用正文字体。 */
+.mk-f input[type="password"]{font:400 var(--t-body-s) var(--f-sans)}
+.mk-acts{display:flex;gap:8px;justify-content:flex-end}

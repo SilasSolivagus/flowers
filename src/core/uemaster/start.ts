@@ -68,13 +68,18 @@ const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
  *
  * 为什么不问「通不通」：探测一次要发一次真实请求、烧一次 token。配置写错的代价由
  * 第一次生成来暴露，那时错误原文会原样进 `uemaster_jobs.error`——比在按钮上先卡 30 秒好。
+ *
+ * P2.12：`actor` 是**这次生成的归属人**。成员可以有自己的 key（`member.<id>.provider.*`），
+ * 所以「走 provider 还是 CLI」因人而异：A 配了自己的 key、B 没配，同一条需求在 A 那里
+ * 走 provider、在 B 那里走 CLI。这里必须问同一个人——与 `created_by` 写的那一个字符串
+ * 同源，否则「谁按的按钮」与「用的是谁的 key」会是两个人。
  */
 export type Strategy =
   | { kind: 'provider'; config: ProviderConfig }
   | { kind: 'cli' };
 
-export async function resolveStrategy(): Promise<Strategy> {
-  const config = await resolveProviderConfig();
+export async function resolveStrategy(actor?: string): Promise<Strategy> {
+  const config = await resolveProviderConfig(actor);
   return config === null ? { kind: 'cli' } : { kind: 'provider', config };
 }
 
@@ -172,7 +177,7 @@ export async function startGeneration(
     //
     // `choose` 与 `none` 都在这里拒绝，作业一行都不落——界面上它们本来就不该走到
     // 这一步（多条时按钮先开选择器，零条时按钮直接禁用），这里是绕过界面的兜底。
-    const strategy = await resolveStrategy();
+    const strategy = await resolveStrategy(actor);
     if (strategy.kind === 'cli') {
       const resolution = await resolveGenerator(await generatorCommand(tx));
       if (resolution.kind === 'none') {
@@ -308,11 +313,18 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     // 这一段没有「文件有没有变」的检查：`composeEvaluation` 的产物是它**刚刚**
     // 写出来的（写文件在 attach 之前），而且图已经过了引擎。作业的形状不变：
     // 成功 done + artifact_id，失败 failed + 那句中文。
-    const strategy = await resolveStrategy();
+    //
+    // P2.12：配置要按**同一个人**再解析一次。worker 是另一个进程，不能信请求那一刻的
+    // 结论（那个人可能刚在设置页里换了自己的 key）；而 compose 默认的 `resolveConfig`
+    // 不带成员，会拿到平台那一份——同一个作业就会出现「路由按 A 的 key 判定、实际用
+    // 平台的 key 发请求」这种两套配置。所以这里把 `actor` 显式传进去。
+    const strategy = await resolveStrategy(actor);
     if (strategy.kind === 'provider') {
       const composed = await composeEvaluation(db, actor, {
         requirementId: job.requirement_id,
         stage: job.stage,
+      }, {
+        resolveConfig: () => resolveProviderConfig(actor),
       });
       await doneJob(db, jobId, composed.artifactId);
       return;

@@ -4,9 +4,14 @@ import { db } from '../../src/db/client';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
-import type { GeneratorView } from '../../src/core/uemaster/candidates';
+import type { GeneratorView, MemberKeyView } from '../../src/core/uemaster/candidates';
+import {
+  memberKeyView, memberProviderParts, type MemberProviderParts,
+} from '../../src/core/uemaster/member-provider';
+import { resolveProvider } from '../../src/core/uemaster/provider';
 import { generatorView } from '../../src/core/uemaster/settings';
 import { GeneratorRow } from './GeneratorRow';
+import { MemberKeyRow } from './MemberKeyRow';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
 
@@ -52,6 +57,9 @@ const TABS: ReadonlyArray<{ id: TabId; href: string; label: string }> = [
 const WORKFLOW: ReadonlyArray<{ state: State; label: string }> =
   BOARD_STATES.map((state) => ({ state, label: STATE_LABEL[state] }));
 
+/** 名册里没有这个人时，他那三行的「原值」：全空（是「没填过」，不是错误）。 */
+const EMPTY_PARTS: MemberProviderParts = { baseUrl: null, apiKey: null, model: null };
+
 export default async function SettingsPage({
   searchParams,
 }: {
@@ -61,13 +69,23 @@ export default async function SettingsPage({
   // 没带参数、带了个手改出来的值，都落回「我的」：一个坏链接不该让设置页白屏。
   const active: TabId = tab === 'project' ? 'project' : 'me';
 
-  const [members, actor, generator] = await Promise.all([
-    listMembers(),
-    currentMember(),
-    // 「生成器」这一行在「项目」栏里，但这一页只有两个 server component 分支：
-    // 顺手一起读，省得为一行再开一次请求。`app_settings` 是主键读，探测有进程缓存。
-    generatorView(db),
+  const [members, actor] = await Promise.all([listMembers(), currentMember()]);
+
+  // 名册里这个人（cookie 里的名字 → 那一行）。找不到就是 null：那时「我的模型 key」
+  // 落「未配置」，也存不进去（`saveMemberKeyAction` 会说「不在名册上」）。
+  const self = members.find((member) => member.name === actor) ?? null;
+
+  // 「生成器」这一行在「项目」栏里，但这一页只有两个 server component 分支：
+  // 顺手一起读，省得为一行再开一次请求。`app_settings` 是主键读，探测有进程缓存。
+  //
+  // P2.12：两者都问**当前成员**——他配了自己的 key，模型接口这条路就是他的那一份；
+  // 「我的模型 key」那一行还要他自己那三行的原值（表单预填，三格不齐也要）。
+  const [generator, parts, resolved] = await Promise.all([
+    generatorView(db, actor),
+    self === null ? Promise.resolve(EMPTY_PARTS) : memberProviderParts(db, self.id),
+    resolveProvider(actor),
   ]);
+  const memberKey = memberKeyView(parts, resolved);
 
   return (
     <main className="view">
@@ -85,7 +103,7 @@ export default async function SettingsPage({
           ))}
         </nav>
         {active === 'me'
-          ? <MePanel actor={actor} members={members} />
+          ? <MePanel actor={actor} members={members} memberKey={memberKey} />
           : <ProjectPanel members={members} generator={generator} />}
       </div>
     </main>
@@ -107,23 +125,32 @@ export default async function SettingsPage({
  * 通知偏好属于 P3：库里没有通知相关的表，所以这一页没有那一行——一行点了不生效的
  * 「站内 / 企微」不是只读展示，是假数据。
  */
-function MePanel({ actor, members }: { actor: string; members: Member[] }) {
+function MePanel({
+  actor, members, memberKey,
+}: { actor: string; members: Member[]; memberKey: MemberKeyView }) {
   // 名册里找不到这个人（cookie 里是个离职的人、或者库里还没 seed）：角色行如实说
   // 「未在名册」，不猜、也不给他安一个默认角色。
   const self = members.find((member) => member.name === actor) ?? null;
 
   return (
-    <section className="sg">
-      <div className="h">身份</div>
-      <div className="i">
-        <div className="l"><b>当前成员</b></div>
-        <div className="v">{actor}</div>
-      </div>
-      <div className="i">
-        <div className="l"><b>角色</b></div>
-        <div className="v">{self === null ? '未在名册' : roleLabel(self.role)}</div>
-      </div>
-    </section>
+    <>
+      {/* 模型 key 在身份上面：一个是「我是谁」，一个是「我拿什么干活」，而后者是这一页
+          唯一可写的东西。P2.12 的 owner 原话是「配 key 的时候给测试一下」——所以这一行
+          自带测试，测的就是屏上这一份。 */}
+      <MemberKeyRow view={memberKey} />
+
+      <section className="sg">
+        <div className="h">身份</div>
+        <div className="i">
+          <div className="l"><b>当前成员</b></div>
+          <div className="v">{actor}</div>
+        </div>
+        <div className="i">
+          <div className="l"><b>角色</b></div>
+          <div className="v">{self === null ? '未在名册' : roleLabel(self.role)}</div>
+        </div>
+      </section>
+    </>
   );
 }
 

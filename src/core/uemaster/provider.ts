@@ -1,4 +1,6 @@
 import { db as appDb } from '../../db/client.js';
+import { memberIdByName } from '../read/member.js';
+import { memberProviderSettings } from './member-provider.js';
 import { providerSettings } from './settings.js';
 
 /**
@@ -312,21 +314,113 @@ function normalizeConfig(
   return resolved;
 }
 
-/**
- * 解析顺序：**env → `app_settings` → null**。
- *
- * 两层都要求三格齐全，缺一格就整层作废、往下一层走——**不拼**（env 的地址 + 库里的
- * key 这种混合配置，出问题时没人说得出是哪一层错了）。两层都没有就 null：那是
- * 「还没配」，不是「配错了」，调用方据此提示去设置里填 key，而不是报网关错误。
- *
- * 库读失败（连不上）不吞：那是基础设施坏了，把它说成「未配置」会让人去查设置页。
- */
-export async function resolveProviderConfig(): Promise<ProviderConfig | null> {
-  const fromEnv = normalizeConfig(
+/** 这一份配置是从哪一层来的。界面要按它说「平台统一模型」还是「我的」。 */
+export type ProviderScope = 'env' | 'member' | 'platform';
+
+export type ProviderResolution = { config: ProviderConfig; scope: ProviderScope };
+
+/** 环境变量那一层；三格不齐就是 null（不与其它层拼成半份）。 */
+export function providerConfigFromEnv(): ProviderConfig | null {
+  return normalizeConfig(
     process.env[ENV_BASE_URL],
     process.env[ENV_API_KEY],
     process.env[ENV_MODEL],
   );
-  if (fromEnv !== null) return fromEnv;
-  return providerSettings(appDb);
+}
+
+/**
+ * 解析顺序：**env → 当前成员自己的三格 → `app_settings` 的平台三格 → null**。
+ *
+ * 每一层都要求三格齐全，缺一格就整层作废、往下一层走——**不拼**。P2.12 之后这条
+ * 规矩更重要了：成员只填了模型名、key 留空，如果与平台的地址 / key 拼起来，
+ * 发出去的请求会带着**别人的 key**去一个他自己没填过的地址。宁可整层作废，
+ * 让它如实退回「平台统一模型」。
+ *
+ * `actor` 是**本次动作的归属人**（`created_by` 写的就是这个字符串），不是全局默认值：
+ * 同一个部署里两个人各自配了自己的 key，谁按的按钮就用谁的。不传 = 没有成员这一层
+ * （脚本、worker 的兜底、以及「平台配置」那类问题），直接看 env 与平台三格。
+ *
+ * 成员名不在名册上（cookie 里是个离职的人）时**静默跳过这一层**：没有 id 就没有
+ * 属于他的那三行，退到平台配置是唯一诚实的答案。
+ *
+ * 库读失败（连不上）不吞：那是基础设施坏了，把它说成「未配置」会让人去查设置页。
+ */
+export async function resolveProvider(actor?: string): Promise<ProviderResolution | null> {
+  const fromEnv = providerConfigFromEnv();
+  if (fromEnv !== null) return { config: fromEnv, scope: 'env' };
+
+  if (actor !== undefined) {
+    const memberId = await memberIdByName(actor);
+    if (memberId !== null) {
+      const own = await memberProviderSettings(appDb, memberId);
+      if (own !== null) return { config: own, scope: 'member' };
+    }
+  }
+
+  const platform = await providerSettings(appDb);
+  return platform === null ? null : { config: platform, scope: 'platform' };
+}
+
+/** 只要配置的那一半（绝大多数调用方只关心「有没有一份能发请求的三格」）。 */
+export async function resolveProviderConfig(actor?: string): Promise<ProviderConfig | null> {
+  return (await resolveProvider(actor))?.config ?? null;
+}
+
+// ─── 就地小测：设置页那一行的「测试」 ────────────────────────────────────────
+
+/**
+ * 小测的超时：15 秒。
+ *
+ * P2.12 试过 10 秒——真实的网关（尤其带重试/排队的那种）在冷启动时常常 10 秒
+ * 回不来第一句，于是「key 明明是好的」也会被判成超时，用户回去改一个没坏的 key。
+ * 45 秒又不行：它是设置页一行上的按钮，人盯着那一行等三刻钟，只会以为界面卡住。
+ * 15 秒覆盖了绝大多数首字节，也短到可以坐在那儿等。
+ */
+export const PROBE_TIMEOUT_MS = 15_000;
+
+/** 小测问的话与预算：只要一个 token 级别的回答，不要一份材料。 */
+const PROBE_PROMPT = '只回四个字：接口可用';
+const PROBE_MAX_TOKENS = 16;
+
+export type ProbeResult = {
+  ok: boolean;
+  /**
+   * 那一行要显示的字：`通过 · 412ms · 21 tokens`，或者**服务端的原文**
+   * （`分组 auto 下模型 x 的可用渠道不存在` / `Incorrect API key provided: ***`）。
+   * 失败时不做任何改写——那句话就是下一步。
+   */
+  label: string;
+  /** 通过时是 null；失败时与 `label` 同值，给需要分支的调用方用。 */
+  error: string | null;
+  ms: number;
+  /** 服务端给了 usage 才有：prompt + completion。 */
+  tokens: number | null;
+};
+
+/**
+ * 对着**一份已经拼好的配置**发一次极小的补全，把结果拼成那一行字。
+ *
+ * 不抛：`complete()` 自己就不抛（配置缺项、超时、4xx 都是 `{ok:false}`），这里只是
+ * 加上耗时与 token 数。所以设置页的「测试」按钮没有失败态以外的分支，也不会因为
+ * 一次网络抖动把整页打崩。
+ *
+ * 为什么不用 `maxTokens: 1`：有的网关在 `max_tokens` 太小时直接 400
+ * （`max_tokens must be greater than 0` 之外还有自家的下限）。16 够便宜，也不会被拒。
+ */
+export async function probeProvider(
+  cfg: ProviderConfig,
+  opts: { timeoutMs?: number } = {},
+): Promise<ProbeResult> {
+  const started = Date.now();
+  const result = await complete(cfg, PROBE_PROMPT, {
+    maxTokens: PROBE_MAX_TOKENS,
+    timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS,
+  });
+  const ms = Date.now() - started;
+  if (!result.ok) return { ok: false, label: result.error, error: result.error, ms, tokens: null };
+
+  const usage = result.usage;
+  if (usage === undefined) return { ok: true, label: `通过 · ${ms}ms`, error: null, ms, tokens: null };
+  const tokens = (usage.prompt ?? 0) + (usage.completion ?? 0);
+  return { ok: true, label: `通过 · ${ms}ms · ${tokens} tokens`, error: null, ms, tokens };
 }

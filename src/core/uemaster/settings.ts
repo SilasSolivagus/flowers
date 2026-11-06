@@ -8,7 +8,7 @@ import {
 } from './candidates.js';
 import { detect } from './detect.js';
 import { resolveGenerator } from './generator.js';
-import { resolveProviderConfig } from './provider.js';
+import { resolveProvider } from './provider.js';
 
 /**
  * 生成器设置：`app_settings` 里那两个键的**唯一**读写口。
@@ -34,15 +34,25 @@ export const TEST_KEY = 'generator.test';
 /** 命令的长度上限：`app_settings.value` 是文本，但一行命令不该长到失控。 */
 const MAX_COMMAND = 600;
 
-type Queryable = Pick<Db, 'execute'>;
+/** 只需要 `execute` 的库句柄：设置读写口只碰一条 SQL，不必收整个 Db。 */
+export type Queryable = Pick<Db, 'execute'>;
 
-async function readKey(db: Queryable, key: string): Promise<string | null> {
+/**
+ * 读一行的原值（没有这一行就是 null）。
+ *
+ * 导出而不是留在本文件里：P2.12 的「成员自己的三格」住在 `member-provider.ts`，
+ * 它也要读写 `app_settings`。开一个**原语**给别人用，比让第二个文件自己写一遍
+ * `insert ... on conflict` 好——那个写法里有一处口径（`updated_at`）会被抄漏。
+ * 键名的语义仍归各自的模块，这里只认「一行键值」。
+ */
+export async function readSetting(db: Queryable, key: string): Promise<string | null> {
   const res = await db.execute<{ value: string }>(sql`
     select value from app_settings where key = ${key}`);
   return res.rows[0]?.value ?? null;
 }
 
-async function writeKey(db: Queryable, key: string, value: string): Promise<void> {
+/** 写一行的原值（有就覆盖，没有就建）。空串也照写——「空串等于没设」由读的一方决定。 */
+export async function writeSetting(db: Queryable, key: string, value: string): Promise<void> {
   await db.execute(sql`
     insert into app_settings (key, value, updated_at)
     values (${key}, ${value}, now())
@@ -51,7 +61,7 @@ async function writeKey(db: Queryable, key: string, value: string): Promise<void
 
 /** 库里存着的生成器命令；没设 / 空串都返回 null。 */
 export async function generatorCommand(db: Queryable): Promise<string | null> {
-  const value = (await readKey(db, GENERATOR_KEY))?.trim() ?? '';
+  const value = (await readSetting(db, GENERATOR_KEY))?.trim() ?? '';
   return value === '' ? null : value;
 }
 
@@ -69,7 +79,7 @@ export async function saveGeneratorCommand(db: Queryable, raw: unknown): Promise
   if (value !== '' && !commandReady(value)) {
     throw new AppError('invalid_command', '生成器命令里还有没填的占位符');
   }
-  await writeKey(db, GENERATOR_KEY, value);
+  await writeSetting(db, GENERATOR_KEY, value);
   // 换了一条命令，上一次的测试结果立刻作废：它测的是另一条。
   await db.execute(sql`delete from app_settings where key = ${TEST_KEY}`);
   return value;
@@ -77,7 +87,7 @@ export async function saveGeneratorCommand(db: Queryable, raw: unknown): Promise
 
 /** 上一次的就地测试结果；没测过 / JSON 坏了都返回 null（坏数据不该让设置页白屏）。 */
 export async function readTest(db: Queryable): Promise<GeneratorTest | null> {
-  const raw = await readKey(db, TEST_KEY);
+  const raw = await readSetting(db, TEST_KEY);
   if (raw === null) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -101,7 +111,7 @@ export async function readTest(db: Queryable): Promise<GeneratorTest | null> {
 
 /** 记一次测试结果（成功与失败都记）。 */
 export async function writeTest(db: Queryable, test: GeneratorTest): Promise<void> {
-  await writeKey(db, TEST_KEY, JSON.stringify(test));
+  await writeSetting(db, TEST_KEY, JSON.stringify(test));
 }
 
 /**
@@ -126,16 +136,24 @@ export async function writeTest(db: Queryable, test: GeneratorTest): Promise<voi
  * 还会把 worker 那一整套（compose / attach / packs / spawn）拖进设置页的模块图。判定本身
  * 只有一句（`config === null` 就是 CLI），两条写法同源，语义不会分叉。
  *
+/**
  * 与 `provider.ts` 之间确实多了一条边（它 import 本文件的 `providerSettings`），是一个
  * 只在函数体里互相引用的环：两边的模块顶层都不调用对方，加载顺序因此无关紧要。
+ *
+ * P2.12：`actor` 是**本次动作的归属人**。模型接口从「一个部署一份」变成了「每个人
+ * 可以有自己的那一份」，所以「现在会跑什么」不再是全局事实——同一个人按下生成，
+ * 用的是他自己那三格；如果这里仍按平台算，界面就会告诉他一个不会被执行的东西。
+ * 不传 `actor` = 只看平台（脚本、旧用例、与「项目」栏那半页的口径）。
  */
-export async function generatorView(db: Queryable): Promise<GeneratorView> {
+export async function generatorView(db: Queryable, actor?: string): Promise<GeneratorView> {
   const [saved, test] = await Promise.all([generatorCommand(db), readTest(db)]);
   const resolution = await resolveGenerator(saved);
   const detected = await detect();
-  // 只取能露的两格：`apiKey` 在 `resolveProviderConfig()` 的返回值里，但绝不进视图。
-  const config = await resolveProviderConfig();
-  const provider = config === null ? null : { model: config.model, baseUrl: config.baseUrl };
+  // 只取能露的三格：`apiKey` 在解析结果里，但绝不进视图。
+  const resolved = await resolveProvider(actor);
+  const provider = resolved === null
+    ? null
+    : { model: resolved.config.model, baseUrl: resolved.config.baseUrl, scope: resolved.scope };
 
   const candidates: CandidateView[] = detected.map((item) => viewOf(item.candidate));
   const known: CandidateView[] = CANDIDATES.map(viewOf);
@@ -184,7 +202,7 @@ const MAX_API_KEY = 400;
 const MAX_MODEL = 200;
 
 /** 单格：去空白；空串与没设同义（与 `generator.command` 一个口径）。 */
-function cell(value: string | undefined | null): string | null {
+export function settingCell(value: string | undefined | null): string | null {
   const text = (value ?? '').trim();
   return text === '' ? null : text;
 }
@@ -197,11 +215,11 @@ function cell(value: string | undefined | null): string | null {
  */
 export async function providerSettings(db: Queryable): Promise<ProviderConfig | null> {
   const [baseUrl, apiKey, model] = await Promise.all([
-    readKey(db, PROVIDER_BASE_URL_KEY),
-    readKey(db, PROVIDER_API_KEY_KEY),
-    readKey(db, PROVIDER_MODEL_KEY),
+    readSetting(db, PROVIDER_BASE_URL_KEY),
+    readSetting(db, PROVIDER_API_KEY_KEY),
+    readSetting(db, PROVIDER_MODEL_KEY),
   ]);
-  const resolved = { baseUrl: cell(baseUrl), apiKey: cell(apiKey), model: cell(model) };
+  const resolved = { baseUrl: settingCell(baseUrl), apiKey: settingCell(apiKey), model: settingCell(model) };
   if (resolved.baseUrl === null || resolved.apiKey === null || resolved.model === null) return null;
   return { baseUrl: resolved.baseUrl, apiKey: resolved.apiKey, model: resolved.model };
 }
@@ -226,6 +244,6 @@ export async function saveProviderSettings(
     if (raw === undefined) continue;
     const value = raw.trim();
     if (value.length > max) throw new AppError('invalid_provider', `${label}不能超过 ${max} 个字符`);
-    await writeKey(db, key, value);
+    await writeSetting(db, key, value);
   }
 }

@@ -310,12 +310,21 @@ export function testLabel(test: GeneratorTest): string {
 }
 
 /**
- * 配好的模型接口里**能露给界面的两格**。
+ * 配好的模型接口里**能露给界面的三格**。
  *
- * 只有模型名与接口地址：`apiKey` 不在这张类型上，因此它没有一条路能进响应体、
- * 事件或界面（`provider.ts` 的脱敏只管错误文本，这一条管的是视图本身）。
+ * 模型名、接口地址、以及「这是谁的那一份」：`apiKey` 不在这张类型上，因此它没有
+ * 一条路能进响应体、事件或界面（`provider.ts` 的脱敏只管错误文本，这一条管的是
+ * 视图本身）。
+ *
+ * P2.12 起 `scope` 是必须的：同一个部署里，吕品看到的是「平台统一模型」，
+ * 而配了自己 key 的人看到的是他自己的模型名——只写模型名的话，后者会被这句
+ * 前缀骗到（他会以为全组都在用他这把 key）。
  */
-export type ProviderView = { model: string; baseUrl: string };
+export type ProviderView = {
+  model: string;
+  baseUrl: string;
+  scope: 'env' | 'member' | 'platform';
+};
 
 /**
  * 界面需要的全部生成器事实：现在会跑什么、从哪来的、有哪些可选、上次测成什么样。
@@ -354,3 +363,60 @@ export type GeneratorView = {
   savedId: CandidateId | null;
   test: GeneratorTest | null;
 };
+
+// ─── P2.12：我的模型 key 那一行 ──────────────────────────────────────────────
+
+/**
+ * key 的末 4 位。
+ *
+ * 为什么允许露 4 位：一个人可能配过两把 key（换过网关），而界面上一行「已配置」
+ * 两把 key 长得一模一样；末 4 位足够他自己认出来「这是哪一把」，又不足以拿去用。
+ * 太短的 key（不足 8 位）一个字符都不露——4 位占它一半，那已经不算「提示」了。
+ */
+export function keyTail(apiKey: string | null): string | null {
+  const value = apiKey?.trim() ?? '';
+  if (value.length < 8) return null;
+  return value.slice(-4);
+}
+
+/**
+ * 「我的模型 key」那一行需要的全部事实。
+ *
+ * **`apiKey` 不在这张类型上**，所以它没有任何一条路能进响应体、进页面、进事件流。
+ * 这是「不泄露」的第一道闸；`provider.ts` 的脱敏管的是错误文本，是第二道。
+ *
+ * 住在 `candidates.ts` 而不是存储层（`member-provider.ts`）：客户端要读这个类型与
+ * 下面那句文案，而存储层 import 了库。视图类型不能顺手把 pg 拖进浏览器包里。
+ */
+export type MemberKeyView = {
+  /**
+   * 现在生效的是哪一层：`member` = 他自己那三格；`platform` = 平台统一模型；
+   * `env` = 部署的环境变量；`null` = 都没有（那一行显示「未配置」）。
+   */
+  scope: 'member' | 'platform' | 'env' | null;
+  /** 会生效的模型名（`scope` 为 null 时是 null）。 */
+  model: string | null;
+  /** 他自己存过的接口地址——只用来预填表单，不是秘密。 */
+  baseUrl: string | null;
+  /** 他自己存过的模型名——表单预填用（与 `model` 不同：后者是「生效的」）。 */
+  ownModel: string | null;
+  /** 他自己那把 key 的末 4 位；没有 key（或 key 太短）就是 null。 */
+  keyTail: string | null;
+};
+
+/**
+ * 那一行左边要写的字。三条，各自说一件不同的事：
+ * - `未配置`：这个部署和他自己都没有一份能用的三格——按「生成」会退回 CLI 那条路；
+ * - `平台统一模型 · <模型>`：他自己没配，用的是平台那一份（不是他的 key）；
+ * - `<模型>`：这就是他自己的 key，模型名本身就是全部信息，再加前缀反而啰嗦；
+ * - `环境变量 · <模型>`：部署级覆盖（CI / 临时换接口），成员那三格不会生效。
+ *
+ * 拼在这里而不是组件里：这是「这一行说什么」的判据，与 `testLabel` 同一个位置。
+ */
+export function memberKeyText(view: MemberKeyView): string {
+  if (view.scope === null) return '未配置';
+  const model = view.model ?? '';
+  if (view.scope === 'member') return model;
+  if (view.scope === 'env') return `环境变量 · ${model}`;
+  return `平台统一模型 · ${model}`;
+}
