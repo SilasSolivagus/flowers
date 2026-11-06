@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { sql } from 'drizzle-orm';
-import { coerceAnswer, normalizeFrame, normalizeKind } from './shape.js';
+import { answerTruncated, coerceAnswer, noJsonReason, normalizeFrame, normalizeKind } from './shape.js';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
@@ -72,7 +72,7 @@ export const MAX_PAGES_ATTEMPTS = 2;
 export const CALL_TIMEOUT_MS = 90_000;
 
 /** 一段 mermaid 用不了多少 token；给多了只会让模型开始写解释。 */
-const FLOW_MAX_TOKENS = 4_000;         // 推理模型的思考也占这个预算
+const FLOW_MAX_TOKENS = 12_000;        // 实测 36% 的格被思考吃光：4k 对推理模型不够
 
 /**
  * 页面片段的预算：N 屏 HTML + 标注。
@@ -458,12 +458,14 @@ export function readFragments(
   text: string,
   ids: string[],
 ): { ok: true; doc: FragmentDoc } | { ok: false; why: string } {
+  // 截断要在解析之前认：截断的 JSON 会让 extractJson 退到内层对象，报成「缺字段」。
+  if (answerTruncated(text)) return { ok: false, why: noJsonReason(text) };
   const raw = extractJson<unknown>(text);
-  if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
+  if (raw === null) return { ok: false, why: noJsonReason(text) };
 
   // 与走查共用同一层形状容错：anno 少一层数组、frame 写成中文、kind 写成"判断"、
   // 顶层写成数组——这些早前只有走查那条路在收，评估材料这条一直裸奔。
-  const parsed = FragmentsSchema.safeParse(coerceAnswer(raw));
+  const parsed = FragmentsSchema.safeParse(coerceAnswer(raw, [], ids));
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue === undefined ? '结构不对' : `${issue.path.join('.') || '(根)'}：${issue.message}`;
@@ -659,7 +661,40 @@ function decodeLabel(text: string): string {
  * 文案里可能出现的 `<br>` 折行在这里压成空格：它在 SVG 里是换行，在 HTML 里是
  * 一行字，压平之后两处读起来是同一句话。
  */
+/**
+ * 把一行里串起来的链拆成两两一条边。
+ *
+ * 为什么必须有：模型很爱写 `A --> B --> C`（132 次调用里出现 2 格），mermaid 本身
+ * 允许，但**排版引擎只认一行一条边**——直接喂进去，整张图被拒，一次调用白花。
+ * 这是**等价改写**，不改语义：链 a→b→c 就是两条边。
+ * 边标签跟着它所在的那一段走：`A -->|是| B -->|否| C` = A→B 是、B→C 否。
+ */
+export function normalizeMermaid(mermaid: string): string {
+  const out: string[] = [];
+  for (const raw of mermaid.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || !line.includes('-->')) { out.push(raw); continue; }
+    const parts = line.split('-->');
+    if (parts.length <= 2) { out.push(raw); continue; }
+    const strip = (part: string): { label: string; body: string } => {
+      const t = part.trim();
+      const m = /^(\|[^|]*\|)\s*(.*)$/.exec(t);
+      return m === null ? { label: '', body: t } : { label: m[1]!, body: m[2]!.trim() };
+    };
+    const parts2 = parts.map(strip);
+    for (let i = 0; i < parts2.length - 1; i++) {
+      const left = parts2[i]!.body;
+      const next = parts2[i + 1]!;
+      // 标签属于"从左边指向右边"的那条边，所以取右段的标签前缀。
+      const label = next.label === '' ? '' : next.label;
+      out.push(`${left} -->${label === '' ? '' : label} ${next.body}`);
+    }
+  }
+  return out.join('\n');
+}
+
 export function parseFlow(mermaid: string): FlowShape {
+  mermaid = normalizeMermaid(mermaid);
   const byId = new Map<string, FlowNode>();
   const order: string[] = [];
 

@@ -30,9 +30,15 @@ export type Verdict = 'implemented' | 'missing' | 'extra' | 'differs';
 const VERDICT_ALIASES: Record<string, Verdict> = {
   implemented: 'implemented', missing: 'missing', extra: 'extra', differs: 'differs',
   一致: 'implemented', 缺失: 'missing', 多余: 'extra', 不一致: 'differs',
+  // 实测：模型发明了第五个取值 `partial/部分实现`。语义上就是「不一致」，
+  // 收进来而不是退回——它不是判断错，只是枚举里多了一个同义词。
+  partial: 'differs', 部分实现: 'differs', 部分一致: 'differs',
+  inconsistent: 'differs', 不在范围: 'extra', 多出: 'extra', 未实现: 'missing',
 };
 
 export function normalizeVerdict(value: unknown): unknown {
+  // 实测出现过 `["inconsistent/不一致"]`：只包了一层数组，取第一个再走同一套判定。
+  if (Array.isArray(value) && value.length > 0) return normalizeVerdict(value[0]);
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
   const direct = VERDICT_ALIASES[trimmed] ?? VERDICT_ALIASES[trimmed.toLowerCase()];
@@ -106,6 +112,18 @@ const REPO_PREFIX = /^([A-Za-z0-9_.-]+):(.+)$/;
  * 第二次实测又换了写法：`{file:"123pan-pc:src/x.ts", note:"…"}`。所以这里不去猜
  * 字段名，而是看**值**——哪个字符串里带 `仓库id:路径`，就用哪一个。
  */
+/**
+ * 一条字符串里其实写了**多份**证据。
+ *
+ * 实测（132 次调用里 30 条）：模型把三个证据拼成了一段——
+ * `"123pan-pc:src/a.ts、123pan-uni-app:src/b.vue、123pan-pc:src/c.ts"`。
+ * 早前的容错只认第一个，于是把**真实存在**的路径报成「不存在」——容错反而造了假。
+ * 这里按中英文顿号/逗号/分号/换行切开，每一段各自扶正。
+ */
+function splitEvidenceString(text: string): string[] {
+  return text.split(/[、，,;；\n]+/).map((part) => part.trim()).filter((part) => part !== '');
+}
+
 export function coerceEvidence(item: unknown, repoIds: string[]): unknown {
   if (typeof item === 'object' && item !== null) {
     const o = item as Record<string, unknown>;
@@ -172,11 +190,21 @@ function coerceFindings(raw: unknown, repoIds: string[]): unknown {
       // 注意：这里**不能提前 return**——早前那样写会把下面的 evidence 扶正整段跳过，
       // 于是 `["repo:path"]` 原样进了校验器（冒烟测出来的）。
       if (typeof g.searched === 'string') g = { ...g, searched: [g.searched] };
+      // 实测：`searched: true`。布尔只表示"搜过了"，没给词组，等价于没给。
+      if (typeof g.searched === 'boolean') { const { searched: _drop, ...rest } = g; g = rest; }
       // evidence 写成单个数（对象或字符串）而不是数组：套成一层数组，别退回重答。
       let evidence = g.evidence;
       if (evidence !== undefined && !Array.isArray(evidence)) evidence = [evidence];
       if (!Array.isArray(evidence)) return g;
-      return { ...g, evidence: evidence.map((item) => coerceEvidence(item, repoIds)) };
+      const flattened = evidence.flatMap((item) => {
+        // 字符串里拼了多份：先切开，再逐段扶正（否则只认第一个，把真话判成假话）。
+        if (typeof item === 'string') {
+          const parts = splitEvidenceString(item);
+          if (parts.length > 1) return parts.map((part) => coerceEvidence(part, repoIds));
+        }
+        return [coerceEvidence(item, repoIds)];
+      });
+      return { ...g, evidence: flattened };
     }),
   };
 }
@@ -186,6 +214,95 @@ function coerceFindings(raw: unknown, repoIds: string[]): unknown {
  *
  * `repoIds` 只有走查用得上（证据要认仓库），评估材料那条路传空数组即可。
  */
-export function coerceAnswer(raw: unknown, repoIds: string[] = []): unknown {
-  return coerceFindings(coerceRoot(raw), repoIds);
+/** 上一次 coerceAnswer 丢掉的多余节点（诊断/留痕用，按调用顺序追加）。 */
+export const droppedNodeLog: string[] = [];
+
+/**
+ * 丢掉"图里不存在的节点"。
+ *
+ * 为什么丢而不是退回重答：流程图已经过引擎验收，是这一份材料的**权威结构**。
+ * 模型多写的那个节点挂不到任何流程节点上，walkmap 根本放不进去——**零信息**。
+ * 而退回重答要花一整轮（实测每轮 1–2 分钟，这一类的发生率约 1/4）。
+ *
+ * 覆盖检查仍然在后面：丢掉之后如果真少了节点，`readFragments` 照样拒。
+ */
+function dropUnknownNodes(raw: unknown, allowed: string[]): unknown {
+  if (allowed.length === 0) return raw;
+  if (typeof raw !== 'object' || raw === null) return raw;
+  const o = raw as Record<string, unknown>;
+  if (!Array.isArray(o.nodes)) return raw;
+  const seen = new Set(allowed);
+  const kept = o.nodes.filter((n) => {
+    const id = typeof n === 'object' && n !== null ? (n as { id?: unknown }).id : undefined;
+    if (typeof id !== 'string') return true;
+    if (seen.has(id)) return true;
+    droppedNodeLog.push(id);
+    return false;
+  });
+  return kept.length === o.nodes.length ? raw : { ...o, nodes: kept };
+}
+
+export function coerceAnswer(raw: unknown, repoIds: string[] = [], allowedNodeIds: string[] = []): unknown {
+  return dropUnknownNodes(coerceFindings(coerceRoot(raw), repoIds), allowedNodeIds);
+}
+
+// ─── 截断识别 ────────────────────────────────────────────────────────────────
+
+/**
+ * 回话是不是被输出预算截断了。
+ *
+ * 为什么要单独认这一种：截断的 JSON 解析失败，看起来和「模型写坏了」一模一样，
+ * 但处理方式完全相反——写坏了要退回重答，截断要**调大 max_tokens**。报错含糊，
+ * 人就会去改提示词，改到天亮也没用。
+ *
+ * 实测：deepseek-v4-pro 回话 3593 字符、大括号差 2 个，正是这个情形。
+ * 判据刻意宽松（括号不配平、或以逗号/冒号收尾），避免把真正的语法错误也认成截断。
+ */
+export function looksTruncated(text: string): boolean {
+  const t = text.trimEnd();
+  if (t === '') return false;
+  if (/[,:，：]$/.test(t)) return true;
+  let curly = 0;
+  let square = 0;
+  let inStr = false;
+  let esc = false;
+  for (const ch of t) {
+    if (esc) { esc = false; continue; }
+    if (ch === '\\') { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === '{') curly++;
+    else if (ch === '}') curly--;
+    else if (ch === '[') square++;
+    else if (ch === ']') square--;
+  }
+  return curly > 0 || square > 0;
+}
+
+/**
+ * 回话整体看起来是"被截断的 JSON"。
+ *
+ * 为什么不只看 `extractJson` 的返回：截断的 `{"nodes":[{...` 里，`extractJson` 会
+ * **退到内层的第一个配对对象**（比如某个 node），于是报「nodes：Required」——
+ * 把"预算不够"诊断成"结构不对"。实测 11 格都是这么错的（completion 正好等于预算）。
+ * 所以判据要在解析**之前**跑。
+ */
+export function answerTruncated(text: string): boolean {
+  const t = text.trim();
+  if (t === '') return false;
+  if (!t.startsWith('{') && !t.startsWith('[') && !t.startsWith('```')) {
+    // 前面有人话：只检查最后一个代码围栏之后的部分。
+    const fence = t.lastIndexOf('```');
+    if (fence < 0) return looksTruncated(t);
+    return looksTruncated(t.slice(fence + 3));
+  }
+  return looksTruncated(t.replace(/^```[a-z]*\n?/i, ''));
+}
+
+/** 「没抠出 JSON」时的统一措辞：截断与真·语法错误分开说。 */
+export function noJsonReason(text: string, maxTokens?: number): string {
+  if (looksTruncated(text)) {
+    return `回话被输出预算截断了（JSON 没闭合${maxTokens === undefined ? '' : `，max_tokens=${String(maxTokens)}`}）。把这一段的 max_tokens 调大，或让它少说一点`;
+  }
+  return '回话里没有 JSON 对象（第一个字符就该是 {）';
 }

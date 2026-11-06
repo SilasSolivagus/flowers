@@ -4,7 +4,7 @@ import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
-  coerceAnno, coerceAnswer, coerceEvidence, normalizeFrame, normalizeKind, normalizeVerdict,
+  answerTruncated, coerceAnno, coerceAnswer, coerceEvidence, normalizeFrame, normalizeKind, normalizeVerdict, noJsonReason,
 } from './shape.js';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
@@ -684,8 +684,10 @@ export function readStructure(
   text: string,
   repoIds: string[] = [],
 ): { ok: true; doc: Structure } | { ok: false; why: string } {
+  // 截断要在解析之前认：截断的 JSON 会让 extractJson 退到内层对象，报成「缺字段」。
+  if (answerTruncated(text)) return { ok: false, why: noJsonReason(text) };
   const raw = extractJson<unknown>(text);
-  if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
+  if (raw === null) return { ok: false, why: noJsonReason(text) };
   const shaped = coerceAnswer(raw, repoIds);
   const parsed = StructureSchema.safeParse(shaped);
   if (!parsed.success) {
@@ -995,11 +997,13 @@ export function readVerify(
   flowIds: string[],
   trees: TreeIndex,
 ): { ok: true; doc: VerifyDoc } | { ok: false; why: string } {
+  // 截断要在解析之前认：截断的 JSON 会让 extractJson 退到内层对象，报成「缺字段」。
+  if (answerTruncated(text)) return { ok: false, why: noJsonReason(text) };
   const raw = extractJson<unknown>(text);
-  if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
+  if (raw === null) return { ok: false, why: noJsonReason(text) };
   // 复核段的形状漂移与结构段同源（evidence 写成字符串、顶层写成数组），走同一套扶正。
   const repoIds = [...trees.keys()];
-  const parsed = VerifySchema.safeParse(coerceAnswer(raw, repoIds));
+  const parsed = VerifySchema.safeParse(coerceAnswer(raw, repoIds, flowIds));
   if (!parsed.success) {
     dumpRejected('verify', text, parsed.error.issues);
     const issue = parsed.error.issues[0];
