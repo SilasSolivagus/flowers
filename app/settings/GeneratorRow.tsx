@@ -2,39 +2,122 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import type { GeneratorView } from '../../src/core/uemaster/candidates';
-import { GeneratorPicker } from '../components/GeneratorPicker';
-import { testGeneratorAction } from '../actions';
+import {
+  idForCommand, testLabel, type CandidateId, type GeneratorView,
+} from '../../src/core/uemaster/candidates';
+import { saveGeneratorAction, testGeneratorAction } from '../actions';
+import { GeneratorSelect } from '../components/GeneratorSelect';
 
 /**
- * 设置页「生成器」那一行：值是**现在真会执行的那条命令**，右边两个按钮。
+ * 设置页「生成器」这一格：**一行**。下拉 + 测试 + 高级，没有别的。
  *
- * 为什么在「项目」这一栏而不是「我的」：生成器是这个部署（这台机器）的配置，与
- * 需求、成员、评审线同属「项目」；「我的」只有身份——一个没有账号系统的人能看到的
- * 那两行。把它塞进「我的」会让「这一页只显示关于你的事实」这条口径失效。
+ * P2.7 这里是五张常驻卡片、每张一条命令行输入框，占掉整整一屏——而这一页要回答的
+ * 只有一句话：「现在用哪个」。所以：
+ * - 下拉的值就是答案，**改了就存**（不用再按保存）；命令本身是下拉的附属事实，
+ *   不是主界面上的东西，所以它在「高级」后面。
+ * - 「高级」露出所选候选的命令行，可改（`ollama` 的 `<模型名>` 只能在这里填）。
+ *   改完回车或失焦就存：这一格没有第二个按钮，也没有「未保存」这种状态。
+ * - 测试结果就在这一行里：`通过 · 74B · 0.9s` / `失败：<stderr>`。失败照登原文——
+ *   那句话本身就是下一步，不再加一句「请检查配置」。
  *
- * 三条界面规矩（与设置页其余部分一致）：
- * 1. **屏上不出现解释性文案**：只有行标签、值、按钮，以及测试的**结果原文**。
- *    `失败：MISSING_CREDENTIAL: …` 那句 stderr 就是说明本身，不再加一句「请检查配置」。
- * 2. **未配置就说未配置**；探测到但没保存的那一条照样显示（带一个「自动」标签），
- *    因为那才是现在按下去会跑的东西——把自动探测藏起来，用户会以为必须先去设一条。
- * 3. **保存不要求先测通**，但那一行必须诚实：没有一次通过的测试，就写「未通过测试」。
- *    刷新之后它还在（结果落在 `app_settings`），不会因为一次刷新被洗成「未配置」。
+ * 为什么在「项目」这一栏而不是「我的」：生成器是这个部署（这台机器）的配置，
+ * 与需求、成员、评审线同属「项目」。
+ *
+ * 为什么没有「清除」按钮：撤销的入口是「把命令行删空」（服务层把空串当「没设」，
+ * 这一行就退回「未配置」，抽屉里那次提问会重新出现）。P2.7 有一个显式的「清除」，
+ * 它对第一次用的人是多余的，而这一行的口径是「三个控件」。
  */
 
 export function GeneratorRow({ view }: { view: GeneratorView }) {
   const router = useRouter();
-  const [editing, setEditing] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  /** 手改过的命令；null = 跟随所选候选自带的那条。 */
+  const [draft, setDraft] = useState<string | null>(null);
+  /**
+   * 刚在下拉里选中的那一行。
+   *
+   * 为什么需要它：`view.savedId` 是服务端渲染出来的值，选完要等一次 RSC 往返才变，
+   * 期间下拉会**弹回**上一个选项（用户会以为没选上）。这里先乐观地按住新值，
+   * 服务端那一次回来之后两边相等，它就不再起作用；保存失败则退回（见 `change`）。
+   */
+  const [picked, setPicked] = useState<CandidateId | null>(null);
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const command = view.command ?? view.saved;
-  const test = view.test;
-  const testIsCurrent = test !== null && command !== null && test.command === command;
-  const passed = testIsCurrent && test.ok;
+  const selected = picked ?? view.savedId;
+  const option = view.options.find((item) => item.id === selected) ?? null;
+
+  // 选中的是自建（或某条改过的命令）时，输入框里得是**存着的那一条**，不是空串。
+  const seeded = selected === 'custom' || option === null
+    ? (view.saved ?? '')
+    : option.command;
+  const command = draft ?? seeded;
+
+  // 命令行默认不出现（D）。两个例外：按了「高级」；或者刚选了一个「还不能直接跑」
+  // 的候选（需要填命令的 WorkBuddy / Grok Bot / 自建，或 ollama 那种还带着
+  // `<模型名>` 的）——那时输入框就是「选它」这个动作本身，要先填好才存得下。
+  const askingForCommand = (option?.needsCommand === true || option?.ready === false)
+    && selected !== view.savedId;
+  const showInput = advanced || askingForCommand;
+
+  // 选了还没存 / 改了还没存：这时那一行不能显示上一次的测试结果——它测的是另一条命令。
+  const unsaved = selected !== view.savedId || (draft !== null && draft.trim() !== (view.saved ?? ''));
+  const testIsCurrent = !unsaved && view.test !== null && view.saved !== null
+    && view.test.command === view.saved;
+
+  const save = async (value: string): Promise<void> => {
+    setError(null);
+    setResult(null);
+    try {
+      const form = new FormData();
+      form.set('command', value);
+      const saved = await saveGeneratorAction(form);
+      if (!saved.ok) {
+        setError(saved.message);
+        setPicked(null);
+        return;
+      }
+      setDraft(null);
+      // 存完把乐观值对齐到**刚存下的那条命令**该落在哪一行：清空之后它是 null，
+      // 于是下拉如实回到「未配置」（而不是继续显示上一个候选）。
+      setPicked(idForCommand(value));
+      router.refresh();
+    } catch {
+      setError('保存没有送达');
+    }
+  };
+
+  const change = async (id: CandidateId): Promise<void> => {
+    const next = view.options.find((item) => item.id === id);
+    if (next === undefined) return;
+    setError(null);
+    setResult(null);
+    setDraft(null);
+    setPicked(id);
+    // 还不能直接跑的几行（空命令、或命令里还有 `<模型名>`）：先把输入框露出来，
+    // 填好才存——存一条跑不了的命令等于把「测试」这一步变成假动作。
+    if (next.needsCommand || !next.ready) {
+      setAdvanced(true);
+      return;
+    }
+    await save(next.command);
+  };
+
+  // 高级里那一条：回车或失焦时存（与下拉「改了就存」同一条规矩）。
+  //
+  // 把它清空 = 回到「未配置」：服务层把空串当「没设」（`generatorCommand()` 返回 null），
+  // 于是下一次按「生成」会重新问一次。P2.7 那行有一个「清除」按钮；这一版没有第三个
+  // 按钮，撤销就落在「把命令删掉」这个动作上——它本来就在用户的脑子里。
+  const commit = async (): Promise<void> => {
+    const value = command.trim();
+    if (value === (view.saved ?? '')) return;
+    await save(value);
+  };
 
   const runTest = async (): Promise<void> => {
     setTesting(true);
+    setError(null);
     setResult(null);
     try {
       const outcome = await testGeneratorAction();
@@ -48,65 +131,61 @@ export function GeneratorRow({ view }: { view: GeneratorView }) {
   };
 
   // 刚测过就以刚回来的那句为准（刷新前后一屏之内不会闪）；否则用库里存着的那份。
-  const detail = result?.message
-    ?? (testIsCurrent
-      ? (test.ok
-        ? `通过（${test.size ?? 0} 字节 · ${test.ms ?? 0} ms）`
-        : `失败：${test.error ?? '未知原因'}`)
-      : null);
+  const detail = result?.message ?? (testIsCurrent && view.test !== null ? testLabel(view.test) : null);
 
   return (
     <section className="sg">
-      <div className="h">生成器</div>
       <div className="i gen-row">
-        <div className="l">
-          <b className="gen-cmd">{command ?? '未配置'}</b>
-        </div>
+        <div className="l"><b>生成器</b></div>
         <div className="v gen-actions">
-          {command !== null && (
-            <span className={`pill ${passed ? 'ok' : 'no'}`}>{passed ? '通过' : '未通过测试'}</span>
-          )}
-          {view.source === 'detected' && <span className="pill no">自动</span>}
           {view.source === 'env' && <span className="pill no">环境变量</span>}
+          <GeneratorSelect
+            options={view.options}
+            value={selected}
+            onChange={(id) => void change(id)}
+          />
           <button
             className="btn sm"
             type="button"
             onClick={() => void runTest()}
-            disabled={command === null || testing}
+            disabled={view.saved === null || unsaved || testing}
           >
             {testing ? '测试中' : '测试'}
           </button>
           <button
             className="btn ghost sm"
             type="button"
-            onClick={() => setEditing((open) => !open)}
+            aria-expanded={advanced}
+            onClick={() => setAdvanced((open) => !open)}
           >
-            改
+            高级
           </button>
         </div>
       </div>
-      {detail !== null && (
+
+      {showInput && (
         <div className="i gen-detail">
-          <div className={`gen-msg ${result !== null && !result.ok ? 'bad' : ''}`}>{detail}</div>
-        </div>
-      )}
-      {editing && (
-        <div className="gen-edit">
-          <GeneratorPicker
-            candidates={view.candidates}
-            known={view.known}
-            onCancel={() => setEditing(false)}
-            onPicked={() => {
-              setEditing(false);
-              setResult(null);
-              router.refresh();
-            }}
-            onClear={() => {
-              setEditing(false);
-              setResult(null);
-              router.refresh();
+          <input
+            className="gen-input"
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            aria-label="命令"
+            value={command}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={() => void commit()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void commit();
             }}
           />
+        </div>
+      )}
+
+      {(detail !== null || error !== null) && (
+        <div className="i gen-detail">
+          <div className={`gen-msg ${(result !== null && !result.ok) || error !== null ? 'bad' : ''}`}>
+            {error ?? detail}
+          </div>
         </div>
       )}
     </section>

@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import {
-  CANDIDATES, commandReady, viewOf,
+  CANDIDATES, commandReady, defaultOptionId, dropdownOptions, idForCommand, viewOf,
   type CandidateView, type GeneratorTest, type GeneratorView,
 } from './candidates.js';
 import { detect } from './detect.js';
@@ -105,9 +105,13 @@ export async function writeTest(db: Queryable, test: GeneratorTest): Promise<voi
 /**
  * 界面要的全部生成器事实，一次读齐。
  *
- * 三块拼起来：库里的（saved / test）、PATH 里的（candidates）、以及按解析顺序算出的
- * 结论（state / source / command）。页面与设置页都只调这一个函数——两处显示同一格
- * 事实时，不可能一处说「未配置」、另一处说「claude」。
+ * 三块拼起来：库里的（saved / test）、PATH 里的（candidates / options）、以及按解析
+ * 顺序算出的结论（state / source / command）。页面与设置页都只调这一个函数——两处
+ * 显示同一格事实时，不可能一处说「未配置」、另一处说「claude」。
+ *
+ * P2.8 起 `candidates` 不再被当成选项表用：它是**探测结论**（PATH 里有谁），
+ * `options` 才是选项（七行全在，探测只决定后缀）。所以「装了四个」与「能选七个」
+ * 是两件事，各自有各自的字段。
  */
 export async function generatorView(db: Queryable): Promise<GeneratorView> {
   const [saved, test] = await Promise.all([generatorCommand(db), readTest(db)]);
@@ -116,25 +120,20 @@ export async function generatorView(db: Queryable): Promise<GeneratorView> {
 
   const candidates: CandidateView[] = detected.map((item) => viewOf(item.candidate));
   const known: CandidateView[] = CANDIDATES.map(viewOf);
+  const options = dropdownOptions(known, new Set(candidates.map((item) => item.id)));
 
-  if (resolution.kind === 'ready') {
-    return {
-      state: 'ready',
-      source: resolution.source,
-      command: resolution.command,
-      saved,
-      candidates,
-      known,
-      test,
-    };
-  }
-  return {
-    state: resolution.kind,
-    source: null,
-    command: null,
+  const common = {
     saved,
     candidates,
     known,
+    options,
+    defaultId: defaultOptionId(options),
+    savedId: idForCommand(saved),
     test,
   };
+
+  if (resolution.kind === 'ready') {
+    return { state: 'ready', source: resolution.source, command: resolution.command, ...common };
+  }
+  return { state: resolution.kind, source: null, command: null, ...common };
 }

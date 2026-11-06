@@ -151,7 +151,7 @@ export async function startGeneration(
     if (resolution.kind === 'choose') {
       throw new AppError(
         'generator_unconfigured',
-        '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个',
+        '还没选生成器：在「生成」里选一个，按「测试并使用」',
       );
     }
 
@@ -283,7 +283,7 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     const resolution = await resolveGenerator(await generatorCommand(db));
     if (resolution.kind !== 'ready') {
       await failJob(db, jobId, resolution.kind === 'choose'
-        ? '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个'
+        ? '还没选生成器：在「生成」里选一个，按「测试并使用」'
         : '未检测到生成器：到「设置 · 项目 · 生成器」配置一条');
       return;
     }

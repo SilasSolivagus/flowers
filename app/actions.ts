@@ -16,6 +16,7 @@ import {
 import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
 import { testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
 import { generatorCommand, saveGeneratorCommand, writeTest } from '../src/core/uemaster/settings';
+import { testLabel, type GeneratorTest } from '../src/core/uemaster/candidates';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -253,32 +254,76 @@ export async function saveGeneratorAction(formData: FormData): Promise<ActionRes
 export type GeneratorTestResult = { ok: boolean; message: string };
 
 /**
- * 就地测试：把当前生效的那条命令真跑一次。
+ * 跑一次小测、把结果落库、返回那一行的字。
  *
- * 结果落库（`app_settings.generator.test`）而不只是返回给这一次点击：刷新之后那一行
- * 仍要显示「未通过测试」，否则一次刷新就把失败洗成了「未配置」。
- *
- * 失败文案就是 stderr 的原文（去掉 ANSI 与 node 噪声）——`OAuth session expired`、
+ * 落库而不只是返回给这一次点击：刷新之后那一行仍要显示「未通过测试」，否则一次刷新
+ * 就把失败洗成了「未配置」。字的形状由 `testLabel` 拼（`通过 · 74B · 0.9s` /
+ * `失败：<stderr>`），失败时**原文照登**——`OAuth session expired`、
  * `MISSING_CREDENTIAL: … DEEPSEEK_API_KEY` 这两句本身就是给 owner 的下一步。
  */
-export async function testGeneratorAction(): Promise<GeneratorTestResult> {
-  const command = await generatorCommand(db);
-  if (command === null) return { ok: false, message: '未配置生成器命令' };
-
+async function recordTest(command: string): Promise<GeneratorTestResult> {
   const result = await testGenerator(command, { timeoutMs: TEST_TIMEOUT_MS });
-  const at = new Date().toISOString();
-  await writeTest(db, {
+  const test: GeneratorTest = {
     ok: result.ok,
     command,
-    at,
+    at: new Date().toISOString(),
     size: result.ok ? result.size : null,
     ms: result.ms,
     error: result.ok ? null : result.error,
-  });
+  };
+  await writeTest(db, test);
   revalidatePath('/settings');
   revalidatePath('/');
+  return { ok: test.ok, message: testLabel(test) };
+}
 
-  return result.ok
-    ? { ok: true, message: `通过（${result.size} 字节 · ${result.ms} ms）` }
-    : { ok: false, message: `失败：${result.error}` };
+/** 就地测**库里那条**（设置页那一行的「测试」）。 */
+export async function testGeneratorAction(): Promise<GeneratorTestResult> {
+  const command = await generatorCommand(db);
+  if (command === null) return { ok: false, message: '未配置生成器命令' };
+  return recordTest(command);
+}
+
+/**
+ * 「测试并使用」：真跑一次小测 → 通了才存。**一个动作**，不是两个。
+ *
+ * 为什么合成一步：这是第一次用时的那个问题（「它能不能用」）与回答（「就用它」）。
+ * 拆成「保存」和「测试」两个按钮，用户就会在其中一个上停下来——留下来的是
+ * 一条没测过的命令，或者一次没保存的通过。
+ *
+ * 为什么**先测后存**（P2.8 的决定）：存了再测，失败时库里会留下一条已经生效的坏
+ * 命令——那个对话框还开着，用户以为什么都没发生，可下一次按「生成」就会拿它去跑。
+ * 「测试并使用」里的「使用」是条件句：通过了才使用。失败就什么都不改，对话框
+ * 留着，换一个选项或改一行命令再按一次；失败的原文由对话框当场显示（不落库：
+ * 库里那份测试结果是给设置页那一行看的，它跟着**存着的那条**命令走）。
+ *
+ * 空命令与未填的占位符在测之前就被 `testGenerator` 拦下（它自己会说清楚），
+ * 所以这里不需要第二条校验路径。
+ */
+export async function applyGeneratorAction(formData: FormData): Promise<GeneratorTestResult> {
+  const command = field(formData, 'command').trim();
+  if (command === '') return { ok: false, message: '先填一条命令' };
+
+  const result = await testGenerator(command, { timeoutMs: TEST_TIMEOUT_MS });
+  if (!result.ok) return { ok: false, message: `失败：${result.error}` };
+
+  try {
+    await saveGeneratorCommand(db, command);
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+
+  const test: GeneratorTest = {
+    ok: true,
+    command,
+    at: new Date().toISOString(),
+    size: result.size,
+    ms: result.ms,
+    error: null,
+  };
+  await writeTest(db, test);
+  revalidatePath('/settings');
+  revalidatePath('/');
+  return { ok: true, message: testLabel(test) };
 }

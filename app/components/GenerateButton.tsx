@@ -5,22 +5,18 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import { generateAction, generationStatusAction } from '../actions';
-import { GeneratorPicker } from './GeneratorPicker';
+import { GeneratorDialog } from './GeneratorDialog';
 
 /**
  * 参考段那一行右边的「生成」：按下 → 服务端开一次作业 → 这一行变「生成中」→
  * 变成产物链接，或者一行中文失败原因。
  *
- * P2.7 起这个按钮还承担**生成器解析**在界面上的那一半（服务端那一半在
- * `startGeneration` / `runJob`）：
- * - `ready`：一条命令（env / 已保存 / 唯一探测到的），直接跑；
- * - `choose`：探测到多条 → 按下先开选择器，选完保存再跑；
- * - `none`：一条都没有 → 按钮**禁用**，旁边一行说「未检测到生成器」并指路去设置。
- *
- * 还有一条来自本机的口径：自动探测到的那一条**没有被验证过**（本机的 codex
- * `login status` 说已登录、`exec` 却 401）。所以它的第一次真跑要是失败，除了照登
- * 原文，还要把选择器打开——让用户当场换一条，而不是盯着「OAuth session expired」
- * 猜自己能做什么。
+ * 生成器在这条链路上只出现一次，就是**第一次**（P2.8）：
+ * - `ready`（配过了 / env）：直接跑，不弹任何东西——story map 第 4 行。
+ * - `choose`（还没配）：在原地弹那个小对话框（一个下拉 + 测试并使用）。
+ *   测通就存下并**接着开跑**（一次点击的意图）；测不通，对话框留着，换一个再按。
+ *   存过之后，这一支再也不会走到——story map 第 2、3 行。
+ * - `none`（一个可执行文件都没有）：按钮禁用，一句原因 + 去设置那一格。
  *
  * 三条从 P2.6 留下来的取舍：
  * 1. **没有进度条、没有 spinner**。真正要告诉用户的只有两件：「在跑」和「结果 / 原因」。
@@ -48,7 +44,8 @@ export function GenerateButton({
   const [jobId, setJobId] = useState<string | null>(runningJobId);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [picking, setPicking] = useState(false);
+  /** 第一次用时的那个对话框：只在「还没配」时开，而且只开一次（答完就落库）。 */
+  const [asking, setAsking] = useState(false);
   /** 这一次轮询的截止时刻：作业可以被杀掉，客户端不能陪着一起永远转。 */
   const deadline = useRef<number>(0);
 
@@ -88,9 +85,6 @@ export function GenerateButton({
         deadline.current = 0;
         setJobId(null);
         setError(status.error ?? '未知原因');
-        // 自动探测出来的那条命令从没被验证过：失败了就当场给出选择器，别让人对着
-        // 一句 stderr 猜自己能换什么。
-        if (generator.source === 'detected') setPicking(true);
         return;
       }
       timer = setTimeout(() => void tick(), POLL_MS);
@@ -101,7 +95,7 @@ export function GenerateButton({
       alive = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [jobId, router, generator.source]);
+  }, [jobId, router]);
 
   const start = async (): Promise<void> => {
     setPending(true);
@@ -112,9 +106,9 @@ export function GenerateButton({
       form.set('stage', stage);
       const result = await generateAction(form);
       if (!result.ok) {
-        // 服务端说「多条 / 没有生成器」时，界面状态已经过期（另一个标签页刚改过设置）：
-        // 刷新一次让服务端把新的解析结果送上来。
-        if (!result.ok && /生成器/.test(result.message)) router.refresh();
+        // 服务端说「还没选 / 没有生成器」时，界面状态已经过期（另一个标签页刚改过
+        // 设置）：刷新一次让服务端把新的解析结果送上来。
+        if (/生成器/.test(result.message)) router.refresh();
         setError(result.message);
         return;
       }
@@ -131,7 +125,7 @@ export function GenerateButton({
     return <span className="pill warn">生成中</span>;
   }
 
-  // 一条都没有：按钮禁用，理由在行里，指路就在旁边（设置页那一格）。
+  // 一个可执行文件都没有：按钮禁用，理由在行里，指路就在旁边（设置页那一格）。
   if (generator.state === 'none') {
     return (
       <span className="gen-off">
@@ -152,32 +146,31 @@ export function GenerateButton({
         className="btn gen"
         type="button"
         onClick={() => {
-          if (generator.state === 'choose') setPicking(true);
+          if (generator.state === 'choose') setAsking(true);
           else void start();
         }}
         disabled={pending}
       >
         {error === null ? '生成' : '重试'}
       </button>
-      {picking && (
+      {asking && (
         <div
           className="sheet on"
           onClick={(event) => {
             // 点遮罩 = 关闭（与动作条、交回材料同一个行为）；点 box 内部不关。
-            if (event.target === event.currentTarget) setPicking(false);
+            if (event.target === event.currentTarget) setAsking(false);
           }}
         >
           <div className="box">
             <div className="h">生成器</div>
             <div className="b">
-              <GeneratorPicker
-                candidates={generator.candidates}
-                known={generator.known}
-                onCancel={() => setPicking(false)}
-                onPicked={() => {
-                  setPicking(false);
-                  // 保存之后服务端的解析结果变了（source=settings）：刷新让这一行
-                  // 拿到新的 generator，再开始这一次生成。
+              <GeneratorDialog
+                view={generator}
+                onCancel={() => setAsking(false)}
+                onDone={() => {
+                  // 测通并落库之后：关框、刷新（服务端的解析结果从 choose 变 ready）、
+                  // 立刻开跑。一次点击的意图，不是两次。
+                  setAsking(false);
                   router.refresh();
                   void start();
                 }}

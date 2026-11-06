@@ -36,7 +36,14 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
 
   return (
     <html lang="zh-CN" data-rail={rail}>
-      <body>
+      {/*
+        suppressHydrationWarning 是给**浏览器扩展**用的，不是给我们的标记用的：装着的
+        扩展会往 <body> 上注入属性（线上那一例是 `data-atm-ext-installed`，
+        报错原文在 dev 日志里指着这个属性），而
+        React 19 的水合对比会在下面每一条属性上做严格比对，于是 Next 的「1 Issue」
+        徽标亮起、报的是一处 hydration mismatch——错的不是这一棵树的任何一行代码。
+        只压一层：它不会传到子节点，我们自己的组件里真有 mismatch 照样会报。 */}
+      <body suppressHydrationWarning>
         <div className="shell">
           <nav className="rail">
             {/* 收起时只剩首字母：56px 的左轨放不下「Flower」与那行副标题。

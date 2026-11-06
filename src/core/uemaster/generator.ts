@@ -26,8 +26,9 @@ import { detect } from './detect.js';
  *    就由这一层自己写进产物路径；两者都没有才算失败。这一条是 `ollama` 或任何
  *    「管道式」生成器能成立的全部原因：它们不会写文件，只会把 HTML 打到 stdout。
  * 3. **解析顺序**（`resolveGenerator`）：`FLOWERS_GEN_CMD` → 库里存着的那条
- *    （`app_settings.generator.command`）→ 探测。探测到一条就直接用，探测到多条
- *    就交给人选（本层只回答 `choose`，选择器在界面上），一条都没有就是 `none`。
+ *    （`app_settings.generator.command`）→ 没配就 `choose`（界面问一次，选完落库）。
+ *    一条可执行文件都没有才是 `none`。P2.8 起「只探到一条就自动用」这条被删掉：
+ *    第一次没人答应过的事，不该由 PATH 代答。
  *
  * 刻意不做的事（越少越好）：
  * - 不引入任何 LLM SDK，也不解析模型输出。
@@ -75,16 +76,16 @@ export function artifactUrlIn(pack: string): string {
 
 // ─── 解析：这次跑什么 ────────────────────────────────────────────────────────
 
-export type GenSource = 'env' | 'settings' | 'detected';
+export type GenSource = 'env' | 'settings';
 
 /**
  * 解析的结果。三种形状对应界面上的三件事：
  * - `ready`：有唯一一条命令，可以跑（`source` 说明它是从哪来的）；
- * - `choose`：探测到多条，需要人挑一个（选择器）；
- * - `none`：一条都没有，按钮禁用并指路去设置。
+ * - `choose`：还没选（第一次用）。界面弹**一次**那个小对话框，选完就再也不问；
+ * - `none`：这台机器上一份可执行文件都没有，按钮禁用并指路。
  */
 export type Resolution =
-  | { kind: 'ready'; command: string; source: GenSource; candidate: Candidate | null }
+  | { kind: 'ready'; command: string; source: GenSource }
   | { kind: 'choose'; candidates: Candidate[] }
   | { kind: 'none' };
 
@@ -92,39 +93,30 @@ export type Resolution =
  * 这次用哪条命令。
  *
  * 1. `FLOWERS_GEN_CMD`（非空）——唯一的口子，也是 stub 用例与「临时换一条」的入口。
- * 2. 库里存着的那条（设置页「生成器」保存的）。
- * 3. 探测：一条 → 用它（但仍要当成**未被验证**的，见 `start.ts` 的说明）；
- *    多条 → `choose`；零条 → `none`。
+ * 2. 库里存着的那条（用户在下拉里选过、并且按过「测试并使用」）。
+ * 3. 都没配：**探测到几个都是 `choose`**。
  *
- * 为什么「一条就自动用」而不是「也让人确认」：只装了一个生成器的人，每次都弹一次
- * 选择器是把配置问题变成了日常税。自动用不等于信任它——第一次真跑失败时会打开
- * 选择器，而不是把一句 stderr 留在那一行让人自己猜。
+ * 第 3 条是 P2.8 改掉的：P2.7 在「只探到一条」时直接用它，理由是「只装了一个的人
+ * 每次都被问一次是把配置问题变成日常税」。但那个理由只对**第二次以后**成立——
+ * 第一次他什么都没答应过，自动选中等于替他做了决定，而下拉里另外六行（包括两个
+ * 未安装的）他从没见过。现在第一次一律问一次（预选装了的第一个，一次确认），
+ * 回答落库之后，这一支再也不会走到。
  *
- * `ollama` 那种还带着 `<模型名>` 的候选不算「可以直接跑」：它是被探测到了，但命令
- * 不完整，所以它只会出现在 `choose` 的列表里等人填。
+ * 零条仍然是 `none`：那不是一次选择，是缺东西。
  */
 export async function resolveGenerator(saved: string | null): Promise<Resolution> {
   const configured = process.env.FLOWERS_GEN_CMD?.trim();
   if (configured) {
-    return { kind: 'ready', command: configured, source: 'env', candidate: null };
+    return { kind: 'ready', command: configured, source: 'env' };
   }
   const stored = saved?.trim();
   if (stored) {
-    return { kind: 'ready', command: stored, source: 'settings', candidate: null };
+    return { kind: 'ready', command: stored, source: 'settings' };
   }
 
   const found = await detect();
-  const usable = found.filter((item) => item.ready);
-  if (usable.length === 1) {
-    const only = usable[0]!;
-    return { kind: 'ready', command: only.candidate.command, source: 'detected', candidate: only.candidate };
-  }
-  if (usable.length > 1 || (usable.length === 0 && found.length > 0)) {
-    // 多条：让人选。一条都不能直接跑（例如只探到 ollama 的 `<模型名>`）：也得让人
-    // 先把它改完整——那同样是一次选择。
-    return { kind: 'choose', candidates: found.map((item) => item.candidate) };
-  }
-  return { kind: 'none' };
+  if (found.length === 0) return { kind: 'none' };
+  return { kind: 'choose', candidates: found.map((item) => item.candidate) };
 }
 
 // ─── 命令的形状：stdin 还是 {prompt} ─────────────────────────────────────────
@@ -366,7 +358,7 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
       return {
         ok: false,
         error: resolution.kind === 'choose'
-          ? '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个'
+          ? '还没选生成器：在「生成」里选一个，按「测试并使用」'
           : '未检测到生成器：到「设置 · 项目 · 生成器」配置一条',
       };
     }

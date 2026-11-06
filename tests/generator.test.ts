@@ -5,7 +5,10 @@ import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { AppError } from '../src/core/errors.js';
-import { CANDIDATES, commandReady, placeholderIn } from '../src/core/uemaster/candidates.js';
+import {
+  CANDIDATES, commandReady, defaultOptionId, dropdownOptions, idForCommand,
+  initialOptionId, placeholderIn, testLabel, viewOf, type GeneratorTest,
+} from '../src/core/uemaster/candidates.js';
 import { clearDetectionCache, detect } from '../src/core/uemaster/detect.js';
 import {
   commandFor, htmlDocumentIn, quoteForShell, resolveGenerator, runGenerator, testGenerator,
@@ -89,8 +92,9 @@ afterAll(async () => {
 });
 
 describe('候选表', () => {
-  it('五个候选、顺序固定、命令与文档一致', () => {
-    expect(CANDIDATES.map((c) => c.id)).toEqual(['claude', 'codex', 'dsh', 'ollama', 'custom']);
+  it('七个候选、顺序固定、命令与文档一致', () => {
+    expect(CANDIDATES.map((c) => c.id))
+      .toEqual(['claude', 'codex', 'dsh', 'ollama', 'workbuddy', 'grokbot', 'custom']);
     const byId = Object.fromEntries(CANDIDATES.map((c) => [c.id, c]));
     expect(byId.claude!.command).toBe('claude -p --permission-mode acceptEdits');
     expect(byId.codex!.command).toBe('codex exec --sandbox workspace-write --skip-git-repo-check -');
@@ -101,6 +105,25 @@ describe('候选表', () => {
     for (const candidate of CANDIDATES) {
       expect(candidate.note.length).toBeGreaterThan(0);
       expect(candidate.label).not.toBe(candidate.id);
+    }
+  });
+
+  it('WorkBuddy / Grok Bot：命令未知就是空串 + needsCommand，不编一条猜的', () => {
+    const byId = Object.fromEntries(CANDIDATES.map((c) => [c.id, c]));
+    for (const id of ['workbuddy', 'grokbot'] as const) {
+      expect(byId[id]!.label).toBe(id === 'workbuddy' ? 'WorkBuddy' : 'Grok Bot');
+      expect(byId[id]!.command).toBe('');
+      expect(byId[id]!.needsCommand).toBe(true);
+      expect(byId[id]!.binary).not.toBeNull();
+    }
+    // 有命令的三条不是「需要填命令」。
+    for (const id of ['claude', 'codex', 'dsh', 'ollama'] as const) {
+      expect(byId[id]!.needsCommand).toBe(false);
+      expect(byId[id]!.command).not.toBe('');
+    }
+    // 空命令 ⇔ needsCommand：两者不能各说各的。
+    for (const candidate of CANDIDATES) {
+      expect(candidate.command.trim() === '').toBe(candidate.needsCommand);
     }
   });
 
@@ -165,11 +188,18 @@ describe('解析顺序：env → 保存的命令 → 探测', () => {
     expect(resolution).toMatchObject({ kind: 'ready', source: 'settings', command: 'dsh headless {prompt}' });
   });
 
-  it('探测到一条：直接用，但标成 detected（未验证）', async () => {
+  it('探测到一条、但没配过：仍然 choose（第一次要问一次，PATH 不替人答应）', async () => {
     process.env.PATH = await pathWith(['dsh']);
     const resolution = await resolveGenerator(null);
-    expect(resolution.kind).toBe('ready');
-    expect(resolution).toMatchObject({ source: 'detected', command: 'dsh headless {prompt}' });
+    expect(resolution.kind).toBe('choose');
+    if (resolution.kind !== 'choose') return;
+    expect(resolution.candidates.map((c) => c.id)).toEqual(['dsh']);
+  });
+
+  it('配过之后就 ready/settings：第二次起不再问', async () => {
+    process.env.PATH = await pathWith(['dsh']);
+    expect(await resolveGenerator('dsh headless {prompt}'))
+      .toMatchObject({ kind: 'ready', source: 'settings', command: 'dsh headless {prompt}' });
   });
 
   it('探测到多条：choose，交给人挑', async () => {
@@ -389,7 +419,12 @@ describe('设置（app_settings）', () => {
     expect(savedView).toMatchObject({ state: 'ready', source: 'settings', command: 'dsh headless {prompt}' });
     expect(savedView.candidates.map((c) => c.id)).toEqual(['claude']);
     // 五行完整表一直在：选择器要能给出「自建」。
-    expect(savedView.known.map((c) => c.id)).toEqual(['claude', 'codex', 'dsh', 'ollama', 'custom']);
+    expect(savedView.known.map((c) => c.id))
+      .toEqual(['claude', 'codex', 'dsh', 'ollama', 'workbuddy', 'grokbot', 'custom']);
+    // 探测只标注：七行全在选项里，装没装写在后缀上。
+    // 这一轮的 PATH 里只有 claude：装了的在前（就是 claude），其余按表序，自建永远最后。
+    expect(savedView.options.map((o) => o.id))
+      .toEqual(['claude', 'codex', 'dsh', 'ollama', 'workbuddy', 'grokbot', 'custom']);
 
     await saveGeneratorCommand(db, '');
     process.env.PATH = await pathWith(['claude', 'dsh']);
@@ -449,7 +484,7 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
     expect(Number(rows.rows[0]!.n)).toBe(0);
   });
 
-  it('探测到多条而没选：startGeneration 拒绝并指路设置页', async () => {
+  it('探测到多条而没选：startGeneration 拒绝，指的出口是抽屉里那次提问（不是设置页）', async () => {
     process.env.PATH = await pathWith(['claude', 'dsh']);
     const r = await createRequirement(db, '吕品', {
       title: '没选生成器', type: 'feature', requester: '孙建宏',
@@ -459,6 +494,126 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
     }).catch((e: unknown) => e);
 
     expect((error as AppError).code).toBe('generator_unconfigured');
-    expect((error as AppError).message).toContain('设置');
+    expect((error as AppError).message).toContain('测试并使用');
+  });
+});
+
+/**
+ * P2.8：一个下拉、第一次问一次、之后不问。
+ *
+ * 这一组钉的是**界面那一层的判断**（纯函数）：七行怎么排、后缀怎么说、预选哪一行、
+ * 库里那条命令落在哪一行。这些判断写错了不会有任何报错——界面只是安静地少一行、
+ * 或者预选错一行——所以它们必须有用例。
+ */
+describe('下拉：七行、后缀、预选', () => {
+  const known = CANDIDATES.map(viewOf);
+
+  it('装了的在前（dsh 领头）、没装的后、自建最后——探测只标注不过滤', () => {
+    const options = dropdownOptions(known, new Set(['claude', 'codex', 'dsh', 'ollama']));
+    expect(options.map((o) => o.id))
+      .toEqual(['dsh', 'claude', 'codex', 'ollama', 'workbuddy', 'grokbot', 'custom']);
+    // 七行一行不少：没装的也在。
+    expect(options.length).toBe(CANDIDATES.length);
+    expect(options.map((o) => o.text)).toEqual([
+      'DeepSeek Harness · 已安装',
+      'Claude Code · 已安装',
+      'Codex · 已安装',
+      'Ollama · 已安装',
+      'WorkBuddy · 需要填命令',
+      'Grok Bot · 需要填命令',
+      '自建 / 自定义',
+    ]);
+  });
+
+  it('一个都没装：七行照样全在，全是「未安装」，自建不带后缀', () => {
+    const options = dropdownOptions(known, new Set());
+    expect(options.map((o) => o.id))
+      .toEqual(['claude', 'codex', 'dsh', 'ollama', 'workbuddy', 'grokbot', 'custom']);
+    expect(options.filter((o) => o.installed)).toEqual([]);
+    expect(options.at(-1)!.text).toBe('自建 / 自定义');
+  });
+
+  it('预选：装了的第一个；一个都没装是 null（那时按钮本来就禁用）', () => {
+    expect(defaultOptionId(dropdownOptions(known, new Set(['claude', 'dsh'])))).toBe('dsh');
+    expect(defaultOptionId(dropdownOptions(known, new Set(['codex'])))).toBe('codex');
+    expect(defaultOptionId(dropdownOptions(known, new Set()))).toBeNull();
+  });
+
+  it('库里那条命令落在哪一行：逐字相同 → 那行；同一条可执行文件 → 还是那行', () => {
+    expect(idForCommand('dsh headless {prompt}')).toBe('dsh');
+    expect(idForCommand('  claude -p --permission-mode acceptEdits  ')).toBe('claude');
+    // 填了模型名、改了参数：仍然是那一行（而不是跳回「自建」）。
+    expect(idForCommand('ollama run qwen2.5-coder')).toBe('ollama');
+    expect(idForCommand('claude -p --dangerously-skip-permissions')).toBe('claude');
+    // 只是前缀像、不是同一条命令：不误判。
+    expect(idForCommand('codex-tool run')).toBe('custom');
+    expect(idForCommand('node /tmp/x.mjs')).toBe('custom');
+    expect(idForCommand('')).toBeNull();
+    expect(idForCommand(null)).toBeNull();
+  });
+
+  it('对话框的初始选中：已保存的 → 装了的第一个 → 自建', () => {
+    const options = dropdownOptions(known, new Set(['claude', 'dsh']));
+    const base = { options, defaultId: 'dsh' as const };
+    expect(initialOptionId({ ...base, savedId: 'claude' })).toBe('claude');
+    expect(initialOptionId({ ...base, savedId: null })).toBe('dsh');
+    expect(initialOptionId({
+      options: dropdownOptions(known, new Set()), defaultId: null, savedId: null,
+    })).toBe('custom');
+  });
+
+  it('测试结果那一行：通过报字节与秒，失败原文照登', () => {
+    const pass: GeneratorTest = {
+      ok: true, command: 'x', at: '2026-01-01T00:00:00.000Z', size: 74, ms: 900, error: null,
+    };
+    expect(testLabel(pass)).toBe('通过 · 74B · 0.9s');
+    const fail: GeneratorTest = {
+      ok: false, command: 'x', at: '2026-01-01T00:00:00.000Z', size: null, ms: 120,
+      error: 'OAuth session expired',
+    };
+    expect(testLabel(fail)).toBe('失败：OAuth session expired');
+  });
+});
+
+describe('第一次用：问一次，答完就再也不问', () => {
+  beforeEach(async () => {
+    await resetDb();
+    await seedPeople();
+  });
+
+  it('没配过：choose + 预选装了的第一个 + savedId=null（设置页显示「未配置」）', async () => {
+    process.env.PATH = await pathWith(['claude', 'dsh']);
+    const view = await generatorView(db);
+    expect(view).toMatchObject({ state: 'choose', saved: null, savedId: null, defaultId: 'dsh' });
+    expect(view.options.find((o) => o.id === 'dsh')!.installed).toBe(true);
+    expect(view.options.find((o) => o.id === 'grokbot')!.installed).toBe(false);
+  });
+
+  it('「测试并使用」之后：state 变 ready、savedId 落在那一行，之后不再问', async () => {
+    process.env.PATH = await pathWith(['claude', 'dsh']);
+    // 「测试并使用」在服务端就是这两步：保存 + 小测。小测本身要用例里换成人造的
+    // 结果（真 CLI 在这台机器上都跑不了），这里钉的是**保存之后解析的结论**。
+    await saveGeneratorCommand(db, 'dsh headless {prompt}');
+
+    const view = await generatorView(db);
+    expect(view).toMatchObject({ state: 'ready', source: 'settings', savedId: 'dsh', command: 'dsh headless {prompt}' });
+    // 第二次按「生成」：解析结果就是 ready，界面上不会再出现对话框。
+    expect((await resolveGenerator(view.saved)).kind).toBe('ready');
+  });
+
+  it('改成自建命令：下拉落在「自建」，命令仍是存着的那一条', async () => {
+    process.env.PATH = await pathWith(['claude']);
+    await saveGeneratorCommand(db, stub('gen-ok.mjs'));
+    const view = await generatorView(db);
+    expect(view.savedId).toBe('custom');
+    expect(view.saved).toBe(stub('gen-ok.mjs'));
+    expect(view.state).toBe('ready');
+  });
+
+  it('env 仍然最优先：它压过库里那条（F）', async () => {
+    process.env.PATH = await pathWith(['dsh']);
+    await saveGeneratorCommand(db, 'dsh headless {prompt}');
+    process.env.FLOWERS_GEN_CMD = stub('gen-ok.mjs');
+    expect(await generatorView(db)).toMatchObject({ source: 'env', command: stub('gen-ok.mjs') });
   });
 });
