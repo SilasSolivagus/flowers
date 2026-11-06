@@ -152,8 +152,14 @@ export function commandFor(template: string, pack: string): { line: string; stdi
 
 // ─── 跑一条命令 ──────────────────────────────────────────────────────────────
 
-/** 终端转义序列（CLI 的彩色输出）不该进到界面里，也不该进到「失败原因」那一行。 */
-const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/**
+ * 终端转义序列不该进到界面里，也不该进到「失败原因」那一行。
+ *
+ * 除了 CSI（`ESC [ … 字母`，彩色与光标控制），还要吃掉 OSC（`ESC ] … BEL`，窗口标题、
+ * 超链接）与单字符转义——`ollama run` 在非 TTY 下吐的就是 CSI 加光标控制，
+ * 而且它们**插在 token 内部**（`<!␛[?25lDOCTYPE`），只能在切 HTML 之前整段清掉。
+ */
+const ANSI = /\u001b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
 
 /**
  * Node 自己打在 stderr 上的运行时告警。
@@ -311,7 +317,20 @@ function failureText(raw: RawRun): string {
  * 或 `<html` 开始截到结尾，是这几种输出都能成立的读法——后置的废话留在文件里也不会
  * 改变它是一份 HTML 这件事（浏览器照样渲染）。
  */
-export function htmlDocumentIn(text: string): string | null {
+/**
+ * 把终端控制符从文本里清掉。
+ *
+ * 为什么必须有这一步：`ollama run` 在非 TTY 之下仍然会吐进度桁架与光标控制码，
+ * 而且它们**插在文档中间**——实测拿到的是 `<!␛[?25lDOCTYPE␛[?25h html>`。
+ * 只按 `<!doctype` 切片是切不掉的：那些字节在 token 内部。不清干净，落盘的 HTML
+ * 从 doctype 起就已经坏了（浏览器退回怪异模式，样式全变）。
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI, '').replace(/\r(?!\n)/g, '');
+}
+
+export function htmlDocumentIn(raw: string): string | null {
+  const text = stripAnsi(raw);
   const lower = text.toLowerCase();
   const doctype = lower.indexOf('<!doctype html');
   const root = lower.search(/<html[\s>]/);
