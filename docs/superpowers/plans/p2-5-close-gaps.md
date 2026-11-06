@@ -38,6 +38,10 @@ HTML**：agent（或任何人）写进去的 `<script>` 会以本站的 origin �
   X-Content-Type-Options: nosniff
   ```
 
+> **这一行 CSP 已被 R-P2-9 推翻**（`sandbox` → `sandbox allow-scripts`，并单独放开
+> `script-src 'unsafe-inline'`）。下面「代价：脚本不执行」那一段是当时的事实、不是现在的：
+> 现在的头与它的三条浏览器观察见文末 `## R-P2-9：放宽到 sandbox allow-scripts`。
+
 - `attachArtifact` 的站内路径口径同时收紧：必须是 `/uemaster/` 开头。静态根既然已经不是
   产物的家，`/foo/bar.html` 这种名字在这个系统里不再指向任何可服务的文件——收下它只会
   造出一条「attach 说成功、点开 404」的链接。`artifact_missing` 的文案从
@@ -274,3 +278,100 @@ $ (cd /tmp && ... | npm run mcp)
 9. **`tsconfig.mcp.json` 只编 `mcp` + `src`**：`app/` 的类型由 `npx tsc --noEmit`（主配置）管，
    两边不是同一份 include，所以「主配置干净」不等于「mcp 配置干净」——本轮两个都跑过，
    但没有把这条关系写进 CI。
+
+---
+
+## R-P2-9：放宽到 `sandbox allow-scripts`
+
+上一轮按给定头逐字实现，头是对的、实现是对的，**但那个头写错了规格**：`sandbox` 不带
+`allow-scripts` 时脚本被禁用，`default-src 'none'` 又顺手把 `script-src` 关死，于是
+`flow-walkthrough` 那种「点左边节点、右边切线框页」的走查页在站内是一张死图——材料读得到，
+看不了。裁决改为：**脚本要活，同源仍然不给**。
+
+### 头（唯一一处，`app/uemaster/[...path]/route.ts`）
+
+```
+Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:
+```
+
+另外两条没变：
+
+```
+Content-Type: text/html; charset=utf-8
+X-Content-Type-Options: nosniff
+```
+
+为什么这仍然安全，一句话讲清：**`allow-same-origin` 不在这一行里**。`sandbox` 只要少了
+它，文档就落在一个不透明源中——脚本能跑，但 `document.cookie` 抛、`localStorage` 抛、
+同源请求带上不凭据也读不到响应；`default-src 'none'` 同时把 `connect-src` 关掉，请求在
+CSP 这一层就被拒，连发都发不出去。危险的那一种组合是 `allow-scripts allow-same-origin`
+**同时**出现（脚本能自己把沙箱拆掉），这里没有它。测试里加了一条负断言钉这件事：
+`expect(CSP).not.toContain('allow-same-origin')`。
+
+`tests/uemaster-route.test.ts` 的 `CSP` 常量改成上面那一行、断言逐字相等；上一版那条
+「脚本被禁止」的口径（断言里只有 `sandbox`）整条作废——它编码的是一个已经被推翻的决定。
+
+### 真浏览器里的三条观察（Chromium 156，`127.0.0.1:3000`，同一个会话、同一个 profile）
+
+探针产物：`docs/superpowers/plans/p2-5-csp-probe.html`（一个两栏页面：左侧流程节点、右侧
+正文，外加一块自报状态的 `<pre>`；用的时候拷到 `data/uemaster/PAN-7/csp-probe.html`
+再打开，看完删掉——`data/` 是运行期目录，不进 git）。先在本站 origin 上把两个真 cookie 放好，再用 CDP 的
+`Network.getAllCookies` 在**访问前 / 访问后**各取一次。
+
+1. **脚本真的在跑。** `document.title` 从 `"CSP 探针"` 变成 `"SCRIPT-RAN"`；真的点一下
+   左侧节点之后，正文从 `"这是页面 A 的内容。"` 变成
+   `"这是页面 B 的内容——点一下换过来了，说明 onclick 真的在跑。"`，`aria-current` 从
+   `A:true,B:false` 变成 `A:false,B:true`。截图：`p2-5-csp-scripts-on.png`。
+2. **同一个脚本读不到本站 cookie。** 探针写进 DOM 的原文是
+   `document.cookie THREW SecurityError: Failed to read the 'cookie' property from 'Document': The document is sandboxed and lacks the 'allow-same-origin' flag.`
+   （不是空串，是抛错——不透明源连这个属性都不给）。旁边的 `localStorage.setItem` 同样抛：
+   `SecurityError: Failed to read the 'localStorage' property from 'Window': The document is sandboxed and lacks the 'allow-same-origin' flag.`
+   访问前后 cookie 一字不差：
+   `["flowers_actor=%E5%90%95%E5%93%81 (domain=127.0.0.1 path=/ httpOnly=false)","flowers_rail=open (domain=127.0.0.1 path=/ httpOnly=false)"]`
+   （前后两次 `JSON.stringify` 相等，`COOKIES_UNCHANGED: true`）。回到本站，站点仍然认出
+   这个身份（正文里还是「吕品」），`document.cookie` 读回来还是
+   `flowers_actor=%E5%90%95%E5%93%81; flowers_rail=open`。
+3. **同源 fetch 出不去。** 探针里 `fetch('/', {credentials:'include'})` 的结果是
+   `fetch(/) REJECTED TypeError: Failed to fetch`。原因不是「网络不通」而是 CSP 拒的，控制台
+   原文：
+   `error: Connecting to 'http://127.0.0.1:3000/' violates the following Content Security Policy directive: "default-src 'none'". Note that 'connect-src' was not explicitly set, so 'default-src' is used as a fallback. The action has been blocked.`
+   并且 `Network.loadingFailed blocked=csp`——请求出现在事件流里，但没有发出去。
+   `XMLHttpRequest` 同样：`xhr.onerror (status=0)` + `blocked=csp`。
+
+### 这条口径**仍然不防**什么（同一次会话里逐条按过）
+
+- **它自己的界面能撒谎。** 脚本活着就等于能任意改自己的 DOM：一个产物可以把整个页面画成
+  「本站的登录框」或「操作成功」，用户看到的是产物自己说的。沙箱管的是「改不了本站」，
+  不是「说的是真话」。
+- **它能把整个标签页导航走。** `location.href = '…'` 从沙箱文档里执行成功，落到了
+  `http://127.0.0.1:3000/?pwned=1`（`Page.navigatedWithinDocument`）。因为读不到 cookie，
+  这不能带走凭据；但它能把人送到任意页面（包括站外钓鱼页），而地址栏是浏览器画的。
+- **它照旧吃 CPU / 内存**：死循环、`while(1)`、几千个 DOM 节点，沙箱不管这些。
+- 已经被挡住、这次复核过的：`window.open()` →
+  `Blocked opening '…' in a new window … 'allow-popups' permission is not set`；
+  `form.submit()` → `Blocked form submission … 'allow-forms' permission is not set`；
+  XHR / fetch → `blocked=csp`；`document.cookie`、`localStorage` → `SecurityError`。
+- **仍然只有 Chromium 验过。** Safari / Firefox 对 CSP `sandbox` 指令的落地程度没有测。
+
+### 顺手修掉的一条：失败的交回不再留孤儿文件
+
+顺序是「先写文件 → 再 attach」，而 attach 会在 `not_found`（编号打错，最常见）、
+`invalid_stage`、`artifact_missing`、评估缺类型上说不行。失败之后那份
+`data/uemaster/PAN-x/<stage>-<ts>.html` 没有任何一行指向它，永久躺在那儿。
+
+改法在 `app/attach-form.ts`（`src/core` 一行没动）：把「这次自己写的那个路径」记住，
+`attachArtifact` 抛错时先 `unlink` 文件、再 `rmdir` 父目录（非空时失败，吞掉），然后
+**把原始错误原样抛出去**——用户该读到的是「需求不存在」，不是一句 ENOENT。三条边界：
+只回收这一次写的文件（用户贴进来的链接一律不碰）；回收失败不掩盖原始错误；失败后的
+磁盘状态与提交前一致（连空目录都不留）。
+
+证明（`tests/uemaster-upload.test.ts` 新增两条）：
+
+- `attach 说不的时候，刚写的文件被收回去：磁盘上不留孤儿`——用一个不存在的需求编号提交
+  一份真 `File`，断言 `not_found` / `需求不存在`、库里 0 行，并且 `data/uemaster/` 递归
+  列出来是 `[]`（提交前也是 `[]`）。
+- `回收只碰这一次写的文件：同一目录里已有的产物还在`——先成功交一份 `inspect`，记下目录树
+  （1 个文件），再往**同一个 PAN 目录**交一份注定失败的 `evaluate`，断言目录树与失败前
+  **逐字相同**、库里仍只有成功那一条。
+
+用例总数从 308 变成 **310**（+2），`npx tsc --noEmit` 干净。

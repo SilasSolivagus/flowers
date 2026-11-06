@@ -138,13 +138,13 @@ claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
    已经在「待设计」或更后面的需求补一份新评估，只换材料，不会被打回。
 
 文件本身不由 Next 的静态根服务：`data/uemaster/` 不在 `public/` 里，读它的是动态路由
-`app/uemaster/[...path]/route.ts`，每个响应都带 `Content-Security-Policy: sandbox;
-default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:` 与
-`X-Content-Type-Options: nosniff`。原因是产物是**同源的第三方内容**：从静态根直接服务，
-它里面的 `<script>` 会带着本站 cookie 跑，一份交回来的 HTML 就能改本站。`sandbox` 把它
-关进不透明源（读不到 `document.cookie`、storage、带凭据的接口）；代价是脚本不执行，
-所以 `flow-walkthrough` 那种「点左边节点切右边页面」的交互在站内是死的——双击本地文件
-打开仍然是活的。
+`app/uemaster/[...path]/route.ts`，每个响应都带
+`Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:`
+与 `X-Content-Type-Options: nosniff`。原因是产物是**同源的第三方内容**：从静态根直接服务，
+它里面的 `<script>` 会带着本站 cookie 跑，一份交回来的 HTML 就能改本站。`sandbox`（没有
+`allow-same-origin`）把它关进不透明源：脚本照样执行——`flow-walkthrough` 那种「点左边节点
+切右边页面」的交互在站内是活的（R-P2-9）——但它读不到 `document.cookie`（抛 `SecurityError`）、
+用不了 storage、同源 `fetch`/XHR 在 CSP 那一层被拒。能改的只有它自己那份页面的样子。
 
 没有 PRD 的需求：评估照做（推断处标「PRD 未提供」），评审与走查的包会直接让你停下并把
 「缺少 PRD 链接」回报给用户——这两份材料的输入就是 PRD，没有它做出来的东西是编的。

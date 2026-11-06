@@ -1,10 +1,11 @@
+import { readdir } from 'node:fs/promises';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { attachFromForm } from '../app/attach-form.js';
 import { GET } from '../app/uemaster/[...path]/route.js';
 import { createRequirement } from '../src/core/requirements/create.js';
-import { MAX_UPLOAD_BYTES } from '../src/core/uemaster/store.js';
+import { ARTIFACT_ROOT, MAX_UPLOAD_BYTES } from '../src/core/uemaster/store.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { cleanArtifacts, writeArtifact } from './helpers/files.js';
@@ -57,6 +58,28 @@ async function newRequirement(): Promise<{ id: string; number: number }> {
 async function urls(): Promise<string[]> {
   const res = await db.execute<{ url: string }>(sql`select url from uemaster_artifacts order by id`);
   return res.rows.map((row) => row.url);
+}
+
+/**
+ * `data/uemaster/` 下现在有哪些文件（相对路径，排过序）。
+ *
+ * 用来问「失败的提交在磁盘上留下了什么」：只查库不够，孤儿文件恰恰是库里查不到的那半。
+ * 目录整个不存在时返回空数组——那正是「一次都没写成功」的形状。
+ */
+async function artifactTree(): Promise<string[]> {
+  try {
+    const entries = await readdir(ARTIFACT_ROOT, { recursive: true, withFileTypes: true });
+    return entries
+      .filter((e) => e.isFile())
+      .map((e) => `${pathRelative(e.parentPath, e.name)}`)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function pathRelative(dir: string, name: string): string {
+  return `${dir.slice(ARTIFACT_ROOT.length + 1)}/${name}`.replace(/^\//, '');
 }
 
 async function caught(p: Promise<unknown>): Promise<AppError> {
@@ -120,6 +143,42 @@ describe('传文件', () => {
     }, big)));
     expect(e).toMatchObject({ code: 'invalid_upload', message: '文件不能超过 5 MB' });
     expect(await urls()).toEqual([]);
+    expect(await artifactTree()).toEqual([]);
+  });
+
+  it('attach 说不的时候，刚写的文件被收回去：磁盘上不留孤儿', async () => {
+    // 一个不存在的需求编号：文件已经写下了，attach 才说「需求不存在」——
+    // 这正是 R-P2-9 之前会留一份永远没人指向的 HTML 的那条路。
+    const ghost = '00000000-0000-4000-8000-000000000000';
+    expect(await artifactTree()).toEqual([]);
+
+    const e = await caught(attachFromForm(db, '吕品', form({
+      id: ghost, stage: 'evaluate', number: '7',
+    }, html())));
+
+    expect(e).toMatchObject({ code: 'not_found', message: '需求不存在' });
+    expect(await urls()).toEqual([]);
+    // 目录回到提交之前的样子：连空目录都不留（失败不该改磁盘）。
+    expect(await artifactTree()).toEqual([]);
+  });
+
+  it('回收只碰这一次写的文件：同一目录里已有的产物还在', async () => {
+    const { id, number } = await newRequirement();
+    const good = await attachFromForm(db, '吕品', form({
+      id, stage: 'inspect', number: String(number),
+    }, html()));
+    const before = await artifactTree();
+    expect(before).toHaveLength(1);
+
+    // 同一个 PAN 目录、换个 stage，attach 失败（需求编号现在改成不存在的那个）。
+    const ghost = '00000000-0000-4000-8000-000000000000';
+    await caught(attachFromForm(db, '吕品', form({
+      id: ghost, stage: 'evaluate', number: String(number),
+    }, html())));
+
+    // 目录内容一字不差：失败那次写的文件没了，成功那次写的文件还在。
+    expect(await artifactTree()).toEqual(before);
+    expect(await urls()).toEqual([good.url]);
   });
 });
 

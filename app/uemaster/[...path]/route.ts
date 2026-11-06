@@ -14,22 +14,27 @@ import { ARTIFACT_PREFIX, artifactFile } from '../../../src/core/uemaster/store'
  * 一层能说「不」。所以文件搬到 `public/` 之外（`data/uemaster/`，git 忽略），这条
  * 动态路由是唯一能读到它的地方，并且给每个响应挂上同一组头。
  *
- * `Content-Security-Policy: sandbox` 是关键那一行：文档被关进**不透明源**。
- * 它拿不到本站的 cookie（`document.cookie` 是空的）、读不到同源 localStorage、
- * 带凭据调本站接口也只是另一个源发起的匿名请求（本应用没有跨源 CORS 头，于是照样
- * 读不到响应）。代价写在报告里：`sandbox` 不带 `allow-scripts` 时脚本**不执行**，
- * 所以走查页里的点击切换是死的——这是「材料读得到、但改不了本站」这条口径的直接
- * 结果，不是意外。
+ * `Content-Security-Policy: sandbox allow-scripts` 是关键那一行：文档被关进**不透明
+ * 源**，但脚本照跑。这两件事必须一起看——R-P2-9 之前的 `sandbox`（不带
+ * `allow-scripts`）把脚本整个关掉，走查页那种「点左边流程节点、右边切线框页」的
+ * 交互是死的，材料读得到却全是死图。裁决是：**要活，但不要同源**。
+ *
+ * 为什么放开脚本仍然安全：`sandbox` 只要**不带 `allow-same-origin`**，文档就落在一个
+ * 不透明源里——`document.cookie` 读不到本站的（空串或抛错）、`localStorage` 不可用、
+ * 同源 `fetch` 带不上也读不到任何东西（本站没有 CORS 头，响应是 opaque 或被拦）。
+ * 危险的那一种组合是 `allow-scripts allow-same-origin` 同时出现——脚本能自己把沙箱
+ * 拆掉，等于没有沙箱。这一行里没有它，所以不放。
  *
  * 剩下三条头各有分工：
- * - `default-src 'none'` 把外部资源全关掉（产物本来就要求自足：不引 CDN）；
- *   行内样式与 `data:`/`blob:` 图片单独放开，否则线框图与流程图会白屏。
+ * - `default-src 'none'` 把外部资源全关掉（产物本来就要求自足：不引 CDN），并且连
+ *   `connect-src` 一起关：`fetch('/')` 在 CSP 这一层就被拒，不必等网络层。
+ *   行内脚本、行内样式与 `data:`/`blob:` 图片单独放开，否则走查页的切换与线框图都死。
  * - `Content-Type: text/html; charset=utf-8` 固定成 HTML：路由收的就是 HTML，
  *   不让磁盘上的后缀决定响应类型（`.svg` 之类的名字不该改变这一层的行为）。
  * - `nosniff` 让浏览器别猜：即使将来有人往这个目录塞了别的文件，它也不会被当成
  *   可执行的脚本或样式。
  */
-const CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:";
+const CSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:";
 
 const HEADERS: Record<string, string> = {
   'Content-Security-Policy': CSP,

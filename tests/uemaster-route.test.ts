@@ -10,11 +10,17 @@ import { cleanArtifacts, writeArtifact } from './helpers/files.js';
  * 为什么把路由的 GET 当普通函数调、而不是起一个服务器：这条路由的全部职责是
  * 「一段路径 → 一份文件 + 一组固定的头」，请求上下文只有 `params`。起 Next 只为
  * 了断言四个头，测到的是 Next 自己；直接调它，测到的是我们写的那几十行。
- * 真正只有浏览器能回答的那半（`sandbox` 生效之后 `document.cookie` 到底还不还读得到）
- * 记在 `docs/superpowers/plans/p2-5-close-gaps.md` 里，与这一条分开说。
+ *
+ * 这一条在 R-P2-9 之后换了口径：上一版钉的是 `sandbox`（不带 `allow-scripts`），
+ * 它让脚本**不执行**，走查页于是全是死图。裁决把这一格放宽成
+ * `sandbox allow-scripts`——不透明源仍然成立（没有 `allow-same-origin`），脚本能跑。
+ * 所以下面钉的字符串是新的那一条；谁把它改回去，这几条用例会红。
+ * 浏览器里真正跑一遍的三条观察（脚本跑起来、cookie 读不到、fetch 被拒）记在
+ * `docs/superpowers/plans/p2-5-close-gaps.md` 的 `R-P2-9` 一节：那是浏览器才能回答的
+ * 问题，与这里的头断言分开说。
  */
 
-const CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:";
+const CSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:";
 
 /** 一份「会偷 cookie」的产物：这就是从 public/ 直接服务时的那条储存型 XSS。 */
 const XSS = '<!doctype html><meta charset="utf-8"><title>偷 cookie</title>'
@@ -35,13 +41,17 @@ afterAll(async () => {
 });
 
 describe('GET /uemaster/[...path]', () => {
-  it('产物带着 sandbox CSP、固定 HTML 类型、nosniff 出去——脚本本身还在文档里', async () => {
+  it('产物带 sandbox allow-scripts、固定 HTML 类型、nosniff 出去——脚本可执行，但仍然不是同源', async () => {
     await writeArtifact('/uemaster/PAN-7/xss.html', XSS);
     const res = await get(['PAN-7', 'xss.html']);
 
     expect(res.status).toBe(200);
-    // 三条头逐字钉住：少一条 `sandbox`，这份文件就又是一个同源脚本执行点。
+    // 四条头逐字钉住。这条字符串**就是**裁决：`sandbox` 关不透明源，
+    // `allow-scripts` 让走查页的点击活过来（R-P2-9）。
     expect(res.headers.get('content-security-policy')).toBe(CSP);
+    // 唯一危险的那一种组合是 allow-scripts 与 allow-same-origin 同时出现：
+    // 脚本能自己把沙箱拆掉。少了 allow-same-origin，cookie / storage / 同源 fetch 全断。
+    expect(res.headers.get('content-security-policy')).not.toContain('allow-same-origin');
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     // 文件内容原样出去（服务端不做净化）：安全靠的是文档外面的那份 CSP，不是删脚本。

@@ -1,7 +1,9 @@
+import { rmdir, unlink } from 'node:fs/promises';
+import path from 'node:path';
 import type { Db } from '../src/db/client';
 import { AppError } from '../src/core/errors';
 import { attachArtifact } from '../src/core/uemaster/attach';
-import { saveUploaded } from '../src/core/uemaster/store';
+import { artifactFile, saveUploaded } from '../src/core/uemaster/store';
 
 /**
  * 抽屉「交回材料」那张表单 → 领域入参的**唯一**一段翻译，故意不挂在 `'use server'`
@@ -16,6 +18,10 @@ import { saveUploaded } from '../src/core/uemaster/store';
  * 这里**不做任何校验**：扩展名、5 MB、stage、编号、文件写在哪，全在 `saveUploaded`
  * 与 `attachArtifact` 里（一条写路径、一套中文消息）。这一层只回答一件事：这次提交
  * 交回的是**哪一份**（文件优先，其次链接）。
+ *
+ * 它也不是纯粹的翻译：先写文件、再 attach，所以本层是唯一知道「哪个文件是这一次写的」
+ * 的地方。attach 说不的时候，那份文件由这里收回去（见 `attachFromForm` 里 catch 那段）
+ * ——领域层不知道上传这条路的存在，也不该知道。
  */
 export type Attached = { url: string };
 
@@ -48,21 +54,47 @@ export async function attachFromForm(
   const file = uploaded(formData.get('file'));
   // 两个进法合成一次提交，**文件优先**：一份刚生成的产物比一个手打的老链接新，
   // 而猜错的代价只是再交一次。
-  const target = file === null
-    ? field(formData, 'url')
+  const uploadedPath = file === null
+    ? null
     : await saveUploaded(field(formData, 'number'), field(formData, 'stage'), {
       name: file.name,
       size: file.size,
       bytes: new Uint8Array(await file.arrayBuffer()),
     });
+  const target = uploadedPath ?? field(formData, 'url');
 
   // 两条都空：这是用户的手误，不是领域错误，给它一句自己的话。
   if (target === '') throw new AppError('invalid', '请粘贴链接或选择文件');
 
-  await attachArtifact(db, actor, {
-    requirementId: field(formData, 'id'),
-    stage: field(formData, 'stage'),
-    url: target,
-  });
+  try {
+    await attachArtifact(db, actor, {
+      requirementId: field(formData, 'id'),
+      stage: field(formData, 'stage'),
+      url: target,
+    });
+  } catch (error) {
+    /**
+     * 落库失败就把刚写的文件收回去（R-P2-9 顺手修的一条）。
+     *
+     * 顺序本来是「先写文件、再 attach」，而 attach 会在四件事上说不：需求不存在、
+     * stage 不合法、站内链接没有文件、评估缺类型。前一种最常见——打错一个编号。
+     * 失败之后那份文件没有任何一行指向它：`data/uemaster/` 里躺着永远不会被服务到、
+     * 也永远不会被清理的 HTML，目录越攒越像一堆来路不明的材料。
+     *
+     * 三条边界：
+     * - 只回收**这一次**自己写的那个文件（`uploadedPath`，名字由 stage+时间戳拼、
+     *   路径由我们自己定）；用户贴进来的链接一律不碰——那可能是别人还要用的文件。
+     * - 先 unlink 文件，再试着 rmdir 父目录；目录非空时 rmdir 失败是可预期的，
+     *   吞掉它。这样失败的提交在磁盘上留下的东西和对齐前的状态一致。
+     * - 回收本身失败（权限、文件被移走）不掩盖原始错误：用户该读到的是
+     *   「需求不存在」，不是一句 ENOENT。
+     */
+    if (uploadedPath !== null) {
+      const stale = artifactFile(uploadedPath);
+      await unlink(stale).catch(() => undefined);
+      await rmdir(path.dirname(stale)).catch(() => undefined);
+    }
+    throw error;
+  }
   return { url: target };
 }

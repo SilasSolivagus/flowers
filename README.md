@@ -87,9 +87,11 @@ uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<st
 「参考」段对应那一行立刻从「复制任务包」变成链接 + 日期，记录段多一条
 `uemaster.attached`。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing`——
 包自己写着该往哪写，写不对就是没干活。文件不在 `public/` 里：`/uemaster/...` 由动态路由
-`app/uemaster/[...path]/route.ts` 服务，每个响应带 `Content-Security-Policy: sandbox`
-——产物是同源的第三方 HTML，它的脚本不该带着本站 cookie 跑（代价：脚本不执行，
-点节点切页面的交互站内是死的）。
+`app/uemaster/[...path]/route.ts` 服务，每个响应带
+`Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:`
+——产物是同源的第三方 HTML，它的脚本能跑（走查页的点击切换因此在站内是活的），但没有
+`allow-same-origin`，所以它读不到本站 cookie、用不了 storage、同源请求也发不出去
+（R-P2-9）。
 
 ### 入口是 MCP server
 

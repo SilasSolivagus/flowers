@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>CSP 探针</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; color: #1c1c1e; background: #f6f6f7; }
+  .wrap { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+  aside { background: #fff; border-right: 1px solid #e5e5ea; padding: 14px 12px; }
+  aside b { display: block; font-size: 13px; color: #6e6e73; margin-bottom: 10px; letter-spacing: .04em; }
+  .node { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 9px 10px; border: 1px solid #e5e5ea;
+          border-radius: 8px; background: #fff; font: inherit; cursor: pointer; }
+  .node[aria-current="true"] { border-color: #0a84ff; box-shadow: 0 0 0 3px rgba(10,132,255,.15); }
+  main { padding: 22px 26px; overflow: auto; }
+  h1 { margin: 0 0 4px; font-size: 19px; }
+  p.sub { margin: 0 0 16px; color: #6e6e73; }
+  .panel { background: #fff; border: 1px solid #e5e5ea; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .big { font-size: 15px; }
+  #page-body { min-height: 60px; }
+  pre { margin: 0; white-space: pre-wrap; font: 12px/1.65 ui-monospace, Menlo, monospace; color: #1c1c1e; }
+  .ok { color: #1f8f3a; } .bad { color: #b3261e; }
+</style>
+<div class="wrap">
+  <aside>
+    <b>流程节点</b>
+    <button class="node" aria-current="true" data-page="A">① 线索登记</button>
+    <button class="node" aria-current="false" data-page="B">② 评估</button>
+  </aside>
+  <main>
+    <h1 id="page-title">页面 A · 线索登记</h1>
+    <p class="sub">点左侧节点切换右侧页面——脚本活着，这一步才有意义。</p>
+
+    <div class="panel big">
+      <div id="page-body">这是页面 A 的内容。</div>
+    </div>
+
+    <div class="panel">
+      <b>CSP 探针（脚本自己写下的）</b>
+      <pre id="out">脚本还没跑……</pre>
+    </div>
+  </main>
+</div>
+<script>
+  const out = document.getElementById('out');
+  const lines = [];
+
+  function tryIt(label, fn) {
+    try {
+      lines.push(label + ' = ' + fn());
+    } catch (e) {
+      lines.push(label + ' THREW ' + e.name + ': ' + e.message);
+    }
+  }
+
+  // ① 脚本跑没跑：文档标题与 DOM 都改。
+  const before = document.title;
+  document.title = 'SCRIPT-RAN';
+  lines.push('TITLE before/after = "' + before + '" -> "' + document.title + '"');
+
+  // ② 读不读得到本站 cookie。
+  tryIt('document.cookie', () => JSON.stringify(document.cookie));
+  tryIt('localStorage.setItem', () => { localStorage.setItem('probe', '1'); return 'OK'; });
+
+  // ③ 同源 fetch。
+  out.textContent = lines.join('\n') + '\nfetch(/) = 等待中……';
+  fetch('/', { credentials: 'include' })
+    .then((r) => { lines.push('fetch(/) RESOLVED status=' + r.status + ' type=' + r.type + ' opaque=' + (r.type === 'opaque')); })
+    .catch((e) => { lines.push('fetch(/) REJECTED ' + e.name + ': ' + e.message); })
+    .finally(() => { out.textContent = lines.join('\n'); });
+
+  // 交互：左侧节点切换右侧页面。
+  const nodes = [...document.querySelectorAll('.node')];
+  const body = document.getElementById('page-body');
+  const title = document.getElementById('page-title');
+  const pages = {
+    A: ['页面 A · 线索登记', '这是页面 A 的内容。'],
+    B: ['页面 B · 评估', '这是页面 B 的内容——点一下换过来了，说明 onclick 真的在跑。'],
+  };
+  document.querySelectorAll('.node').forEach((node) => {
+    node.addEventListener('click', () => {
+      const key = node.dataset.page;
+      nodes.forEach((n) => n.setAttribute('aria-current', String(n === node)));
+      title.textContent = pages[key][0];
+      body.textContent = pages[key][1];
+      lines.push('CLICK node=' + key + ' -> title=' + JSON.stringify(title.textContent));
+      out.textContent = lines.join('\n');
+    });
+  });
+
+  out.textContent = lines.join('\n') + '\nfetch(/) = 等待中……';
+</script>
+</html>
