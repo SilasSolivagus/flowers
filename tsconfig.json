@@ -36,6 +36,7 @@
     "src",
     "tests",
     "scripts",
+    "mcp",
     "app",
     "next-env.d.ts",
     ".next/types/**/*.ts",
