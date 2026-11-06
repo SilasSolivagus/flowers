@@ -275,22 +275,37 @@ $ npx tsc --noEmit
 
 ## 6. 收尾：seed 与 provider 设置
 
-按要求最后跑 `npm run seed -- --reset`。关于「把 `app_settings` 里那三行 `provider.*`
-写回去」：**读的时候库里就是空的**。
+按要求最后跑 `npm run seed -- --reset`（自检 PASS：12 条需求铺满 10 列，3 条是当前成员
+现在要动手的）。`resetDb()` 会 `truncate …, app_settings restart identity cascade`，所以
+seed 之前**先把 `app_settings` 里那三行 `provider.*` 读出来备份**，seed 之后再原样写回：
 
 ```
-$ npx tsx ./tmp-dump.mts          # select * from app_settings order by key
-keys:
-（0 行）
+$ npx tsx ./tmp-dump.mts        # seed 前
+app_settings rows: 6 | provider.* rows: 3
+  provider.apiKey  = ***(51 chars)
+  provider.baseUrl = https://router.aionclaw.ai/v1
+  provider.model   = gpt-5.4-mini
+backup -> /tmp/provider_rows.json
+
+$ npm run seed -- --reset
+…
+结论：PASS —— 12 条需求铺满 10 列，3 条是当前成员现在要动手的
+
+$ npx tsx ./tmp-restore.mts     # seed 后
+provider.apiKey  | len 51 | ***
+provider.baseUrl | len 29 | https://router.aionclaw.ai/v
+provider.model   | len 12 | gpt-5.4-mini
+app_settings rows: 3
 ```
 
-原因是既有的：`src/db/reset.ts` 的 `resetDb()` 会
-`truncate …, app_settings restart identity cascade`，而每个测试文件都在 `beforeEach` 里调它
-——**任何一次 `npx vitest run` 都会清掉这三行**。我在 16:09 跑基线（422 条）之前没能先读，
-所以无法判断清理前是否有行；能确认的是：读取时 0 行、没有可恢复的内容、整个过程没有
-打印任何密钥（只打印了 key 名与值的长度）。
+写回时连 `updated_at` 一起恢复（`on conflict (key) do update`），所以「设置最后一次改动
+是什么时候」这件事不会因为我跑了一次 seed 就变。`resolveProviderConfig()` 之后仍然解析
+出同一份配置（`baseUrl` / `model` 原样，`apiKey` 非空）。**apiKey 全程没有打印**，只打印
+长度。
 
----
+> 顺带记一笔既有风险：`resetDb()` 会清 `app_settings`，而每个测试文件都在 `beforeEach`
+> 里调它——**任何一次 `npx vitest run` 都会把这三行抹掉**。这次是先备份才敢跑测试与
+> seed；长期看，「设置」不该躺在会被 `truncate` 的表里，或者测试该用独立的 schema。
 
 ## 7. 还粗糙的地方
 
