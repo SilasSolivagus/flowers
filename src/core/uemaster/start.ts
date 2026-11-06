@@ -8,12 +8,14 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { attachArtifact } from './attach.js';
+import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
 import { artifactFile } from './store.js';
+import type { AttemptView } from './trace.js';
 
 /**
  * 生成作业的**起点**（服务层）与**执行体**（worker 里跑的那一段）。
@@ -101,6 +103,14 @@ export type JobView = {
   url: string | null;
   createdAt: string;
   finishedAt: string | null;
+  /**
+   * 这一次作业留下的每一次尝试（P2.13），按发生顺序。
+   *
+   * 为什么挂在 `JobView` 上而不是另开一个 action：抽屉拿到「失败了」的那一刻，紧接着
+   * 就要那块「详情」；分成两次往返，中间那一帧就是「有一句失败原因、点开详情是空的」。
+   * 还在跑的作业给空数组（那时留痕没意义，还会让每次轮询多一次查询）。
+   */
+  attempts: AttemptView[];
 };
 
 /**
@@ -323,6 +333,9 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       const composed = await composeEvaluation(db, actor, {
         requirementId: job.requirement_id,
         stage: job.stage,
+        // 留痕按作业 id 落库：这一次生成的五次调用（图 3 + 页 2 + 构建 1）里，
+        // 通过的和被拒的都要有名字，而 `uemaster_jobs.error` 只留得下最后一句。
+        jobId,
       }, {
         resolveConfig: () => resolveProviderConfig(actor),
       });
@@ -411,6 +424,9 @@ export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> 
      where j.id = ${jobId}`);
   const row = res.rows[0];
   if (!row) return null;
+  // 还在跑的作业没有「详情」可看，给空数组：这一条轮询每 1.5 秒一次，不为了一个
+  // 不存在的答案多查一次。
+  const attempts = row.status === 'running' ? [] : await readAttempts(db, jobId);
   return {
     id: row.id,
     stage: row.stage,
@@ -419,5 +435,6 @@ export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> 
     url: row.url,
     createdAt: new Date(row.created_at).toISOString(),
     finishedAt: row.finished_at === null ? null : new Date(row.finished_at).toISOString(),
+    attempts,
   };
 }

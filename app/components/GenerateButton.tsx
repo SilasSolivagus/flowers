@@ -2,10 +2,12 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
+import { attemptLine, classifyFailure, type AttemptView, type Failure } from '../../src/core/uemaster/trace';
 import { generateAction, generationStatusAction } from '../actions';
 import { GeneratorDialog } from './GeneratorDialog';
+import { Toast } from './Toast';
 
 /**
  * 参考段那一行右边的「生成」：按下 → 服务端开一次作业 → 这一行变「生成中」→
@@ -24,6 +26,13 @@ import { GeneratorDialog } from './GeneratorDialog';
  *    `OAuth session expired` 是合法且有用的句子；「生成失败」四个字什么也没说。
  * 3. **刷新之后状态还在**。初始的 `runningJobId` 由服务端读模型给出（正在跑的作业），
  *    所以刷新页面、换一个人打开同一条需求，看到的都是「生成中」。
+ *
+ * P2.13 起失败多两件东西，各管一件事：
+ * - 行里那句仍是**留档**：`生成失败：<原文>`，一个字不改写；
+ * - 行下多一个「详情」，列出这一次作业的每一次尝试（`第 1 次 · flow · 2 个节点 1 条连线被拒`），
+ *   数据来自 `uemaster_job_attempts`——原来只有最后那句能活下来，前几次的理由全蒸发了；
+ * - 外加一个 6 秒的浮层：点完去看别处的人回来时，行还在，但他没看见那一声。
+ * 三者只在**失败**时出现；成功的作业一条尝试记录也会写库，只是界面不显示（无噪音）。
  */
 
 /** 轮询间隔：够快看到结果，又不至于把 server action 当日志刷。 */
@@ -43,6 +52,13 @@ export function GenerateButton({
   const router = useRouter();
   const [jobId, setJobId] = useState<string | null>(runningJobId);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 这一次失败的那条作业的尝试清单（P2.13）。只在失败时非空：成功的作业不显示任何东西，
+   * 但库里照样有它的行（诊断要用）。
+   */
+  const [attempts, setAttempts] = useState<AttemptView[]>([]);
+  /** 浮层：`seq` 让「又失败了一次」重新计时，而不是沿用上一次那 6 秒。 */
+  const [toast, setToast] = useState<{ seq: number; failure: Failure } | null>(null);
   const [pending, setPending] = useState(false);
   /** 第一次用时的那个对话框：只在「还没配」时开，而且只开一次（答完就落库）。 */
   const [asking, setAsking] = useState(false);
@@ -61,7 +77,9 @@ export function GenerateButton({
       if (Date.now() > deadline.current) {
         deadline.current = 0;
         setJobId(null);
-        setError('生成没有回报（后台进程可能已退出）');
+        const message = '生成没有回报（后台进程可能已退出）';
+        setError(message);
+        setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure(message) }));
         return;
       }
 
@@ -84,7 +102,12 @@ export function GenerateButton({
       if (status.status === 'failed') {
         deadline.current = 0;
         setJobId(null);
-        setError(status.error ?? '未知原因');
+        const message = status.error ?? '未知原因';
+        setError(message);
+        // 详情与浮层同源：都是这条作业的尝试清单 / 那句原文的分类。分类只决定浮层
+        // 说哪句人话，行里那句始终是原文。
+        setAttempts(status.attempts);
+        setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure(message) }));
         return;
       }
       timer = setTimeout(() => void tick(), POLL_MS);
@@ -97,9 +120,12 @@ export function GenerateButton({
     };
   }, [jobId, router]);
 
+  const closeToast = useCallback(() => setToast(null), []);
+
   const start = async (): Promise<void> => {
     setPending(true);
     setError(null);
+    setAttempts([]);
     try {
       const form = new FormData();
       form.set('requirementId', requirementId);
@@ -110,12 +136,15 @@ export function GenerateButton({
         // 设置）：刷新一次让服务端把新的解析结果送上来。
         if (/生成器/.test(result.message)) router.refresh();
         setError(result.message);
+        // 连作业都没开成（没生成器 / 正在生成中）：这也是一次终端失败，同样要那一声。
+        setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure(result.message) }));
         return;
       }
       deadline.current = Date.now() + GIVE_UP_MS;
       setJobId(result.jobId);
     } catch {
       setError('生成请求没有送达');
+      setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure('生成请求没有送达') }));
     } finally {
       setPending(false);
     }
@@ -140,7 +169,21 @@ export function GenerateButton({
   return (
     <>
       {error !== null && (
-        <span className="gerr" title={error}>{`生成失败：${error}`}</span>
+        <>
+          <span className="gerr" title={error}>{`生成失败：${error}`}</span>
+          {/* 详情：只在失败时出现，成功时界面一个新元素都不多。一条尝试一行，
+              没有散文——这里要的是「几次、卡在哪一步」，不是第二篇报错。 */}
+          {attempts.length > 0 && (
+            <details className="gen-trace">
+              <summary>详情</summary>
+              <ol className="gen-trace-l">
+                {attempts.map((item) => (
+                  <li key={`${item.phase}-${item.attempt}`}>{attemptLine(item)}</li>
+                ))}
+              </ol>
+            </details>
+          )}
+        </>
       )}
       <button
         className="btn gen"
@@ -178,6 +221,9 @@ export function GenerateButton({
             </div>
           </div>
         </div>
+      )}
+      {toast !== null && (
+        <Toast key={toast.seq} failure={toast.failure} onClose={closeToast} />
       )}
     </>
   );

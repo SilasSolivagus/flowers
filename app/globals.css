@@ -215,12 +215,52 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 新增：一行里现在有两个控件（生成 / 交回材料），产物已存在时还要再加一个日期
    pill；生成失败时还有一句原因。`.row3` 是 `1fr auto` 两列，所以它们得先组成
    **一个**格子——否则第三个子元素会被网格挤到下一行、落到左列去。失败原因也是
-   这一格里的一个 flex 项：它跟着按钮走，不另起一段。 */
-.row3 .acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+   这一格里的一个 flex 项：它跟着按钮走，不另起一段。
+   P2.13 加了 `max-width:340px`：失败时这一格里有「一句原文 + 详情清单」，按内容撑开会
+   把 `1fr` 那一列（阶段名）压成一列竖排的单字（实测 1280px 下只剩 20px）。给它一个
+   上限，阶段名就还读得成一行；只在失败时才会顶到这个上限。
+   为什么是 px 而不是百分比：百分比在 `auto` 那一列里要对着一个未定的宽度解析，
+   Chrome 会把它退成一个比按钮加起来还窄的值，于是「生成」和「交回材料」竖着排。 */
+.row3 .acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;
+           max-width:340px}
 /* 新增：失败原因。CLI 的 stderr 尾巴可能是长长一段，所以给一个上限宽度并允许任意
    断行（`overflow-wrap:anywhere`），整句仍在 title 里，悬停可读全文。颜色只取 token。 */
-.row3 .gerr{max-width:320px;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);
-            overflow-wrap:anywhere}
+.row3 .gerr{flex:0 0 100%;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);
+            overflow-wrap:anywhere;text-align:right}
+/* 新增（P2.13）：失败时的「详情」——一次作业的每一次尝试，一行一条。
+   为什么 flex-basis 100%：`.acts` 是 flex 行（生成 / 交回材料 / 日期都在里面），
+   详情要**另起一行**而不是挤在按钮旁边，只能靠一个占满整行、自己换行的项。
+   为什么右对齐：它挂在右边的控件列下面，左对齐会跟左列的阶段名连成一句读不通的话。 */
+.row3 .gen-trace{flex:0 0 100%;display:flex;flex-direction:column;align-items:flex-end;
+                 margin-top:2px}
+.row3 .gen-trace summary{list-style:none;cursor:pointer;color:var(--c-text-4);
+                         font:400 var(--t-caption) var(--f-sans)}
+.row3 .gen-trace summary::-webkit-details-marker{display:none}
+.row3 .gen-trace summary::before{content:'▸ '}
+.row3 .gen-trace[open] summary::before{content:'▾ '}
+.row3 .gen-trace summary:hover{color:var(--c-text-2)}
+.row3 .gen-trace-l{margin:4px 0 0;padding:0;list-style:none;text-align:right;
+                   color:var(--c-text-3);font:400 var(--t-caption) var(--f-sans)}
+/* 一行一条，不要行距：这四条要能被横着比。 */
+.row3 .gen-trace-l li{padding:1px 0}
+/* 新增（P2.13）：终端失败的浮层。位置在底部中间——抽屉占着右边 560px，
+   右下角会被它盖住；居中之后它落在抽屉左边，读得到又不挡动作条。
+   颜色只取 token（没有一个字面色值）：边框用 --c-line-strong，左边那条竖线用负向色，
+   「这是一条坏消息」靠这一个 3px 说，不靠整块红底。 */
+.toast{position:fixed;left:50%;bottom:var(--s-5);transform:translateX(-50%);z-index:60;
+       display:grid;grid-template-columns:1fr auto;gap:0 var(--s-3);
+       width:max-content;max-width:min(420px,calc(100vw - var(--s-6)));
+       padding:var(--s-3) var(--s-4);border:1px solid var(--c-line-strong);
+       border-left:3px solid var(--c-negative);border-radius:var(--r-sm);
+       background:var(--c-surface);box-shadow:var(--sh-overlay);
+       color:var(--c-text-1);font:400 var(--t-body-s) var(--f-sans)}
+.toast .toast-t{grid-column:1;font-weight:500}
+.toast .toast-d{grid-column:1;margin-top:2px;color:var(--c-text-3);
+                font:400 var(--t-caption) var(--f-sans);overflow-wrap:anywhere}
+.toast .toast-x{grid-row:1;grid-column:2;align-self:start;width:20px;height:20px;
+                margin:-2px -4px 0 0;border:0;border-radius:var(--r-xs);background:transparent;
+                color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans);cursor:pointer}
+.toast .toast-x:hover{color:var(--c-text-2)}
 /* 新增（视图 CSS 没有对应件）：承诺段里进度条与上面的字段表之间的间距 */
 .dsec .timeline{margin-top:12px}
 .db{display:flex;align-items:center;gap:8px;padding:12px 24px;border-top:1px solid var(--c-line-strong)}

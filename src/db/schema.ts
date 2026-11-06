@@ -128,6 +128,40 @@ export const uemasterJobs = pgTable('uemaster_jobs', {
   byReq: index('uemaster_jobs_req').on(t.requirementId, t.stage, t.createdAt.desc()),
 }));
 
+/**
+ * 一次作业里**每一次对外动作**的痕迹（P2.13）。
+ *
+ * 为什么要有它：`uemaster_jobs.error` 只留得下**最后**那句话。一次生成最多问模型 3 次
+ * 图 + 2 次页面 + 1 次构建，前几次被拒的原因（「只有 2 个节点、1 条连线」「这一页没有
+ * 用 wt- 类」）在原来的形状里全部蒸发，于是 owner 看到「生成失败：…」时无法判断
+ * 是「模型一直画不对」还是「key 没余额」。
+ *
+ * 为什么**不存提示词与回话**：提示词里是整份 PRD 与节点清单（几万字符），回话是 HTML；
+ * 存下来会把这张表变成一个语料库，而排查要的是三个数字：问了多少、答了多少、卡在哪。
+ * `prompt_chars` / `output_chars` 足够看出「模型返回了空内容」与「模型根本没写完」。
+ *
+ * 一行 = 一次模型调用或一次构建。`error` 就是**这一次**被拒/失败的那句话（成功为 null），
+ * `attempt` 是这一阶段内的第几次（1 基）。作业最终那句话仍然只在 `uemaster_jobs.error`。
+ */
+export const uemasterJobAttempts = pgTable('uemaster_job_attempts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  jobId: uuid('job_id').notNull().references(() => uemasterJobs.id, { onDelete: 'cascade' }),
+  attempt: integer('attempt').notNull(),     // 阶段内的第几次（1 基）
+  phase: text('phase').notNull(),            // flow | pages | build
+  model: text('model').notNull(),            // 这一次用的模型名（换模型后旧行仍有意义）
+  promptChars: integer('prompt_chars').notNull(),
+  outputChars: integer('output_chars').notNull(),
+  error: text('error'),                      // null = 这一次通过了
+  ms: integer('ms').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  phaseCheck: check(
+    'uemaster_job_attempts_phase_check',
+    sql`${t.phase} in ('flow', 'pages', 'build')`,
+  ),
+  byJob: index('uemaster_job_attempts_job').on(t.jobId, t.id),
+}));
+
 export const events = pgTable('events', {
   // 单调递增：值来自 events_seq_seq，不扫 max。
   seq: integer('seq').primaryKey().default(sql`nextval('events_seq_seq')`),

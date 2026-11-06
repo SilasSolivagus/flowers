@@ -6,6 +6,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId } from '../validate.js';
 import { attachArtifact } from './attach.js';
+import { makeTrace, type Trace } from './attempts.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
 import {
@@ -115,7 +116,18 @@ const LIVE: ComposeDeps = {
 
 // ─── 入参与出参 ──────────────────────────────────────────────────────────────
 
-export type ComposeRequest = { requirementId: string; stage: Stage };
+export type ComposeRequest = {
+  requirementId: string;
+  stage: Stage;
+  /**
+   * 这次组装属于哪条作业（P2.13）。有它才留痕：`uemaster_job_attempts.job_id` 是外键，
+   * 而没有作业的调用（用例、脚本直接调 `composeEvaluation`）不该为了记录去编一条。
+   *
+   * 为什么不在这里收一个 `Trace`：留痕是压在作业上的，作业 id 是它唯一的键；
+   * 把整支笔记进来，调用方就能塞一支假的，read 侧就对不上账了。
+   */
+  jobId?: string;
+};
 
 /** 这一次组装一共花了多少 token（所有调用相加；服务端没给就记 0）。 */
 export type ComposeUsage = { prompt: number; completion: number };
@@ -737,6 +749,10 @@ async function loadRequirement(db: Db, requirementId: string): Promise<Requireme
  * - **形状太小**（引擎说 ok，但节点 < 3 或连线 < 2）：语法的垃圾也能过计数，
  *   要它「补出最小骨架」。
  * 两者同时成立时两句都写进去——模型一次只修一半的代价是又一轮 90 秒。
+ *
+ * P2.13：**每一次调用都留一行痕**（`trace`）。原来只有最后一句话活着（`uemaster_jobs.error`），
+ * 于是「三次都画不对」与「一次都没发出去」在界面上长得一模一样。留痕不改变判据、
+ * 不改变重试预算、不改变最终那句话——它只是把每一次的结果抄一份到旁边。
  */
 async function buildFlow(
   cfg: ProviderConfig,
@@ -744,14 +760,24 @@ async function buildFlow(
   stage: Stage,
   deps: ComposeDeps,
   usage: ComposeUsage,
+  trace: Trace,
 ): Promise<{ mermaid: string; check: FlowCheck; attempts: number; usage: ComposeUsage }> {
   let prompt = flowPrompt(req, stage);
   let spent = usage;
 
   for (let attempt = 1; attempt <= MAX_FLOW_ATTEMPTS; attempt += 1) {
+    const started = Date.now();
     const reply = await deps.complete(cfg, prompt, { maxTokens: FLOW_MAX_TOKENS, timeoutMs: CALL_TIMEOUT_MS });
+    const ms = Date.now() - started;
+    const promptChars = prompt.length;
     // 接口层的失败**不消耗**修图次数，也不改写：它不是「图不好」，重试也不会变好。
-    if (!reply.ok) throw new AppError('provider_error', reply.error);
+    // 但它是一行要留的痕：`output_chars: 0` + 服务端原文，正是「这一次什么都没回来」。
+    if (!reply.ok) {
+      await trace.write({
+        attempt, phase: 'flow', promptChars, outputChars: 0, error: reply.error, ms,
+      });
+      throw new AppError('provider_error', reply.error);
+    }
     spent = addUsage(spent, reply.usage);
 
     const mermaid = mermaidIn(reply.text);
@@ -759,14 +785,24 @@ async function buildFlow(
     const check = await deps.render(mermaid);
     const tooSmall = shape.nodes.length < MIN_NODES || shape.edges < MIN_EDGES;
 
-    if (check.ok && !tooSmall) {
-      return { mermaid, check, attempts: attempt, usage: spent };
-    }
-
     const why = [
       check.ok ? '' : engineText(check),
       tooSmall ? shapeText(shape) : '',
     ].filter((part) => part !== '').join('；');
+
+    await trace.write({
+      attempt,
+      phase: 'flow',
+      promptChars,
+      outputChars: reply.text.length,
+      // 通过的那一次 error 为 null：抽屉里「第 2 次 · flow · 1203 字」读起来是「这次成了」。
+      error: check.ok && !tooSmall ? null : why,
+      ms,
+    });
+
+    if (check.ok && !tooSmall) {
+      return { mermaid, check, attempts: attempt, usage: spent };
+    }
 
     if (attempt === MAX_FLOW_ATTEMPTS) {
       throw new AppError(
@@ -803,6 +839,7 @@ async function buildPages(
   flow: { svg: string },
   deps: ComposeDeps,
   usage: ComposeUsage,
+  trace: Trace,
 ): Promise<{ assembly: Assembly; warnings: string[]; usage: ComposeUsage }> {
   const ids = nodes.map((node) => node.id);
   const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;
@@ -811,20 +848,42 @@ async function buildPages(
   let why = '';
 
   for (let attempt = 1; attempt <= MAX_PAGES_ATTEMPTS; attempt += 1) {
+    const started = Date.now();
     const reply = await deps.complete(cfg, prompt, { maxTokens: FRAGMENTS_MAX_TOKENS, timeoutMs: CALL_TIMEOUT_MS });
-    if (!reply.ok) throw new AppError('provider_error', reply.error);
+    const ms = Date.now() - started;
+    const promptChars = prompt.length;
+    if (!reply.ok) {
+      await trace.write({
+        attempt, phase: 'pages', promptChars, outputChars: 0, error: reply.error, ms,
+      });
+      throw new AppError('provider_error', reply.error);
+    }
     spent = addUsage(spent, reply.usage);
 
     const read = readFragments(reply.text, ids);
+    let passed: { assembly: Assembly; warnings: string[] } | null = null;
     if (!read.ok) {
       why = read.why;
     } else {
       const assembly = assembleWalkmap(read.doc, { title, svg: flow.svg });
       const report = validateWalkmap(assembly.walkmap, { svg: flow.svg, fragments: assembly.fragments });
-      if (report.ok) return { assembly, warnings: report.warnings, usage: spent };
+      if (report.ok) passed = { assembly, warnings: report.warnings };
       // 校验器的原话直接当 `why`：它就是我们要在界面上说的那一句。
-      why = report.errors.join('；');
+      else why = report.errors.join('；');
     }
+
+    await trace.write({
+      attempt,
+      phase: 'pages',
+      promptChars,
+      // 回话长度不是「有效的页面数」：一份被拒的 JSON 也照样有长度，那正是要看的东西
+      // （`output_chars` 很大 + 被拒 = 形状错了；= 0 = 模型什么都没答）。
+      outputChars: reply.text.length,
+      error: passed === null ? why : null,
+      ms,
+    });
+
+    if (passed !== null) return { ...passed, usage: spent };
 
     if (attempt === MAX_PAGES_ATTEMPTS) break;
     prompt = fragmentsRepairPrompt(req, stage, nodes, reply.text, why);
@@ -874,18 +933,37 @@ export async function composeEvaluation(
   const req = await loadRequirement(db, requirementId);
   let usage: ComposeUsage = { prompt: 0, completion: 0 };
 
-  const flow = await buildFlow(cfg, req, stage, full, usage);
+  // 留痕的笔：作业 id 从请求来（用例里没有作业，笔就是空写）。模型名绑在笔上——
+  // 一次作业里所有调用用的是同一份配置，跟着每次调用传一遍只多一处能写错的地方。
+  const trace = makeTrace(db, request.jobId ?? null, cfg.model);
+
+  const flow = await buildFlow(cfg, req, stage, full, usage, trace);
   usage = flow.usage;
 
   const svg = flow.check.svg ?? '';
   // 节点清单只解析一次：提示词 2、拼 walkmap、日志都用它，三处不会漂。
   const nodes = parseFlow(flow.mermaid).nodes;
-  const pages = await buildPages(cfg, req, stage, nodes, { svg }, full, usage);
+  const pages = await buildPages(cfg, req, stage, nodes, { svg }, full, usage, trace);
   usage = pages.usage;
 
+  const buildStarted = Date.now();
   const built = await full.build(pages.assembly.walkmap, {
     svg,
     fragments: pages.assembly.fragments,
+  });
+  const buildMs = Date.now() - buildStarted;
+  // 构建也要留痕：它是三段里唯一一段「模型都对、但产物还是出不来」的失败
+  // （`build.py` 的 Traceback、emoji、契约不符）。`prompt_chars` 记 0——这一段没有提示词，
+  // 输入是 walkmap 不是文字；`output_chars` 是它吐出来的 HTML 长度（失败时通常为 0）。
+  await trace.write({
+    attempt: 1,
+    phase: 'build',
+    promptChars: 0,
+    outputChars: built.html?.length ?? 0,
+    error: built.ok && built.html !== undefined
+      ? null
+      : (built.error ?? built.errors.join('；')),
+    ms: buildMs,
   });
   if (!built.ok || built.html === undefined) {
     throw new AppError('walkmap_rejected', `走查页构建失败：${built.error ?? built.errors.join('；')}`);

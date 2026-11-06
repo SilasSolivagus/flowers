@@ -36,6 +36,13 @@
       "when": 1793944452540,
       "tag": "0004_app_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793954310573,
+      "tag": "0005_uemaster_job_attempts",
+      "breakpoints": true
     }
   ]
 }
