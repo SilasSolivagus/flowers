@@ -21,7 +21,15 @@ import type { ActionResult } from '../actions';
 /** 提交前的状态。`ok: true` 表示「还没失败过」，界面不渲染任何成功提示。 */
 const IDLE: ActionResult = { ok: true };
 
-/** 动作名就是中文按钮名。同一个状态里不会同时出现两个同名的动作（打回分属评审/测试两态）。 */
+/**
+ * 动作名就是中文按钮名。同一个状态里不会同时出现两个同名的动作（打回分属评审/测试两态）。
+ *
+ * `evaluate`（评估）留在这张表里只是为了让 `Record<DetailAction, …>` 完整：读模型已经
+ * 不再把它列进任何状态的动作条（P2 Task 4，D1——后端不调模型，这个按钮点不出材料）。
+ * 评估的入口搬到了抽屉「参考」段的评估材料那一行：那里的「复制任务包」把任务包交给
+ * 用户自己的 agent。删掉这里的键会连类型并集一起动，而 `runAction` 仍然接得住
+ * 这个领域动作（`inbox → design` 是合法迁移，seed 就走它）。
+ */
 const LABEL: Record<DetailAction, string> = {
   evaluate: '评估',
   submitReview: '提交评审',

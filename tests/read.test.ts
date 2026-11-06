@@ -371,12 +371,11 @@ describe('getRequirementDetail', () => {
     expect(d.commit.timeUsed!.percent).toBeGreaterThanOrEqual(0);
     expect(d.commit.timeUsed!.percent).toBeLessThanOrEqual(100);
 
-    // 参考：PRD 有链接，评估 / 走查这两处 UEmaster 还没有表
+    // 参考：三处 UEmaster 材料一份都没生成（P2 之前 review 行放的是 PRD 快照，
+    // Task 4 之后三行同形：没产物就是待生成 + 复制任务包，PRD 留在信息段）
     expect(d.refs.map((r) => r.stage)).toEqual(['evaluate', 'review', 'inspect']);
-    expect(d.refs.find((r) => r.stage === 'review')!.present).toBe(true);
-    expect(d.refs.find((r) => r.stage === 'review')!.url).toBe('https://docs.example.com/prd/s3');
-    expect(d.refs.find((r) => r.stage === 'evaluate')!.present).toBe(false);
-    expect(d.refs.find((r) => r.stage === 'inspect')!.present).toBe(false);
+    expect(d.refs.every((r) => r.present === false && r.url === null)).toBe(true);
+    expect(d.info.prdUrl).toBe('https://docs.example.com/prd/s3');
 
     // 评审：派单上的评审人必须看得见（R29：签字人就是派单上的那个人）
     expect(d.review).toMatchObject({
@@ -406,8 +405,10 @@ describe('getRequirementDetail', () => {
 
   it('动作随状态变，终态只剩恢复', async () => {
     const inbox = await seedInbox('房超');
+    // 收集（inbox）里没有「评估」：D1 之后它不可能成功，入口搬到了参考段的评估材料行。
+    // 收进的直提评审这条路仍然开着（spec §6：评估是加速器，不是关卡）。
     expect((await getRequirementDetail(inbox.id))!.actions).toEqual([
-      'evaluate', 'submitReview', 'reject', 'shelve',
+      'submitReview', 'reject', 'shelve',
     ]);
 
     const review = await seedInReview('commercial');
@@ -423,6 +424,16 @@ describe('getRequirementDetail', () => {
     const shelved = (await getRequirementDetail(inbox.id))!;
     expect(shelved.actions).toEqual(['restore']);
     expect(shelved.stateLabel).toBe('已搁置');
+
+    // 任何状态都不再给「评估」（P2 Task 4）：它不可能成功，入口在参考段的评估材料行。
+    // 上面四个状态覆盖了 inbox / review / ready / shelved，这里只盯这一件事。
+    for (const actions of [
+      (await getRequirementDetail(inbox.id))!.actions,  // inbox 已搁置
+      (await getRequirementDetail(review))!.actions,
+      (await getRequirementDetail(ready))!.actions,
+    ]) {
+      expect(actions).not.toContain('evaluate');
+    }
   });
 
   it('找不到的需求返回 null，而不是抛错', async () => {
@@ -498,16 +509,17 @@ describe('参考段：三处槽位从产物表读', () => {
   });
 
   /**
-   * review 槽位的语义是「PRD 快照」，它是评审依据、不是 UEmaster 产物。
-   * 有评审产物时这一行显示产物（阶段名跟着变成「评审材料」），PRD 链接仍在信息段的
-   * 「PRD 链接」一行——抽屉里两个链接都还在，只是参考段仍然只有一行。
+   * review 那一行在 P2 Task 4 之后与另外两行同形：没有产物就是「评审材料」+ 复制任务包
+   * （不再是「PRD 快照」这一行）。PRD 链接没有丢——它一直在信息段的「PRD 链接」一行，
+   * 抽屉里照样点得到，只是参考段的三行不再让 review 特殊。
    */
-  it('review 槽位：没产物是 PRD 快照，有产物就显示产物且 PRD 链接仍在', async () => {
+  it('review 行：没产物时是待生成的评审材料，有产物就显示产物且 PRD 链接仍在', async () => {
     const id = await seedInReview('feature');
     const before = (await getRequirementDetail(id))!;
     expect(before.refs.find((x) => x.stage === 'review')).toMatchObject({
-      label: 'PRD 快照', url: 'https://docs.example.com/prd/r', present: true,
+      label: '评审材料', url: null, present: false,
     });
+    expect(before.info.prdUrl).toBe('https://docs.example.com/prd/r');
 
     await writeArtifact('/uemaster/PAN-7/review.html');
     await attachArtifact(db, '吕品', {
@@ -526,12 +538,49 @@ describe('参考段：三处槽位从产物表读', () => {
     expect(after.refs.map((x) => x.stage)).toEqual(['evaluate', 'review', 'inspect']);
   });
 
-  it('既没有 PRD 也没有产物时 review 行不出现', async () => {
+  it('既没有 PRD 也没有产物时 review 行仍是「评审材料」的槽位（present 为假）', async () => {
     const r = await seedInbox('房超');
     const d = (await getRequirementDetail(r.id))!;
     expect(d.refs.find((x) => x.stage === 'review')).toMatchObject({
-      label: 'PRD 快照', url: null, present: false,
+      label: '评审材料', url: null, present: false,
     });
+  });
+
+  /**
+   * 三行都带任务包正文（P2 Task 4）。参考段没有产物时是一个「复制任务包」按钮，
+   * 按钮复制的是**服务端已经渲染进页面**的那段文本，所以它必须由读模型给出：
+   * 页面在客户端没有 packFor，也不该为此发一次请求。
+   */
+  it('三行都带任务包正文：点名 UEmaster、这条需求与它自己的交付路径', async () => {
+    // 有 PRD 的需求：三份包都是完整的那一版（没 PRD 时评审 / 走查的包会提前「停止」，
+    // 那种形状由下面那条用例盯）。
+    const id = await seedInReview('feature');
+    const d = (await getRequirementDetail(id))!;
+    expect(d.info.prdUrl).not.toBeNull();
+
+    for (const stage of ['evaluate', 'review', 'inspect'] as const) {
+      const ref = d.refs.find((x) => x.stage === stage)!;
+      expect(ref.pack).toContain('UEmaster');
+      expect(ref.pack).toContain(`PAN-${d.number}`);
+      expect(ref.pack).toContain(d.title);
+      expect(ref.pack).toContain(`/uemaster/PAN-${d.number}/${stage}.html`);
+      // 复制出去的文本里必须有 uuid：agent 交回产物时只用得到它（不是 PAN-n）
+      expect(ref.pack).toContain(d.id);
+    }
+  });
+
+  /**
+   * 缺 PRD 时评审 / 走查的包是一段「停止：到此停止…」。它照样交给页面：那段文字说的
+   * 正是「缺什么」，按钮复制它才有意义——界面不该替他判断「这份包不值得复制」。
+   */
+  it('没有 PRD 时评审 / 走查的包是「停止」，仍然照给', async () => {
+    const r = await seedInbox('房超');
+    const d = (await getRequirementDetail(r.id))!;
+    expect(d.info.prdUrl).toBeNull();
+    expect(d.refs.find((x) => x.stage === 'evaluate')!.pack).not.toContain('停止');
+    for (const stage of ['review', 'inspect'] as const) {
+      expect(d.refs.find((x) => x.stage === stage)!.pack).toContain('停止');
+    }
   });
 
   /**

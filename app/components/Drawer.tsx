@@ -3,6 +3,7 @@ import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail
 import { formatMonthDay } from '../../src/core/read/board';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
+import { CopyPack } from './CopyPack';
 
 /**
  * 需求抽屉：读模型那六段的直接渲染。
@@ -13,8 +14,9 @@ import { ActionBar, type ReleaseOption } from './ActionBar';
  * 三条来自评审的硬口径：
  * 1. **领域里没有的东西不画**。来源、影响面、业务线、描述这些字段在库里不存在，
  *    线稿那一版的 `dl` 里有它们，这里没有——不编、也不画一个空标签框。
- *    读模型的 `refs` 三处槽位（评估材料 / PRD 快照或评审材料 / 走查材料）在库里没有
- *    产物时是 `present: false`，本页只渲染 `present` 为真的那一行：槽位不是数据。
+ *    读模型的 `refs` 三处槽位（评估材料 / 评审材料 / 走查材料）**三行都渲染**：
+ *    没有产物时那一行不是空槽位，而是一个「复制任务包」按钮——材料要靠用户自己的
+ *    agent 生成（D1），所以「还没生成」这一态需要一个入口，而不是一行「—」。
  * 2. **没有承诺就不给承诺段**。没排期的需求 `commit` 全是 null，渲染一个只有
  *    「—」的承诺段等于告诉读者「这件事有个空承诺」。
  * 3. **一句解释性文案都没有**：段里只有字段名、值、和动作名。
@@ -33,7 +35,9 @@ const PILL: Record<string, string> = {
   voided: 'no',
 };
 
-function RefRow({ item }: { item: DetailRef }) {
+function RefRow({ item, packId }: { item: DetailRef; packId: string }) {
+  // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「复制任务包」。
+  // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
   return (
     <div className="row3">
       <div className="l">
@@ -42,7 +46,14 @@ function RefRow({ item }: { item: DetailRef }) {
           <span><a className="att" href={item.url} target="_blank" rel="noreferrer">{item.url}</a></span>
         )}
       </div>
-      <span className="pill ok">{item.atLabel ?? '—'}</span>
+      {item.present
+        ? <span className="pill ok">{item.atLabel ?? '—'}</span>
+        : <CopyPack packId={packId} />}
+      {/* 任务包正文：服务端渲染好的那段中文，就在这里。按钮复制的是这个节点的
+          textContent——没有第二个数据源，也没有客户端请求。hidden 只是不画出来，
+          文本仍然是页面 DOM 的一部分（读屏也不会念这三十行）。放在 .row3 里面是为了
+          不打断 CSS 的 `.row3:last-child`（参考段最后一行不该有下边框）。 */}
+      <pre hidden id={packId}>{item.pack}</pre>
     </div>
   );
 }
@@ -63,7 +74,8 @@ function ReviewRow({ review }: { review: DetailReview }) {
 
 export function Drawer({ detail, releases }: { detail: Detail; releases: ReleaseOption[] }) {
   const { info, commit, review } = detail;
-  const refs = detail.refs.filter((item) => item.present);
+  // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
+  const refs = detail.refs;
   const scheduled = commit.release !== null || commit.testAt !== null || commit.dueAt !== null;
 
   return (
@@ -135,13 +147,16 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
             </section>
           )}
 
-          {/* ③ 参考：只渲染真正存在的材料（读模型里 present 为假的槽位不是数据） */}
-          {refs.length > 0 && (
-            <section className="dsec">
-              <h3>参考</h3>
-              {refs.map((item) => <RefRow key={item.stage} item={item} />)}
-            </section>
-          )}
+          {/* ③ 参考：三行固定槽位，三行都渲染（P2 Task 4 起）。
+              有产物那一行是链接 + 日期，没有产物那一行是「复制任务包」——评估 / 评审 /
+              走查三种材料现在都只能靠用户自己的 agent 生成（D1），所以「还没生成」不再
+              是一个空槽位，而是这一阶段的入口。三行形状相同，读的人不用记哪一行特殊。 */}
+          <section className="dsec">
+            <h3>参考</h3>
+            {refs.map((item) => (
+              <RefRow key={item.stage} item={item} packId={`pack-${detail.id}-${item.stage}`} />
+            ))}
+          </section>
 
           {/* ④ 评审：还没派单（评审前）就没有这一段 */}
           {review !== null && (

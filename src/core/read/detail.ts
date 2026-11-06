@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
+import { packFor } from '../uemaster/packs.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
@@ -14,7 +15,16 @@ import {
  * （~/Flower/docs/ux/gate-console/wire.html 的 #s-drawer）。
  */
 
-/** 当前状态下合法的动作。名字与页面动作条、server action 一一对应。 */
+/**
+ * 当前状态下合法的动作。名字与页面动作条、server action 一一对应。
+ *
+ * **`evaluate` 留在这个并集里，但没有任何状态会给出它**（P2 Task 4）：D1 裁决说
+ * Flowers 后端不调模型，「评估」不是一个点一下就能完成的动作——真做材料的是用户
+ * 自己的 agent。所以动作条不再提供它，参考段的「评估材料」那一行接管了这个入口
+ * （复制任务包 → 交给 agent）。类型里保留它，是因为 `inbox → design` 仍是领域里
+ * 合法的迁移（`src/core/requirements/evaluate.ts` 与 seed 都走它），`runAction`
+ * 也还接得住；删掉它等于让动作条与领域对不上账。
+ */
 export type DetailAction =
   | 'evaluate' | 'submitReview' | 'reject' | 'shelve'
   | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore';
@@ -27,6 +37,18 @@ export type DetailRef = {
   /** 已格式化成 MM-DD 的那一天（页面不再自己算日期）。 */
   atLabel: string | null;
   present: boolean;
+  /**
+   * 这一处材料的任务包正文（`packFor` 的输出，纯函数、服务端算好）。
+   *
+   * 为什么放在读模型里、而不是页面自己去算或客户端去取：抽屉的「参考」段现在就是
+   * 这个阶段的**入口**——没有产物时那一行是一个「复制任务包」按钮，按下去要拷贝的
+   * 是这段中文。页面在服务端渲染时把它写进 DOM，复制就只是 `navigator.clipboard`
+   * 读一段已经在页面里的字符串：不发请求、不新增接口、不需要客户端知道 packFor。
+   *
+   * 有产物时这段文本仍然给（读模型不管页面用不用它——页面按 `present` 决定渲染
+   * 链接还是按钮）。
+   */
+  pack: string;
 };
 
 export type DetailReview = {
@@ -123,7 +145,10 @@ const ATTACH_LABEL: Record<string, string> = {
 function actionsFor(state: State): DetailAction[] {
   switch (state) {
     case 'inbox':
-      return ['evaluate', 'submitReview', 'reject', 'shelve'];
+      // 没有「评估」：D1 之后它不可能成功（后端不调模型），一个必然失败的按钮比
+      // 一个空的动作条更坏。评估的入口搬到了「参考」段的评估材料那一行——复制任务包
+      // 交给用户自己的 agent。收进、拒绝、搁置照旧。
+      return ['submitReview', 'reject', 'shelve'];
     case 'design':
       return ['submitReview', 'shelve'];
     case 'review':
@@ -244,39 +269,30 @@ function timeUsed(
 }
 
 /**
- * 参考段里「一处 UEmaster 产物」那一行：有产物就是链接 + 那天的日期，没有就是空槽位。
+ * 参考段里「一处 UEmaster 材料」那一行：有产物就是链接 + 那天的日期，没有就是
+ * 「还没生成」（`present: false` + 那段任务包正文）。
  *
- * 没有产物时这一行仍留在数组里（`present: false`）：抽屉按 `present` 过滤渲染，行在
- * 数据里存在、在页面上不出现；三处槽位是对外的固定次序，删行会让另外两行搬家。
+ * 没有产物时这一行**仍然渲染**（P2 Task 4）：它不再是「一个空槽位」，而是这一阶段
+ * 的入口——行上写着阶段名，右侧一个「复制任务包」按钮，复制的是 `pack`（服务端用
+ * `packFor` 算好的中文任务包）。所以 `present` 现在只决定**渲染链接还是按钮**，
+ * 不再决定渲染还是不渲染。
+ *
+ * 三行同一种形状，包括 review（P2 之前它在没有产物时显示「PRD 快照」）：评审材料
+ * 没有产物时同样要靠复制任务包去要，而 PRD 链接不靠这一行承载——信息段的
+ * 「PRD 链接」一直在，抽屉里点得到。
  */
 function artifactRef(
-  stage: DetailRef['stage'], label: string, artifact: ArtifactRef | undefined,
+  stage: DetailRef['stage'],
+  label: string,
+  artifact: ArtifactRef | undefined,
+  pack: string,
 ): DetailRef {
-  if (!artifact) return { stage, label, url: null, at: null, atLabel: null, present: false };
+  if (!artifact) {
+    return { stage, label, url: null, at: null, atLabel: null, present: false, pack };
+  }
   const at = artifact.at.toISOString();
-  return { stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true };
-}
-
-/**
- * review 槽位：语义是「PRD 快照」——它是这次评审的依据，不是 UEmaster 产物，所以
- * 有了产物也不能让 PRD 消失。
- *
- * 有评审产物时这一行显示产物、阶段名跟着变成「评审材料」，理由是参考段一行只放一个
- * 链接（`DetailRef` 只有一个 url），而产物才是这次评审实际看的那份材料；PRD 链接不靠
- * 这一行承载——信息段的「PRD 链接」一直在，抽屉里两个链接都点得到，参考段也没多出一行。
- * 没有产物时保持原样：PRD 快照 + 评审那次的时间。
- */
-function reviewRef(
-  prdUrl: string | null, reviewAt: string | null, artifact: ArtifactRef | undefined,
-): DetailRef {
-  if (artifact) return artifactRef('review', '评审材料', artifact);
   return {
-    stage: 'review',
-    label: 'PRD 快照',
-    url: prdUrl,
-    at: reviewAt,
-    atLabel: formatMonthDay(reviewAt),
-    present: prdUrl !== null,
+    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true, pack,
   };
 }
 
@@ -368,14 +384,32 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
     }
     : null;
 
-  const reviewAskedAt = eventRes.rows
-    .filter((e) => e.type === 'requirement.review_requested')
-    .at(-1)?.at ?? null;
-
   // 参考段的产物：每 stage 只取最新一份（重做会留下历史行，读侧只认当前有效的）。
   // 走 `listArtifacts` 而不是在这里再写一遍 `distinct on`：两个读侧各写一份 SQL，
   // 迟早在「同毫秒写入怎么定序」这种细节上分叉。
   const artifacts = new Map((await listArtifacts(db, id)).map((a) => [a.stage, a]));
+
+  /**
+   * 三处任务包：`packFor` 是纯函数（不碰库、不带今天），这里把这条需求的身份喂进去
+   * 就算完。算在服务端，页面只负责把字符串写进 DOM。
+   *
+   * 为什么三份都算、不管这个状态用不用得上：三行是固定槽位，页面按 `present` 决定
+   * 渲染链接还是按钮，读模型不替它挑。没有 PRD 时 review / inspect 的包会是一段
+   * 「停止：到此停止…」——那也是要复制给用户看的东西（它说的是缺什么），所以照算。
+   */
+  const packInput = {
+    id: row.id,
+    number: Number(row.number),
+    title: row.title,
+    type: row.type,
+    requester: row.requester,
+    prdUrl: row.prd_url,
+  };
+  const packs = {
+    evaluate: packFor('evaluate', packInput),
+    review: packFor('review', packInput),
+    inspect: packFor('inspect', packInput),
+  };
 
   return {
     id: row.id,
@@ -412,9 +446,9 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
       timeUsed: timeUsed(row.window_start, row.commit_due_at),
     },
     refs: [
-      artifactRef('evaluate', '评估材料', artifacts.get('evaluate')),
-      reviewRef(row.prd_url, reviewRow?.decided_at ?? reviewAskedAt, artifacts.get('review')),
-      artifactRef('inspect', '走查材料', artifacts.get('inspect')),
+      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), packs.evaluate),
+      artifactRef('review', '评审材料', artifacts.get('review'), packs.review),
+      artifactRef('inspect', '走查材料', artifacts.get('inspect'), packs.inspect),
     ],
     review,
     events: eventRes.rows.map((e) => ({
