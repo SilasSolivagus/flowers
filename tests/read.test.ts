@@ -317,6 +317,26 @@ describe('mine = 现在欠你一个动作（不是「跟你有关」）', () => 
     expect((await cardOf('inbox', inbox.id, '王妍')).mine).toBe(true);
     expect((await cardOf('inbox', inbox.id, '房超')).mine).toBe(false);
   });
+
+  /**
+   * R39：收集列的提出人是**自由文本字段**，可以是一个不在花名册里的外部人员。
+   * 外部提出人在这个系统里没有账号，动不了手；而这条需求也还没人认领。
+   * 所以卡片写「待接单」（确实在等人，on 仍是 person），但谁都不框 —— who 为 null。
+   * 旧写法会把「孙建宏 补必填」框成一个谁都不该戴的主色框（孙建宏不是成员）。
+   */
+  it('收集列的提出人不是成员时写「待接单」，谁都不框', async () => {
+    const r = await seedInbox('孙建宏');
+    const card = await cardOf('inbox', r.id, '吕品');
+    expect(card.waiting).toBe('待接单');
+    expect(card.waitingOn).toBe('person');
+    expect(card.mine).toBe(false);
+
+    // 「不是任何人的卡」要按每个身份都问一遍：提出人名字都不在 `who` 里了，
+    // 连「用提出人的名字当当前成员」也不该把它框起来。
+    for (const me of ['吕品', '房超', '王妍', '赵越', '吕正豪', '孙建宏']) {
+      expect((await cardOf('inbox', r.id, me)).mine).toBe(false);
+    }
+  });
 });
 
 describe('getRequirementDetail', () => {

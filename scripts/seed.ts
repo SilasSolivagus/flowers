@@ -17,14 +17,15 @@
  *    看板任何时候打开都处在「正在跑」的状态。
  *
  * 产出（与线稿一致）：5 个成员、2 个版本、12 条需求铺满 10 个状态，
- * 其中 4 条是当前成员（默认「吕品」）**现在需要动手**的卡。
+ * 其中 3 条是当前成员（默认「吕品」）**现在需要动手**的卡。
  *
  * 为什么不是 brief 写的 5 条：`mine` 的口径是「现在欠你一个动作」，而它由「等谁」
- * 那一行派生（见 read/board.ts 的 waitingFor）。12 条的固定分布里，欠人动作的只有
- * 收集（提出人）/ 待设计（负责人）/ 待评审（派单评审人）/ 待排期（负责人）；
+ * 那一行派生（见 read/board.ts 的 waitingFor）。12 条的固定分布里，能欠到本组某个
+ * 成员动作的只有 待设计（负责人）/ 待评审（派单评审人）/ 待排期（负责人）：
+ * 收集那条的提出人是外部人员（R39，「待接单」，谁都不框），
  * 待开发 / 开发中 / 测试中 / 已上线 / 终态都不欠人动作（打回、走查、恢复都是可选的）。
- * 待评审那两条按类型只能派给吕正豪 / 赵越，所以吕品最多 4 条。要 5 条只能改分布
- * （例如待排期 3 / 开发中 1），那已经不是 brief 那张板了。
+ * 待评审那两条按类型只能派给吕正豪 / 赵越，所以吕品手上是 待设计 1 + 待排期 2 = 3 条。
+ * 要 5 条只能改分布（例如待排期 3 / 开发中 1），那已经不是 brief 那张板了。
  */
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
@@ -211,9 +212,11 @@ async function main() {
 
   head('造需求（全部走真实服务）');
 
-  // 1 收集：只有提出人，没有负责人 —— 等的是「提出人补必填」。
-  // 提出人就是当前成员：收集列的「补必填」欠在他身上，所以这张卡是「需要你动手」的。
-  const inbox = await create('PC 剪贴板读取 URL', 'commercial', PM, null);
+  // 1 收集：只有提出人，没有负责人。提出人是**外部**的孙建宏（不在花名册里），
+  // 所以这张卡显示「待接单」且谁都不框（裁决 R39）：外部提出人在本系统里没有账号，
+  // 动不了手，而这条需求还没人认领 —— 「待接单」才是实话。
+  // （旧种子把提出人写成 PM，纯粹为了让这张卡被框住，那是拿假数据凑界面。）
+  const inbox = await create('PC 剪贴板读取 URL', 'commercial', '孙建宏', null);
   log(`${padTo(`#${inbox.number}`, 5)}${padTo('PC 剪贴板读取 URL', 26)}createRequirement（停在收集）`);
 
   // 2 待设计（mine）：评估过了，等负责人出正式 PRD。
@@ -277,7 +280,9 @@ async function main() {
   await tickAt(TICK_C, '承诺完成日：测试中 → 已上线');
 
   // 9 开发中（逾期）：排期之后才被时钟发现 —— 提测日已经过去，但时钟一次只推一步，
-  // 所以它停在开发中，卡片上等的东西从「某天提测」变成「等人提测」。
+  // 所以它停在开发中。卡片上等的东西从「MM-DD 提测」变成「提测日已过 MM-DD」，
+  // 但两者都是时钟（`on: 'clock'`、没有名字）：日期过了只是「等的东西过期了」，
+  // 不是「谁欠一个动作」，所以这张卡不被框（同一列的「等谁」也不该是「等人提测」）。
   const devLate = await create('支付宝投诉自动退款', 'commercial', '王妍', '吕品');
   await toQueue(devLate, '赵越');
   await scheduleInto(devLate, releaseId(RELEASE_1), day(-2), day(4));
@@ -329,8 +334,25 @@ async function main() {
     if (actual !== count) failures.push(`状态 ${state}：期望 ${count} 条，实际 ${actual} 条`);
   }
   if (total !== 12) failures.push(`需求总数是 ${total}，期望 12`);
-  // 4 = 收集 1（提出人）+ 待设计 1（负责人）+ 待排期 2（负责人）。见文件头的解释。
-  if (mine !== 4) failures.push(`当前成员「需要你动手」的卡片是 ${mine} 条，期望 4`);
+  // 3 = 待设计 1（负责人吕品）+ 待排期 2（负责人吕品）。收集那条不在这里：
+  // 它的提出人是外部人员，写「待接单」且谁都不框（R39，见文件头）。
+  if (mine !== 3) failures.push(`当前成员「需要你动手」的卡片是 ${mine} 条，期望 3`);
+
+  // R39：收集列的卡必须是「待接单」且不是任何人的卡 —— 外部提出人动不了手，
+  // 也没人认领。这条断言把裁决钉在种子上，而不只是钉在读模型用例里。
+  const inboxCard = board.find((c) => c.state === 'inbox')!.cards[0];
+  if (!inboxCard) failures.push('收集列没有卡片');
+  else {
+    if (inboxCard.waiting !== '待接单') {
+      failures.push(`收集列的「等谁」是「${inboxCard.waiting}」，期望「待接单」（提出人不是成员）`);
+    }
+    if (inboxCard.waitingOn !== 'person') {
+      failures.push(`收集列等的是人，waitingOn 应该是 person，实际 ${inboxCard.waitingOn}`);
+    }
+    if (board.some((c) => c.cards.some((x) => x.id === inboxCard.id && x.mine))) {
+      failures.push(`收集列那条（外部提出人）不该是「需要你动手」的卡（${DEFAULT_MEMBER} 身份下）`);
+    }
+  }
   if (late !== 1) failures.push(`逾期卡片是 ${late} 条，期望 1（开发中那条提测日已过）`);
 
   // 主色框只该出现在「欠你动作」的那四列：时钟状态与终态一律不框（裁决 R-mine）。

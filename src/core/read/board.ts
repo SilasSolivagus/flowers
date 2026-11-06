@@ -31,7 +31,18 @@ export type BoardCard = {
   late: boolean;
   /** 停在当前状态几个上海日历天。 */
   days: number;
-  /** 这条需求现在要不要你动手：你是负责人，或你是被派单的评审人。 */
+  /**
+   * 这条需求现在要不要你动手 = 「等谁」那一行现在是不是挂在**你**身上。
+   *
+   * 名字只有一个来源：`waitingFor` 的 `{text, on, who}`，`mine` 就是
+   * `on === 'person' && who === me`（裁决 R-mine）。所以主色框与「等谁」那一行
+   * 说的是同一件事——旧写法 `owner === me || reviewer === me` 会把「等 吕正豪 评审」
+   * 的卡框给负责人王妍，一张卡同时说着两件事。
+   *
+   * `ready` / `dev` / `test` 的 `on` 是 `clock`（等的是某个日期，时钟会推它），
+   * 没人欠谁一个动作；打回、走查、恢复都是可选的。所以「谁都不欠」= 这些卡对任何人
+   * 都不是 mine，哪怕你是负责人。
+   */
   mine: boolean;
 };
 
@@ -100,6 +111,11 @@ type Row = {
   title: string;
   state: State;
   requester: string;
+  /**
+   * 提出人是不是花名册里的人（提出人是自由文本字段，不是外键，所以只能按名字比对）。
+   * 收集列靠它决定「谁欠这个动作」：成员才有资格被框，外部提出人在本系统里没有账号。
+   */
+  requester_is_member: boolean;
   owner: string | null;
   state_entered_at: string;
   window_start: string | null;
@@ -128,8 +144,13 @@ type Waiting = { text: string; on: WaitingOn; who: string | null };
 function waitingFor(row: Row, today: number): Waiting {
   switch (row.state) {
     case 'inbox':
-      // 补必填是提出人的事（提出人是字段，不是账号，所以只可能是这个名字）。
-      return { text: `${row.requester} 补必填`, on: 'person', who: row.requester };
+      // 补必填是提出人的事（提出人是字段，不是账号）。但字段里可以是一个**不在花名册里**的
+      // 外部提出人（裁决 R39）：他没有账号，在这个系统里动不了手，卡片框给谁都是假的。
+      // 于是收集列分两种：成员提出人 → 「<提出人> 补必填」并框他；非成员 → 「待接单」，
+      // on 仍是 'person'（确实在等人，不是等时钟），who 为 null（还没人认领，谁都不框）。
+      return row.requester_is_member
+        ? { text: `${row.requester} 补必填`, on: 'person', who: row.requester }
+        : { text: '待接单', on: 'person', who: null };
     case 'design':
       return row.owner === null
         ? { text: '负责人出正式 PRD', on: 'none', who: null }
@@ -225,6 +246,7 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
            r.title,
            r.state,
            r.requester,
+           exists (select 1 from members mr where mr.name = r.requester) as requester_is_member,
            r.state_entered_at,
            r.commit_test_at,
            r.commit_due_at,
@@ -241,7 +263,16 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
       left join releases rel on rel.id = r.release_id
      order by r.number`);
 
-  const byState = new Map<State, BoardCard[]>(BOARD_STATES.map((s) => [s, []]));
+  // 列直接建出来，byState 只是它的索引：卡片推进 Map 里的数组，就是推进要返回的那个
+  // 数组本身。所以最后一步不必再按 state 查一次，也就不存在「取不到」这条分支。
+  const columns: BoardColumn[] = BOARD_STATES.map((state) => ({
+    state,
+    label: STATE_LABEL[state],
+    cards: [],
+  }));
+  const byState = new Map<State, BoardCard[]>(
+    columns.map((c): [State, BoardCard[]] => [c.state, c.cards]),
+  );
   for (const row of res.rows) {
     const cards = byState.get(row.state);
     // 不写 `byState.get(...)?.push`：状态加进 State 却忘了加进 BOARD_STATES 时，
@@ -274,9 +305,5 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
     });
   }
 
-  return BOARD_STATES.map((state) => ({
-    state,
-    label: STATE_LABEL[state],
-    cards: byState.get(state) ?? [],
-  }));
+  return columns;
 }
