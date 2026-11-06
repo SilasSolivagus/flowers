@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  pgTable, pgSequence, uuid, text, timestamp, integer, index, uniqueIndex,
+  check, pgTable, pgSequence, uuid, text, timestamp, integer, index, uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -60,6 +60,31 @@ export const reviewAssignments = pgTable('review_assignments', {
   reason: text('reason'),
   decidedAt: timestamp('decided_at', { withTimezone: true }),
 }, (t) => ({ byReq: index('review_assignments_req').on(t.requirementId) }));
+
+/**
+ * UEmaster 产物：只存链接，不存正文（spec §5）。
+ *
+ * 同一 (requirement_id, stage) 允许多行：重做一次就是一条新版本，读侧取最新一条
+ * （见 `src/core/uemaster/list.ts`）。所以这里是普通索引而不是唯一索引——写成
+ * 唯一就再也交不了第二版，而「重做」是常态。
+ *
+ * stage 的 CHECK 写在表上、也写在服务层（attach.ts）：服务层给中文错误，CHECK 守住
+ * 绕过服务层的写入（脚本、MCP 之外的直连）。
+ */
+export const uemasterArtifacts = pgTable('uemaster_artifacts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requirementId: uuid('requirement_id').notNull().references(() => requirements.id),
+  stage: text('stage').notNull(),            // evaluate | review | inspect
+  url: text('url').notNull(),                // http(s) 完整链接，或 / 开头的站内路径
+  createdBy: text('created_by').notNull(),   // 成员名或 'agent'
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  stageCheck: check(
+    'uemaster_artifacts_stage_check',
+    sql`${t.stage} in ('evaluate', 'review', 'inspect')`,
+  ),
+  byReq: index('uemaster_artifacts_req').on(t.requirementId, t.stage, t.createdAt.desc()),
+}));
 
 export const events = pgTable('events', {
   // 单调递增：值来自 events_seq_seq，不扫 max。

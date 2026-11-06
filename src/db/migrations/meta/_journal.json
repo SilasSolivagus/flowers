@@ -15,6 +15,13 @@
       "when": 1793903295461,
       "tag": "0001_mean_toad_men",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793935398471,
+      "tag": "0002_uemaster",
+      "breakpoints": true
     }
   ]
 }
