@@ -152,10 +152,15 @@ export function classifyFailure(raw: string): Failure {
  * 一次尝试属于哪一段。
  *
  * `flow` / `pages` / `build` 是 `composeEvaluation` 的三段；`locate` / `verify` 是走查
- * （`inspect.ts`）的两段——结构与复核。名字不同不是洁癖：抽屉里那三行字
- * （`第 1 次 · locate · …`）要能让人分清自己看的是哪条链路上的哪一次。
+ * （`inspect.ts`）的两段——结构与复核；`findings` 是评审（`review.ts`）的第二段——
+ * 问题清单。名字不同不是洁癖：抽屉里那三行字（`第 1 次 · locate · …`）要能让人分清
+ * 自己看的是哪条链路上的哪一次。
+ *
+ * 新增一档要同时改库里的 CHECK（`0008_review_findings_phase.sql`）：这一列是 text，
+ * 写进一个约束外的值不会被拦在这里，而是被库拒掉——而留痕失败是被吞掉的（见
+ * `attempts.ts` 第 1 条），于是「什么都没记下」看起来跟「一次都没发生」一样。
  */
-export type AttemptPhase = 'flow' | 'pages' | 'build' | 'locate' | 'verify';
+export type AttemptPhase = 'flow' | 'pages' | 'build' | 'locate' | 'verify' | 'findings';
 
 /** 一次尝试（对应 `uemaster_job_attempts` 的一行，只取界面要的几格）。 */
 export type AttemptView = {

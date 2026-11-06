@@ -11,6 +11,7 @@ import { resolveMirrorConfig } from '../codemirror/mirror.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
+import { reviewRequirement } from './review.js';
 import { inspect as inspectMaterial } from './inspect.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
@@ -341,6 +342,23 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
        * worker 里而不是 `startGeneration` 里：配置可能在按钮按下的那一刻之后被改，
        * 而 worker 是真正要用它的那个进程。
        */
+      /**
+       * 评审是**另一条链路**：输入是 PRD 本身（逐字读），产出是问题清单，第三段把清单
+       * 写进每个节点的标注。把它交给 `composeEvaluation` 正是这一版要修的那个 bug——
+       * 那时候 `stage=review` 只是换了个标题的评估材料，而它看起来像评审过。
+       */
+      if (job.stage === 'review') {
+        const reviewed = await reviewRequirement(db, actor, {
+          requirementId: job.requirement_id,
+          jobId,
+        }, {
+          // 同 compose / inspect：worker 是另一个进程，配置要按**同一个人**再解析一次（P2.12）。
+          resolveConfig: () => resolveProviderConfig(actor),
+        });
+        await doneJob(db, jobId, reviewed.artifactId);
+        return;
+      }
+
       if (job.stage === 'inspect') {
         const mirror = await resolveMirrorConfig(db);
         if (!mirror.ok) {

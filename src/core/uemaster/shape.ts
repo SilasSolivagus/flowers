@@ -77,6 +77,87 @@ export function normalizeKind(value: unknown): unknown {
   return 'page';
 }
 
+// ─── 评审问题的类型：六个固定档，模型会写成别的说法 ─────────────────────────
+
+/**
+ * 评审「问题清单」的六类。**只有这六个**，因为界面按它决定那一行的中文标签
+ * （`死路` / `无页面步骤` / `缺状态` / `歧义` / `缺验收口径` / `边界未定`）。
+ */
+export type ReviewFindingType =
+  // 文档自身的毛病：不知道代码现状也能挑出来
+  | 'dead_end' | 'no_screen' | 'missing_state' | 'ambiguous' | 'no_acceptance' | 'unbounded'
+  // 改动层面的毛病：**必须先知道现状**才说得出来（见 review.ts 的 baseline 段）
+  | 'conflicts_current' | 'misses_current_edge' | 'no_migration';
+
+/** 需要「现状」才能成立的类型。它们必须带代码证据。 */
+export const BASELINE_TYPES: readonly ReviewFindingType[] =
+  ['conflicts_current', 'misses_current_edge', 'no_migration'];
+
+/**
+ * 别名表。三种来源，都是**同一个判断的另一种拼法**，不是判断错：
+ * 1. 界面标签本身（模型看得见提示词里的六个中文名，直接抄回来）；
+ * 2. 旧任务包（`packs.ts` 的 review 段）里的那份词表——同一个模型在别的入口见过
+ *    「歧义词」「未知角色」，会顺手用；
+ * 3. 一句近义短语（`状态不全`、`没有出口`、`边界不清`）。
+ *
+ * 认不出来的字符串照样让 zod 拒掉（与 `normalizeVerdict` 同一条口径）：
+ * 放宽形状，不放松「必须是这六类之一」。
+ */
+const REVIEW_TYPE_ALIASES: Record<string, ReviewFindingType> = {
+  dead_end: 'dead_end', no_screen: 'no_screen', missing_state: 'missing_state',
+  ambiguous: 'ambiguous', no_acceptance: 'no_acceptance', unbounded: 'unbounded',
+  死路: 'dead_end', 无页面步骤: 'no_screen', 缺状态: 'missing_state', 歧义: 'ambiguous',
+  缺验收口径: 'no_acceptance', 边界未定: 'unbounded',
+  conflicts_current: 'conflicts_current', misses_current_edge: 'misses_current_edge',
+  no_migration: 'no_migration',
+  与现状冲突: 'conflicts_current', 和现状冲突: 'conflicts_current', 现状冲突: 'conflicts_current',
+  漏了现状边界: 'misses_current_edge', 漏了现状的边界: 'misses_current_edge',
+  现状边界遗漏: 'misses_current_edge', 忽略既有边界: 'misses_current_edge',
+  没说怎么迁移: 'no_migration', 缺迁移方案: 'no_migration', 迁移未说明: 'no_migration',
+  未说明迁移: 'no_migration',
+  死循环: 'dead_end', 断头: 'dead_end', 无出口: 'dead_end', 没有出口: 'dead_end',
+  无页面: 'no_screen', 缺页面: 'no_screen', 没有页面: 'no_screen', 页面缺失: 'no_screen',
+  状态缺失: 'missing_state', 状态不全: 'missing_state', 缺交互状态: 'missing_state',
+  异常态缺失: 'missing_state', 缺异常态: 'missing_state',
+  歧义词: 'ambiguous', 二义: 'ambiguous', 有歧义: 'ambiguous', 表述歧义: 'ambiguous',
+  缺验收: 'no_acceptance', 无验收标准: 'no_acceptance', 缺验收标准: 'no_acceptance',
+  没有验收口径: 'no_acceptance', 验收缺失: 'no_acceptance',
+  边界未定义: 'unbounded', 边界不清: 'unbounded', 边界不明: 'unbounded',
+  未定边界: 'unbounded', 未知角色: 'unbounded', 角色未定义: 'unbounded',
+};
+
+function reviewType(value: string): ReviewFindingType | undefined {
+  return REVIEW_TYPE_ALIASES[value] ?? REVIEW_TYPE_ALIASES[value.toLowerCase()];
+}
+
+/**
+ * `type` 这一格：`"死路"`、`"dead_end"`、`["missing_state"]`、`"no_screen/无页面步骤"`
+ * 收成六选一；收不回来的原样交回 zod。
+ */
+export function normalizeFindingType(value: unknown): unknown {
+  // 实测同族：`["inconsistent/不一致"]`——只包了一层数组，取第一个再走同一套判定。
+  if (Array.isArray(value) && value.length > 0) return normalizeFindingType(value[0]);
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const direct = reviewType(trimmed);
+  if (direct !== undefined) return direct;
+  // `no_screen/无页面步骤` / `缺状态（异常）`：取第一个片段。
+  const head = trimmed.split(/[/|｜、,，;；\s（()）]+/).map((part) => part.trim()).filter((part) => part !== '')[0] ?? '';
+  const byHead = reviewType(head);
+  if (byHead !== undefined) return byHead;
+  // 兜底：整句里出现哪个词就归哪一类（`"这一步之后走不下去了"`）。
+  if (trimmed.includes('死路') || trimmed.includes('出口')) return 'dead_end';
+  if (trimmed.includes('页面')) return 'no_screen';
+  if (trimmed.includes('验收')) return 'no_acceptance';
+  if (trimmed.includes('状态')) return 'missing_state';
+  if (trimmed.includes('现状冲突') || trimmed.includes('冲突')) return 'conflicts_current';
+  if (trimmed.includes('迁移')) return 'no_migration';
+  if (trimmed.includes('既有') || trimmed.includes('现状')) return 'misses_current_edge';
+  if (trimmed.includes('歧义') || /ambigu/i.test(trimmed)) return 'ambiguous';
+  if (trimmed.includes('边界') || /unbound/i.test(trimmed)) return 'unbounded';
+  return value;
+}
+
 // ─── 标注 anno：少一层数组、写成对象 ─────────────────────────────────────────
 
 /**

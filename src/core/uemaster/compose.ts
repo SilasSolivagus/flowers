@@ -69,7 +69,9 @@ export const MAX_PAGES_ATTEMPTS = 2;
  * 90s × 5 = 7.5 分钟，仍然小于 `start.ts` 里 11 分钟的陈旧作业阈值——用户不会看到
  * 「明明失败了却显示正在生成中」。
  */
-export const CALL_TIMEOUT_MS = 90_000;
+// 420 秒，不是 90。实测：推理模型在页面片段这一段单轮要 2 分钟起步——
+// 90 秒会把**能成功的调用**判成超时（评审真跑撞过一次，白烧 90 秒）。
+export const CALL_TIMEOUT_MS = 420_000;
 
 /** 一段 mermaid 用不了多少 token；给多了只会让模型开始写解释。 */
 const FLOW_MAX_TOKENS = 12_000;        // 实测 36% 的格被思考吃光：4k 对推理模型不够
@@ -93,7 +95,11 @@ const NOUN: Record<Stage, string> = { evaluate: '评估材料', review: '评审�
 /** 阶段 → 这份材料要回答的问题。写进提示词，模型才知道该往哪儿使劲。 */
 const FOCUS: Record<Stage, string> = {
   evaluate: '讨论可行性——「这一步到底有没有页面、这么走通不通」',
-  review: '把 PRD 完整走一遍——评审就是照着它一步一步过，走不通的地方要看得出来',
+  // 实测踩过的坑：只说「把 PRD 走一遍」，模型画出来的是**做评审这件事的流程**
+  // （进入PRD评审 → 打开PRD文档 → 逐步走查），不是 PRD 描述的产品流程。
+  // 评审材料要画的是**用户在产品里怎么走**，然后把问题挂到那几步上。
+  review: '画 PRD 描述的**产品用户流程**（用户从进入功能到完成目标经过的那几步），'
+    + '不是画「评审这件事怎么做」的流程；评审者照着这张图一步步过，走不通的地方挂在对应步骤上',
   inspect: '拿实现跟 PRD 对比——流程要按真实存在的页面画，不要照 PRD 修图',
 };
 
@@ -143,7 +149,7 @@ export type ComposeOutcome = {
   artifactId: string;
 };
 
-type RequirementRow = {
+export type RequirementRow = {
   id: string;
   number: number;
   title: string;
@@ -740,11 +746,11 @@ export function parseFlow(mermaid: string): FlowShape {
 // ─── 小工具 ──────────────────────────────────────────────────────────────────
 
 /** 标题/类型里的换行会把提示词的分节改写掉，先压成单行。 */
-function flat(value: string): string {
+export function flat(value: string): string {
   return value.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 
-function addUsage(total: ComposeUsage, usage?: { prompt?: number; completion?: number }): ComposeUsage {
+export function addUsage(total: ComposeUsage, usage?: { prompt?: number; completion?: number }): ComposeUsage {
   return {
     prompt: total.prompt + (usage?.prompt ?? 0),
     completion: total.completion + (usage?.completion ?? 0),
@@ -769,7 +775,7 @@ export function missingProviderText(): string {
 
 // ─── 主流程 ──────────────────────────────────────────────────────────────────
 
-async function loadRequirement(db: Db, requirementId: string): Promise<RequirementRow> {
+export async function loadRequirement(db: Db, requirementId: string): Promise<RequirementRow> {
   const res = await db.execute<RequirementRow>(sql`
     select id, number, title, type, requester, prd_url
       from requirements
@@ -782,6 +788,10 @@ async function loadRequirement(db: Db, requirementId: string): Promise<Requireme
 /**
  * 图这一关：问 → 验（引擎 + 形状）→ 不行就带着引擎原文再问，最多 3 次。
  *
+ * 导出给 `review.ts` 复用：评审的第一段与评估**是同一件事**（同一份 `flowPrompt(req,
+ * 'review')`、同一套形状判据、同三格计数全 0 的验收），只是第三段不同。抄一份实现
+ * 就等于让两条路的「图算不算合格」慢慢分叉——那是两份材料里最不该有差别的一处。
+ *
  * 两次失败的语义刻意分开，因为它们要喂给模型的话完全不同：
  * - **引擎拒**（`ok:false`）：语法/形态/布局问题，要它「改简单」；
  * - **形状太小**（引擎说 ok，但节点 < 3 或连线 < 2）：语法的垃圾也能过计数，
@@ -792,7 +802,7 @@ async function loadRequirement(db: Db, requirementId: string): Promise<Requireme
  * 于是「三次都画不对」与「一次都没发出去」在界面上长得一模一样。留痕不改变判据、
  * 不改变重试预算、不改变最终那句话——它只是把每一次的结果抄一份到旁边。
  */
-async function buildFlow(
+export async function buildFlow(
   cfg: ProviderConfig,
   req: RequirementRow,
   stage: Stage,
@@ -857,6 +867,9 @@ async function buildFlow(
 
 /**
  * 页面片段这一关：问 → 读（zod + 全覆盖）→ 拼 walkmap → 校验（build.py 的规则镜像）
+ *
+ * 同样导出给 `review.ts`：评审的第三段要的是**同一版式**的 UEmaster 三栏页（owner：
+ * 展示要与 UEmaster 一致，不要自己改版式），差别只在右栏标注的内容由问题清单改写。
  * → 不合规就带着**那一句话**再问一次。
  *
  * 为什么把「拼装 + 校验」放进重试循环里：模型交的东西有两种坏法——JSON 形状不对
@@ -869,7 +882,7 @@ async function buildFlow(
  * 只会在错误信息前面多一层 `Traceback`。校验过了再交给 build.py，它的报错就只
  * 剩「我们自己的 bug」这一类。
  */
-async function buildPages(
+export async function buildPages(
   cfg: ProviderConfig,
   req: RequirementRow,
   stage: Stage,
