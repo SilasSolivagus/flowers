@@ -1,14 +1,22 @@
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * 站内产物文件的测试助手。
  *
  * `attachArtifact` 现在会 stat 站内链接（没有文件就是 `artifact_missing`），所以
  * 任何「attach 一个 /uemaster/... 」的用例都必须先在 public/ 下造出那个文件。
- * 解析口径与 `src/core/uemaster/attach.ts` 的 `siteFile` 一致：仓库根的 public/。
+ * 解析口径与服务层**同一套**：本文件在 `<仓库>/tests/helpers/files.ts`，往上两层
+ * 是仓库根，`public/` 就在它下面。
+ *
+ * 为什么这里也不认 `process.cwd()`：有一条用例专门把 cwd 换到 /tmp 去验「产物根
+ * 跟着模块走」。助手要是还按 cwd 找 public/，那条用例造出来的文件就会落在 /tmp 里，
+ * 测的就不是服务层，而是助手自己。常量在模块加载时算一次，之后的 chdir 影响不到它。
  */
-export const PUBLIC_ROOT = path.resolve(process.cwd(), 'public');
+export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+export const PUBLIC_ROOT = path.join(REPO_ROOT, 'public');
 
 /** 站内路径 → 磁盘路径。 */
 export function siteFile(url: string): string {

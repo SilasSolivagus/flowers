@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
@@ -81,16 +82,34 @@ function parseUrl(value: unknown): string {
 }
 
 /**
+ * 仓库根：**从本模块自己的位置**往上数，不认 `process.cwd()`。
+ *
+ * 本文件住在 `<仓库>/src/core/uemaster/attach.ts`，所以 `../../../` 就是仓库根。
+ * 为什么不能用 cwd：这个模块的第二个调用方是 MCP server（`mcp/server.ts`），而
+ * MCP server 是被**别人的客户端**起的——Claude Code 在哪个目录里开会话，那个目录
+ * 就是 cwd。按 cwd 找 `public/` 就等于「从 /tmp 启动的 server 永远报产物文件不存在」，
+ * 而文件明明在仓库里；文档里那句 `bash -lc 'cd <仓库> && exec …'` 就是在给这个 bug
+ * 打补丁，补丁的代价是「必须从仓库根启动」这条隐形约束。
+ *
+ * 为什么是「模块位置」而不是某个环境变量：交付链接是站内路径，它描述的本来就是
+ * **这个仓库**的 public/，与调用方站在哪里无关。写成模块相对，MCP server、测试、
+ * 页面三处自动一致，不需要谁记得配一个 `FLOWERS_ROOT`。
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+
+/** 站内路径的解析基准。`public/` 是 Next 的静态根，也是产物唯一允许落地的位置。 */
+const PUBLIC_ROOT = path.join(REPO_ROOT, 'public');
+
+/**
  * 站内链接 → 磁盘路径。
  *
- * 站内路径的解析基准是**本项目根目录下的 public/**：`/uemaster/PAN-7/evaluate.html`
+ * 站内路径的解析基准是**仓库根目录下的 public/**（`REPO_ROOT`，见上）：`/uemaster/PAN-7/evaluate.html`
  * 对应 `public/uemaster/PAN-7/evaluate.html`。`path.resolve` 会把 `..` 折叠掉，所以
  * 折完还要回头确认仍落在 public 里——否则 `/uemaster/../../.env` 能读到仓库任意文件。
  */
 function siteFile(url: string): string {
-  const root = path.resolve(process.cwd(), 'public');
-  const abs = path.resolve(root, `.${url}`);
-  const rel = path.relative(root, abs);
+  const abs = path.resolve(PUBLIC_ROOT, `.${url}`);
+  const rel = path.relative(PUBLIC_ROOT, abs);
   if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
     throw new AppError('invalid_url', BAD_URL);
   }

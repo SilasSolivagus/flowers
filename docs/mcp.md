@@ -14,8 +14,11 @@ Flowers 自己**不调模型**：评估 / 评审 / 走查这三处要的材料�
 
 前置：`npm install`、`npm run db:up && npm run db:migrate`、库里有数据（`npm run seed`）。
 
-**工作目录必须是这个仓库的根**：交付链接是站内路径（`/uemaster/PAN-9/evaluate.html`），
-服务端按「仓库根目录下的 `public/`」去验文件；cwd 不对，`attach` 会报「产物文件不存在」。
+**server 从哪个目录启动都行**：交付链接是站内路径（`/uemaster/PAN-9/evaluate.html`），
+`attach` 拿它去验文件时，基准是**本仓库的** `public/`——这个基准从 `src/core/uemaster/`
+自己的位置推出来（往上三层就是仓库根），不读 `process.cwd()`。所以 agent 客户端把
+server 起在自己的项目目录里也不会莫名其妙报「产物文件不存在」。cwd 只影响一件事：
+用相对路径写 `mcp/server.ts` 时，得能从这个 cwd 找到这个脚本。
 
 ### Claude Code
 
@@ -23,7 +26,7 @@ Flowers 自己**不调模型**：评估 / 评审 / 走查这三处要的材料�
 # 在仓库根目录跑一次；作用域 project 会写进 .mcp.json
 claude mcp add flowers \
   -e FLOWERS_MCP_ACTOR=claude-code \
-  -- bash -lc 'cd /Users/silas/flowers && exec npx tsx mcp/server.ts'
+  -- npx tsx mcp/server.ts
 ```
 
 或者手写 `.mcp.json`（提交到仓库也不会带出密钥，这里没有密钥）：
@@ -32,8 +35,8 @@ claude mcp add flowers \
 {
   "mcpServers": {
     "flowers": {
-      "command": "bash",
-      "args": ["-lc", "cd /Users/silas/flowers && exec npx tsx mcp/server.ts"],
+      "command": "npx",
+      "args": ["tsx", "mcp/server.ts"],
       "env": { "FLOWERS_MCP_ACTOR": "claude-code" }
     }
   }
@@ -42,20 +45,28 @@ claude mcp add flowers \
 
 `claude mcp list` 里看到 `flowers` 就是接上了；在会话里用 `/mcp` 能看到三个工具。
 
+客户端不在仓库根启动时，把脚本写成绝对路径就行——**校验不看 cwd，只有找脚本看路**：
+
+```bash
+claude mcp add flowers \
+  -e FLOWERS_MCP_ACTOR=claude-code \
+  -- npx tsx /Users/silas/flowers/mcp/server.ts
+```
+
 ### Codex
 
 ```bash
 codex mcp add flowers \
   --env FLOWERS_MCP_ACTOR=codex \
-  -- bash -lc 'cd /Users/silas/flowers && exec npx tsx mcp/server.ts'
+  -- npx tsx mcp/server.ts
 ```
 
 等价于 `~/.codex/config.toml` 里这段（手写也行）：
 
 ```toml
 [mcp_servers.flowers]
-command = "bash"
-args = ["-lc", "cd /Users/silas/flowers && exec npx tsx mcp/server.ts"]
+command = "npx"
+args = ["tsx", "mcp/server.ts"]
 env = { FLOWERS_MCP_ACTOR = "codex" }
 ```
 
@@ -67,6 +78,9 @@ env = { FLOWERS_MCP_ACTOR = "codex" }
 npm run mcp          # = tsx mcp/server.ts，等 stdin 上的 JSON-RPC
 npx tsx scripts/mcp-smoke.ts <需求 id>   # 用 SDK 的 client 连上去跑一遍三个工具
 ```
+
+`npm run mcp` 只有在仓库根（或任何能找到这个 tsx 的目录）才起得来，但**它起来之后
+cwd 就不再影响任何判断**：验产物看的是模块位置，不是它站在哪。
 
 smoke 脚本另有一个作用：它**从任务包正文里抠出交付路径**再写文件，等于在验证
 「包写清楚了 agent 该往哪写」。

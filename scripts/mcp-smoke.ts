@@ -14,6 +14,7 @@
  */
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { sql } from 'drizzle-orm';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -21,6 +22,16 @@ import { db, pool } from '../src/db/client.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 
 const ACTOR = 'claude-code';
+
+/**
+ * 仓库根：本脚本在 `<仓库>/scripts/`，往上两层。
+ *
+ * 这个脚本要能在**任意目录**下跑起来，因为那正是它要验的东西：MCP server 从哪个 cwd
+ * 启动都不该影响产物校验（`attach` 按模块位置找 `public/`）。所以 tsx 在哪、server
+ * 脚本在哪、产物文件写到哪，三处都按仓库根算，不按 cwd；而子进程的 cwd 故意保留成
+ * 调用方的 cwd——从 /tmp 跑一遍，就是最真实的那个场景。
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 一次 callTool 的结果：把多段 text 拼起来，isError 原样带出。 */
 type CallResult = { isError: boolean; text: string };
@@ -75,8 +86,10 @@ async function main(): Promise<void> {
   // 子进程：就是 `npm run mcp` 跑的那条命令本体。env 显式带上 DATABASE_URL，
   // 并指定 actor —— 这条值会进 events.actor，是「谁交的这份材料」的唯一证据。
   const transport = new StdioClientTransport({
-    command: path.resolve('node_modules/.bin/tsx'),
-    args: ['mcp/server.ts'],
+    command: path.join(REPO_ROOT, 'node_modules/.bin/tsx'),
+    args: [path.join(REPO_ROOT, 'mcp/server.ts')],
+    // 子进程的 cwd 就是调用方站着的地方：在 /tmp 里跑本脚本 = 在一个「不是仓库」的
+    // 目录里启动 server，这正是 cwd 修复要吃住的场景。
     cwd: process.cwd(),
     env: { ...(process.env as Record<string, string>), FLOWERS_MCP_ACTOR: ACTOR },
     stderr: 'inherit',
@@ -103,13 +116,16 @@ async function main(): Promise<void> {
     console.log(planned.text);
 
     head('3. 按包里的交付行写文件（agent 干的活）');
-    const file = packFile(planned.text);
+    // 包里写的是仓库相对路径（`public/uemaster/...`）；落到磁盘时按仓库根解析，
+    // 与 attach 的解析口径一致——所以本脚本可以在 /tmp 里跑。
+    const rel = packFile(planned.text);
+    const file = path.join(REPO_ROOT, rel);
     written = file;
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, '<!doctype html><meta charset="utf-8"><h1>占位产物</h1>', 'utf8');
     console.log(`  写成 ${file}`);
 
-    const url = `/${file.replace(/^public\//, '')}`;
+    const url = `/${rel.replace(/^public\//, '')}`;
     head(`4. uemaster_attach  url=${url}`);
     const attached = await call(client, 'uemaster_attach', { requirementId, stage: 'evaluate', url });
     console.log(`isError=${attached.isError}`);

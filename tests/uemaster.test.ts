@@ -7,7 +7,7 @@ import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listArtifacts } from '../src/core/uemaster/list.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
-import { cleanArtifacts, removeArtifact, writeArtifact } from './helpers/files.js';
+import { cleanArtifacts, removeArtifact, artifactExists, writeArtifact } from './helpers/files.js';
 
 beforeEach(async () => {
   await resetDb();
@@ -337,6 +337,46 @@ describe('attachArtifact', () => {
     }));
     expect(e.code).toBe('artifact_missing');
     expect(await artifactCount()).toBe(1);
+  });
+
+  /**
+   * 产物根从**模块位置**推出来（`<仓库>/src/core/uemaster/attach.ts` 往上三层），
+   * 不从 `process.cwd()`。
+   *
+   * 真实场景：MCP server 是被 agent 客户端起的，cwd 通常是客户端自己的项目目录。
+   * 按 cwd 找 `public/`，就会把「文件明明在仓库里」报成 `artifact_missing`；文档里
+   * 那句 `bash -lc 'cd <仓库> && exec …'` 正是在给这个 bug 打补丁。这条用例把 cwd
+   * 换到 /tmp 再 attach：解析基准对了才可能成功。用完必须把 cwd 放回去——它是整个
+   * 进程的状态，漏掉会污染后面所有按相对路径读文件的用例。
+   */
+  it('cwd 不是仓库根时照样认站内文件：产物根跟着模块走，不跟着 cwd 走', async () => {
+    const { id } = await newRequirement();
+    const url = '/uemaster/PAN-7/evaluate.html';
+    const before = process.cwd();
+    try {
+      process.chdir('/tmp');
+      // 助手与服务层同一条口径，所以这个文件确实落在仓库的 public/uemaster/ 下。
+      await writeArtifact(url);
+      expect(await artifactExists(url)).toBe(true);
+
+      const got = await attachArtifact(db, '吕品', {
+        requirementId: id, stage: 'evaluate', url,
+      });
+      expect(got.url).toBe(url);
+      expect(await artifactCount()).toBe(1);
+
+      // 行为不变：同样的 cwd 下，文件真的不在时仍然是 artifact_missing，且报的是
+      // 站内路径（public/uemaster/...），而不是某个 /tmp 下的路径。
+      const e = await caught(attachArtifact(db, '吕品', {
+        requirementId: id, stage: 'inspect', url: '/uemaster/PAN-7/inspect.html',
+      }));
+      expect(e).toMatchObject({ code: 'artifact_missing' });
+      expect(e.message).toContain('public/uemaster/PAN-7/inspect.html');
+      expect(await artifactCount()).toBe(1);
+    } finally {
+      process.chdir(before);
+    }
+    expect(process.cwd()).toBe(before);
   });
 
   it('http(s) 链接不去 stat：别人的服务器够不着', async () => {
