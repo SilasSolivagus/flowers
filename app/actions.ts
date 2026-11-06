@@ -21,6 +21,14 @@ import {
   configOf, memberProviderParts, saveMemberProviderSettings,
 } from '../src/core/uemaster/member-provider';
 import { probeProvider, resolveProviderConfig } from '../src/core/uemaster/provider';
+import { createRequirement } from '../src/core/requirements/create';
+import {
+  deleteRequirement, updateRequirement,
+} from '../src/core/requirements/manage';
+import {
+  createRelease, deleteRelease, updateRelease,
+} from '../src/core/releases/manage';
+import { listRunningJobs, type JobProgress } from '../src/core/read/progress';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -440,4 +448,131 @@ export async function testMemberKeyAction(formData: FormData): Promise<MemberKey
   }
   revalidatePath('/settings');
   return { ok: true, label: probe.label, saved: true };
+}
+
+// ─── P4-02：录入面（需求 / 版本的增删改） ─────────────────────────────────────
+
+/**
+ * 录入动作的返回值：成功时带上 id，让界面能立刻打开那一条（新建之后最想知道的是
+ * 「我刚写的那几问长什么样」）；失败时只有一句中文原因，与其它动作同一个形状。
+ */
+export type EntryResult = { ok: true; id: string; warning?: string | null } | { ok: false; message: string };
+
+/**
+ * 录入动作共用的外壳：身份 → 服务 → 失效两页 → 翻译错误。
+ *
+ * 为什么与 `run()` 分开：`run()` 只刷看板（它服务的是抽屉里的九个动作），而录入会
+ * 同时改变看板与版本页（新建/删掉一个版本会改看板的版本标签与排期下拉）。两页都刷，
+ * 代价是一次 RSC 重算，换来的是「切到版本页看到的是新的」。
+ *
+ * 失败也刷（与 `run()` 同一条规矩）：最常见的拒绝是 `not_found`——同事刚把这条需求
+ * 删了，而屏上还画着它。
+ */
+async function entry(
+  call: (actor: string) => Promise<{ id: string; warning?: string | null }>,
+): Promise<EntryResult> {
+  const actor = await currentMember();
+  try {
+    const result = await call(actor);
+    return { ok: true, id: result.id, warning: result.warning ?? null };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    revalidatePath('/');
+    revalidatePath('/releases');
+  }
+}
+
+/**
+ * 新建需求（看板顶栏那个按钮）。
+ *
+ * 表单只**必须**填标题 / 类型 / 提出人，六问可空——校验一条都不在这一层，全部由
+ * `createRequirement` 的 zod 说（缺字段时那句中文就是界面上那一行）。
+ * `ownerMemberId` 是下拉框的值，空串（未指定负责人）交给服务层归一成 null。
+ */
+export async function createRequirementAction(formData: FormData): Promise<EntryResult> {
+  const owner = field(formData, 'ownerMemberId').trim();
+  return entry((actor) => createRequirement(db, actor, {
+    title: field(formData, 'title'),
+    type: field(formData, 'type'),
+    requester: field(formData, 'requester'),
+    ownerMemberId: owner === '' ? null : owner,
+    context: field(formData, 'context'),
+    problem: field(formData, 'problem'),
+    outcome: field(formData, 'outcome'),
+    surfaces: field(formData, 'surfaces'),
+    edgeCases: field(formData, 'edgeCases'),
+    outOfScope: field(formData, 'outOfScope'),
+  }));
+}
+
+/**
+ * 改描述：标题 + 六问（抽屉「描述」段的「编辑」）。
+ *
+ * **不传** type / requester / ownerMemberId / prdUrl：录入面不碰它们，而服务层对
+ * 前三个是「报错」而不是「忽略」（见 `manage.ts` 的 `FORBIDDEN`）。这一层因此也
+ * 不能顺手把它们带上——那会把一次「改了个错字」变成一句 not_editable。
+ */
+export async function updateRequirementAction(formData: FormData): Promise<EntryResult> {
+  return entry((actor) => updateRequirement(db, actor, {
+    requirementId: field(formData, 'id'),
+    title: field(formData, 'title'),
+    context: field(formData, 'context'),
+    problem: field(formData, 'problem'),
+    outcome: field(formData, 'outcome'),
+    surfaces: field(formData, 'surfaces'),
+    edgeCases: field(formData, 'edgeCases'),
+    outOfScope: field(formData, 'outOfScope'),
+  }));
+}
+
+/** 软删除一条需求（编辑框里的「删除」）。 */
+export async function deleteRequirementAction(formData: FormData): Promise<ActionResult> {
+  const result = await entry((actor) => deleteRequirement(db, actor, {
+    requirementId: field(formData, 'id'),
+  }));
+  return result.ok ? { ok: true } : result;
+}
+
+/** 新建版本。重叠不拦，作为 `warning` 回给界面（那一行就地显示）。 */
+export async function createReleaseAction(formData: FormData): Promise<EntryResult> {
+  return entry((actor) => createRelease(db, actor, {
+    name: field(formData, 'name'),
+    windowStart: field(formData, 'windowStart'),
+    releaseDate: field(formData, 'releaseDate'),
+    goal: field(formData, 'goal'),
+    note: field(formData, 'note'),
+  }));
+}
+
+/** 改版本（版本页「编辑」）。 */
+export async function updateReleaseAction(formData: FormData): Promise<EntryResult> {
+  return entry((actor) => updateRelease(db, actor, {
+    id: field(formData, 'id'),
+    name: field(formData, 'name'),
+    windowStart: field(formData, 'windowStart'),
+    releaseDate: field(formData, 'releaseDate'),
+    goal: field(formData, 'goal'),
+    note: field(formData, 'note'),
+  }));
+}
+
+/** 软删除一个版本（编辑框里的「删除」）。 */
+export async function deleteReleaseAction(formData: FormData): Promise<ActionResult> {
+  const result = await entry((actor) => deleteRelease(db, actor, {
+    id: field(formData, 'id'),
+  }));
+  return result.ok ? { ok: true } : result;
+}
+
+/**
+ * 进度卡的轮询口（P4-02）。
+ *
+ * 与 `generationStatusAction` 同一条理由：这条链路只有一个消费者（右下角那张卡），
+ * 而它已经在用 server action 说同一种话（D1：没有 REST 层）。返回整份清单而不是
+ * 单条作业：卡片要的是「现在在跑什么」，作业的增减是清单的变化。
+ */
+export async function runningJobsAction(): Promise<JobProgress[]> {
+  return listRunningJobs();
 }

@@ -18,6 +18,9 @@ import { getBoard } from '../src/core/read/board.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 import { listReleases } from '../src/core/read/version.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
+import { DESCRIPTIVE_FIELDS, hintFor } from '../src/core/requirements/fields.js';
+import { overlapLine, previousLine } from '../src/core/releases/window.js';
+import { elapsedLabel } from '../src/core/read/elapsed.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 
 /**
@@ -479,5 +482,51 @@ describe('进度卡', () => {
 
     const [item] = await listRunningJobs();
     expect(item).toMatchObject({ stageLabel: '评审中', phase: 'findings', phaseLabel: '正在写问题清单' });
+  });
+});
+
+// ─── 7. 两句界面文案的来源（都是纯函数，钉住是为了不让措辞漂） ────────────────
+
+describe('策略提示（六问空着时那一行）', () => {
+  const byKey = new Map(DESCRIPTIVE_FIELDS.map((f) => [f.key, f]));
+
+  it('三问有提示，另外三问没有', () => {
+    expect(hintFor(byKey.get('surfaces')!, '', 'feature')).toBe('没有它，流程图会画出不存在的页面');
+    expect(hintFor(byKey.get('outcome')!, '', 'feature')).toBe('没有它，边界和异常只能靠猜');
+    expect(hintFor(byKey.get('context')!, '  ', 'feature')).toBe('没有它，模型编不出角色和入口');
+    expect(hintFor(byKey.get('problem')!, '', 'feature')).toBeNull();
+    expect(hintFor(byKey.get('edgeCases')!, '', 'feature')).toBeNull();
+    expect(hintFor(byKey.get('outOfScope')!, '', 'feature')).toBeNull();
+  });
+
+  it('商业需求的成功口径换一句更狠的', () => {
+    expect(hintFor(byKey.get('outcome')!, '', 'commercial')).toBe('商业需求没有成功口径，评审过不了');
+  });
+
+  it('写了内容就没有提示（提示不是常驻的说明文字）', () => {
+    expect(hintFor(byKey.get('outcome')!, '按标题能搜到', 'commercial')).toBeNull();
+  });
+});
+
+describe('版本时间窗的文案与判定（纯函数）', () => {
+  it('策略行：有上一版点名它，没有就说这是第一个', () => {
+    expect(previousLine(null)).toBe('还没有版本，这是第一个');
+    expect(previousLine({ name: 'v1.4', windowStart: '2026-11-01', releaseDate: '2026-11-15' }))
+      .toBe('上一个版本：v1.4 11-01 → 11-15');
+  });
+
+  it('重叠句与服务层返回的 warning 是同一个函数产出的那句话', () => {
+    const previous = { name: 'v1.4', windowStart: '2026-11-01T00:00:00Z', releaseDate: '2026-11-15T00:00:00Z' };
+    expect(overlapLine({ windowStart: '2026-11-10', releaseDate: '2026-11-20' }, previous))
+      .toBe('与「v1.4」重叠：11-10 → 11-15');
+    expect(overlapLine({ windowStart: '2026-11-15', releaseDate: '2026-11-29' }, previous)).toBeNull();
+  });
+
+  it('进度卡的秒数：mm:ss，超过一小时带小时', () => {
+    expect(elapsedLabel(0)).toBe('00:00');
+    expect(elapsedLabel(47_000)).toBe('00:47');
+    expect(elapsedLabel(61_000)).toBe('01:01');
+    expect(elapsedLabel(3_723_000)).toBe('1:02:03');
+    expect(elapsedLabel(-5_000)).toBe('00:00');
   });
 });

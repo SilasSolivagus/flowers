@@ -4,6 +4,9 @@ import type { ReactNode } from 'react';
 
 import { currentMember, listMembers } from '../src/core/read/member';
 import { PageTitle } from './components/PageTitle';
+import { TopbarActions } from './components/TopbarActions';
+import { ProgressCard } from './components/ProgressCard';
+import { listRunningJobs } from '../src/core/read/progress';
 import { RAIL_COOKIE, railFromCookie } from './components/rail-pref';
 import { RailFooter } from './components/RailFooter';
 import { RailNav } from './components/RailNav';
@@ -33,6 +36,15 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   // 没有 cookie 时是 'auto'：桌面 184px、手机 56px，由 CSS 的断点决定。
   const jar = await cookies();
   const rail = railFromCookie(jar.get(RAIL_COOKIE)?.value);
+
+  /**
+   * 正在跑的生成（P4-02）。放在布局里、而不是某一页：生成是由抽屉发起的，但人往往
+   * 在两分钟的等待里翻到版本页、设置页去干别的；进度卡跟着人走才对。
+   *
+   * 没有作业时它渲染 null（`ProgressCard` 自己判断），所以这次查询的结果在多数时候
+   * 只是一次空数组——一次索引命中换「切页时不知道还在不在生成」这个坑，值得。
+   */
+  const jobs = await listRunningJobs();
 
   return (
     <html lang="zh-CN" data-rail={rail}>
@@ -64,8 +76,11 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             {/* 顶栏只放当前页的标题（需求 / 版本 / 设置）。字由路径推出来，见 PageTitle。 */}
             <header className="topbar">
               <PageTitle />
+              <TopbarActions />
             </header>
             {children}
+            {/* 角落里的进度卡：固定右下角，可折叠，点一行进那条需求的抽屉。 */}
+            <ProgressCard initial={jobs} />
           </div>
         </div>
       </body>

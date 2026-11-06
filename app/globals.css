@@ -363,3 +363,89 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .gen-off{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .gen-link{color:var(--c-accent);text-decoration:none}
 .gen-link:hover{text-decoration:underline}
+
+/* ── P4-02：录入面的对话框、提示、进度卡 ──────────────────────────────
+   颜色一律 var(--c-*)，没有一个字面色值。
+   三组类各管一件事：
+   1. .sheet .box.wide / .fld textarea / .hintline / .strat —— 两张录入表单；
+   2. .sechd —— 抽屉「描述」段的标题行（标题 + 编辑）；
+   3. .jobcard —— 右下角的生成进度卡（**不是**遮罩：owner 明确否决了全局遮挡）。 */
+
+/* 顶栏右侧的录入入口（新建需求 / 新建版本）。标题在左、入口在右，`margin-left:auto`
+   把按钮推到尽头——顶栏只有这两样东西，不需要额外的分隔线。 */
+.topbar .newentry{margin-left:auto;text-decoration:none}
+
+/* 录入表单：720px 的框，比抽屉里的动作 sheet（480px）宽——里面是六个 textarea，
+   480 宽会让每一行只剩三四十个字，而这几问要写的恰恰是段落。
+   高度上限 + `.b` 自己纵向滚：内容比屏幕高时不该把输入框挤出视口。 */
+.sheet .box.wide{width:min(720px,calc(100vw - 32px));max-height:calc(100vh - 64px);
+                 display:flex;flex-direction:column}
+.sheet .box.wide .b{overflow:auto;flex:1;min-height:0}
+/* 对话框头部：标题在左、✕ 在右。与抽屉头部同一个意思、同一档字号。 */
+.sheet .box .h{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.sheet .box .h b{font-weight:600}
+.sheet .box .h .x{width:22px;height:22px;border-radius:var(--r-xs);color:var(--c-text-4);
+                  font:400 var(--t-caption) var(--f-sans);display:grid;place-items:center}
+.sheet .box .h .x:hover{color:var(--c-text-2);background:var(--c-surface-2)}
+.sheet .box .h .x:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+
+/* 两列并排（类型 / 提出人、开始日 / 发版日）。`.fld .two` 是历史上写在 .fld 里面的
+   那个版本（动作条在用）；`.two` 是 P4-02 表单里的直接子元素。两者同一套声明。 */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* textarea：与 input 同一套边框与字号，只是高度由 rows 决定、可纵向拉。 */
+.fld textarea{width:100%;min-height:52px;border:1px solid var(--c-line-strong);
+              border-radius:var(--r-xs);padding:6px 10px;font:400 var(--t-body-s) var(--f-sans);
+              background:var(--c-surface);color:var(--c-text-1);resize:vertical;
+              line-height:18px}
+.fld textarea:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+
+/* 那一行提示（策略提示 / 重叠警告）。位置紧贴控件下方、字号降一档：
+   它是「不填会怎样」的一句后果，不是错误——所以既不是红底也不是 .dfail。 */
+.hintline{margin-top:4px;color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
+.hintline.warn{color:var(--c-warning)}
+
+/* 版本表单顶上那行策略（「上一个版本：v1.4 11-01 → 11-15」）。
+   给它一块浅底：它是**上下文**，与下面的输入框不是同一类东西。 */
+.strat{margin-bottom:12px;padding:8px 10px;border-radius:var(--r-xs);
+       background:var(--c-surface-2);color:var(--c-text-3);
+       font:400 var(--t-caption) var(--f-sans)}
+
+/* 表单脚注里的「删除」：ghost 的底色 + 负向字色（危险动作，但不必做成实心红按钮）。 */
+.btn.ghost.danger{color:var(--c-negative)}
+.btn.ghost.danger:hover{background:var(--c-negative-weak)}
+
+/* 抽屉「描述」段的标题行：h3 + 编辑。h3 在 .dsec 里有 12px 的下外边距，
+   这一行自己接管间距，所以清零。 */
+.dsec .sechd{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.dsec .sechd h3{margin:0}
+.dsec .sechd .btn{text-decoration:none}
+
+/* ── 生成进度卡（右下角） ─────────────────────────────────────────────
+   位置固定、宽度固定、可折叠。三条尺寸数字的来由：
+   - `right/bottom: 16px`：贴边但不顶到角，屏幕上它像一块浮起的便签；
+   - `width: 300px`：够放下「评审中 · 正在读 PRD · 00:47」一行 + 一条需求标题；
+   - `z-index: 30`：**低于抽屉遮罩（40）**。抽屉打开时那块 scrim 盖住它，是对的——
+     抽屉里那三行本来就在说「生成中」，而且右下角正好是动作条的位置。
+   - 顶部一条 2px 的等待色细线：卡片静止时也能看出「有一件事在跑」。 */
+.jobcard{position:fixed;right:16px;bottom:16px;z-index:30;width:300px;
+         border:1px solid var(--c-line-strong);border-top:2px solid var(--c-warning);
+         border-radius:var(--r-sm);background:var(--c-surface);
+         box-shadow:var(--sh-overlay);overflow:hidden}
+.jobcard .hd{display:flex;align-items:center;justify-content:space-between;gap:8px;
+             width:100%;padding:8px 10px;color:var(--c-text-1);
+             font:500 var(--t-caption) var(--f-sans)}
+.jobcard.folded .hd{border-bottom:0}
+.jobcard:not(.folded) .hd{border-bottom:1px solid var(--c-line)}
+.jobcard .hd:hover{background:var(--c-surface-2)}
+.jobcard .hd:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
+.jobcard .cv{color:var(--c-text-4)}
+.jobcard .row{display:flex;flex-direction:column;gap:2px;padding:8px 10px;
+              border-bottom:1px solid var(--c-line);color:var(--c-text-1);
+              text-decoration:none}
+.jobcard .row:last-child{border-bottom:0}
+.jobcard .row:hover{background:var(--c-surface-2)}
+.jobcard .row b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-1)}
+.jobcard .row span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);
+                   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jobcard .row .k{font-family:var(--f-mono);color:var(--c-text-4);margin-right:6px;font-style:normal}

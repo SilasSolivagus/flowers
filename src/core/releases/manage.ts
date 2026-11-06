@@ -54,27 +54,13 @@ export function parseDayOrThrow(text: string): Date {
   return date;
 }
 
-/** UTC 零点的时间戳 → 'MM-DD'。版本日期一律是 UTC 零点（见 `parseDayOrThrow`）。 */
-export function dayLabel(value: string): string {
-  return new Date(value).toISOString().slice(5, 10);
-}
-
 /**
- * 两个时间窗有没有重叠，重叠在哪一段。
- *
- * 半开区间 `[windowStart, releaseDate)`：**首尾相接不算重叠**——上一版 11-15 发版、
- * 这一版 11-15 开窗，是同一件事的正常排法，警它一下只会让人把日期改成 11-16。
- * 返回值是重叠那一段的起止（ISO 串），界面直接把它写进那一行警告里。
+ * 时间窗的纯函数（`overlapOf` / `dayLabel`）住在 `window.ts`，这里再导出一次：
+ * 服务层与**客户端表单**用的是同一份实现，而客户端不能 import 这个文件（它 import
+ * 了 drizzle 与 db/client）。测试从这一个入口拿，读起来仍然像「版本服务的一部分」。
  */
-export function overlapOf(
-  a: { windowStart: string; releaseDate: string },
-  b: { windowStart: string; releaseDate: string },
-): { start: string; end: string } | null {
-  const start = Math.max(new Date(a.windowStart).getTime(), new Date(b.windowStart).getTime());
-  const end = Math.min(new Date(a.releaseDate).getTime(), new Date(b.releaseDate).getTime());
-  if (Number.isNaN(start) || Number.isNaN(end) || start >= end) return null;
-  return { start: new Date(start).toISOString(), end: new Date(end).toISOString() };
-}
+export { dayLabel, overlapOf } from './window.js';
+import { overlapLine } from './window.js';
 
 type ReleaseRow = {
   id: string;
@@ -121,15 +107,18 @@ export async function previousRelease(
   };
 }
 
-/** 重叠警告的那一句话：点名版本与重叠的那一段。没有重叠就是 null。 */
+/**
+ * 重叠警告的那一句话：点名版本与重叠的那一段。没有重叠就是 null。
+ *
+ * 文案本身在 `window.ts`（`overlapLine`）：界面上那行**行内提示**与服务返回的
+ * `warning` 必须是同一句话，否则「敲日期时看到的那句」与「保存后看到的那句」会长得
+ * 不一样——同一件事的两种说法是最容易让人怀疑数据的一种坏。
+ */
 export function overlapWarning(
   entered: { windowStart: string; releaseDate: string },
   previous: ReleaseSummary | null,
 ): string | null {
-  if (previous === null) return null;
-  const overlap = overlapOf(entered, previous);
-  if (overlap === null) return null;
-  return `与「${previous.name}」重叠：${dayLabel(overlap.start)} → ${dayLabel(overlap.end)}`;
+  return overlapLine(entered, previous);
 }
 
 /** 入参里的一个描述值 → 落库写法：字符串去空白、空串归 null。 */

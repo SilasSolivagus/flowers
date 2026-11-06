@@ -42,12 +42,24 @@ const POLL_MS = 1500;
 const GIVE_UP_MS = 11 * 60 * 1000;
 
 export function GenerateButton({
-  requirementId, stage, runningJobId, generator,
+  requirementId, stage, runningJobId, generator, present, fresh,
 }: {
   requirementId: string;
   stage: string;
   runningJobId: string | null;
   generator: GeneratorView;
+  /**
+   * 这一阶段已经有一份产物（P4-02）。
+   *
+   * 它只改**按钮上的字**（`生成` → `重新生成`）与鼠标悬停时那一句警告，不改行为：
+   * 重新生成**永远允许**（owner 的裁决）。生成是一次可能的覆盖，但「有一份旧的、
+   * 我想再做一份」是常态——把它拦下来只会逼人去删产物。
+   *
+   * `fresh` 只用于那句警告的措辞：当前版本已有一份（`fresh`）与旧版本还在（`stale`）
+   * 是两件不同的事，但两者的后果一样「会再存一版」，所以都不拦。
+   */
+  present: boolean;
+  fresh: boolean;
 }) {
   const router = useRouter();
   const [jobId, setJobId] = useState<string | null>(runningJobId);
@@ -188,13 +200,18 @@ export function GenerateButton({
       <button
         className="btn gen"
         type="button"
+        title={present
+          ? (fresh
+            ? '已有一份当前版本的产物，重新生成会再存一版'
+            : '已有一份旧版本的产物，重新生成会再存一版')
+          : undefined}
         onClick={() => {
           if (generator.state === 'choose') setAsking(true);
           else void start();
         }}
         disabled={pending}
       >
-        {error === null ? '生成' : '重试'}
+        {error === null ? (present ? '重新生成' : '生成') : '重试'}
       </button>
       {asking && (
         <div

@@ -120,18 +120,8 @@ export async function listRunningJobs(): Promise<JobProgress[]> {
 }
 
 /**
- * 卡片上那两格显示的时间：`00:47`。
- *
- * 超过一小时就写 `1:02:03`（一次生成被杀之前最多十分钟，这一支只是兜底）。
- * 负数（客户端时钟比服务端慢）夹到 0：显示 `-00:03` 只会让人以为系统坏了。
+ * 时间那一格（`00:47`）住在 `elapsed.ts`：它是**零依赖**的，客户端卡片直接 import
+ * 它；这个文件连着 `db/client`，进不了浏览器包。这里再导出一次，服务端代码仍然能
+ * 从一个入口拿到两样东西。
  */
-export function elapsedLabel(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const seconds = total % 60;
-  const minutes = Math.floor(total / 60) % 60;
-  const hours = Math.floor(total / 3600);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return hours > 0
-    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
-    : `${pad(minutes)}:${pad(seconds)}`;
-}
+export { elapsedLabel } from './elapsed.js';

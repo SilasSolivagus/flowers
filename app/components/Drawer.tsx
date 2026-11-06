@@ -1,7 +1,9 @@
+import { Fragment } from 'react';
 import Link from 'next/link';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail';
 import { formatMonthDay } from '../../src/core/read/board';
+import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
 import { GenerateButton } from './GenerateButton';
@@ -62,11 +64,22 @@ function RefRow({
       </div>
       <div className="acts">
         {item.present && <span className="pill ok">{item.atLabel ?? '—'}</span>}
+        {/* 新鲜度：**只有两个标签**，没有一句话解释（P4-02 的「labels only」）。
+            它是算出来的（当前描述的指纹 vs 产物存下来的那一个），不是存下来的——
+            所以改完描述保存回来，这一行自己就变了，不需要任何一次额外写入。 */}
+        {item.present && item.freshness === 'stale' && (
+          <span className="pill warn">需求已更新</span>
+        )}
+        {item.present && item.freshness === 'unknown' && (
+          <span className="pill no">版本未知</span>
+        )}
         <GenerateButton
           requirementId={id}
           stage={item.stage}
           runningJobId={item.generation?.id ?? null}
           generator={generator}
+          present={item.present}
+          fresh={item.freshness === 'fresh'}
         />
         <AttachForm id={id} number={number} stage={item.stage} />
       </div>
@@ -91,7 +104,7 @@ function ReviewRow({ review }: { review: DetailReview }) {
 export function Drawer({
   detail, releases, generator,
 }: { detail: Detail; releases: ReleaseOption[]; generator: GeneratorView }) {
-  const { info, commit, review } = detail;
+  const { info, commit, review, description } = detail;
   // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
   const refs = detail.refs;
   const scheduled = commit.release !== null || commit.testAt !== null || commit.dueAt !== null;
@@ -143,7 +156,33 @@ export function Drawer({
             </dl>
           </section>
 
-          {/* ② 承诺：没排期就整段不显示（spec §4「没排期则不显示」） */}
+          {/* ② 描述：六个问题（P4-02）。整段固定渲染——六问是「这条需求要做什么」，
+              空着也是一种信息（它等于「没人写过」），所以空的行写 '—' 而不是消失；
+              一列一列地藏起来，读的人就无法判断「这一问是没写，还是这一问不存在」。
+              「编辑」只改标题与这六问（类型 / 提出人 / 负责人不在这张表上）。 */}
+          <section className="dsec">
+            <div className="sechd">
+              <h3>描述</h3>
+              <Link className="btn sm ghost" href={`/?open=${detail.id}&edit=1`}>编辑</Link>
+            </div>
+            <dl className="fields">
+              {DESCRIPTIVE_FIELDS.map((field) => (
+                // dt/dd 是这一层网格的**直接子元素**（`.fields` 是 grid）：套一个 div
+                // 会把整段变成两个格子里的两行，`grid-column: 1 / -1` 也就不再生效。
+                <Fragment key={field.key}>
+                  <dt className="full">{field.label}</dt>
+                  {/* 空着就只是一个「—」，**不带** `.desc` 那块浅底：
+                      六块空灰盒子会把这一段的标题淹没，而「没写」这件事一个破折号
+                      就说清楚了。有内容时才有那块底（它是段落，与标签不同层）。 */}
+                  <dd className={description[field.key] === null ? 'full' : 'full desc'}>
+                    {description[field.key] ?? '—'}
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+          </section>
+
+          {/* ③ 承诺：没排期就整段不显示（spec §4「没排期则不显示」） */}
           {scheduled && (
             <section className="dsec">
               <h3>承诺</h3>

@@ -1,7 +1,10 @@
 import Link from 'next/link';
 
+import { db } from '../../src/db/client';
 import { listReleases } from '../../src/core/read/version';
+import { previousRelease } from '../../src/core/releases/manage';
 import { Gantt } from '../components/Gantt';
+import { ReleaseForm } from '../components/ReleaseForm';
 import './releases.css';
 
 /**
@@ -13,14 +16,60 @@ import './releases.css';
  *
  * 选中哪个版本走 `?release=<id>` 而不是本地 state：刷新、分享链接、点后退都还在同一版；
  * 参数不指向任何版本（手改的 URL）时回到第一个版本，但**不改写地址**——URL 是用户的。
+ *
+ * P4-02 起这一页也是版本的录入面：`?new=1` 开「新建版本」，`?edit=1` 开「编辑版本」。
+ * 两个状态同样住在 URL 里（与 `?release=`、看板的 `?open=` 同一条规矩）。表单顶端
+ * 那行策略（「上一个版本：v1.4 11-01 → 11-15」）由服务端算：它要问库，而客户端
+ * 只负责把用户敲的日期与它比一次（见 `ReleaseForm`）。
  */
 export default async function ReleasesPage({
   searchParams,
-}: { searchParams: Promise<{ release?: string | string[] | undefined }> }) {
+}: {
+  searchParams: Promise<{
+    release?: string | string[] | undefined;
+    new?: string | string[] | undefined;
+    edit?: string | string[] | undefined;
+  }>;
+}) {
   const releases = await listReleases();
-  const { release } = await searchParams;
+  const { release, new: fresh, edit } = await searchParams;
   const wanted = typeof release === 'string' ? release : null;
   const current = releases.find((r) => r.id === wanted) ?? releases[0] ?? null;
+
+  const creating = (typeof fresh === 'string' ? fresh : null) === '1';
+  const editing = (typeof edit === 'string' ? edit : null) === '1' && current !== null;
+
+  /**
+   * 表单要的「上一个版本」。
+   *
+   * - 新建：按**默认窗口**算（今天 → 两周后）。空着日期时那一行也该有内容——它是
+   *   上下文，不是校验结果；用户改了日期，行内重叠警告会跟着变（客户端算）。
+   * - 编辑：按**这一版**的发版日算，并排除它自己（否则「把这一版往后挪」会立刻得到
+   *   一条与自身重叠的警告）。
+   */
+  const today = new Date();
+  /** 相对今天加 n 天（只取日期那一段）。 */
+  const addDays = (from: Date, n: number) => new Date(from.getTime() + n * 86_400_000)
+    .toISOString().slice(0, 10);
+
+  /**
+   * 默认窗口：**接着上一版往后排**，而不是从今天起排。
+   *
+   * 为什么：今天是 11-06、上一版是 10-29 → 11-13 时，「今天起两周」正好压在上一版
+   * 身上，一打开表单就顶着一行重叠警告——那不是用户的问题，是我们给的默认值不对。
+   * 有上一版就从它的发版日**次日**起算，两周后发；没有版本才从今天起。
+   */
+  const tentativeEnd = addDays(today, 14);
+  const previous = creating
+    ? await previousRelease(db, new Date(tentativeEnd).toISOString())
+    : null;
+  const defaultStart = creating && previous !== null
+    ? addDays(new Date(previous.releaseDate), 1)
+    : addDays(today, 0);
+  const defaultEnd = addDays(new Date(`${defaultStart}T00:00:00Z`), 14);
+  const previousForEdit = editing && current !== null
+    ? await previousRelease(db, current.releaseDate, current.id)
+    : null;
 
   return (
     <main className="view pad vpage">
@@ -41,6 +90,9 @@ export default async function ReleasesPage({
             );
           })}
         </div>
+        {current !== null && (
+          <Link className="btn sm vedit" href={`/releases?release=${current.id}&edit=1`}>编辑</Link>
+        )}
       </div>
       {current !== null && (
         <div className="vver">
@@ -55,6 +107,17 @@ export default async function ReleasesPage({
                 <dt>开始</dt><dd>{current.windowStartLabel ?? '—'}</dd>
                 <dt>发版</dt><dd>{current.releaseDateLabel ?? '—'}</dd>
                 <dt>在途</dt><dd>{current.inFlight} 条</dd>
+                {/* 目标 / 备注在录入面里填，就在这里读（否则那两个框写进去没有出口）。 */}
+                {current.goal !== null && (
+                  <>
+                    <dt>目标</dt><dd className="long">{current.goal}</dd>
+                  </>
+                )}
+                {current.note !== null && (
+                  <>
+                    <dt>备注</dt><dd className="long">{current.note}</dd>
+                  </>
+                )}
               </dl>
             </section>
             <section className="panel">
@@ -71,6 +134,30 @@ export default async function ReleasesPage({
             </section>
           </div>
         </div>
+      )}
+
+      {creating && (
+        <ReleaseForm
+          mode="create"
+          closeHref="/releases"
+          previous={previous}
+          defaults={{ windowStart: defaultStart, releaseDate: defaultEnd }}
+        />
+      )}
+      {editing && current !== null && (
+        <ReleaseForm
+          mode="edit"
+          closeHref={`/releases?release=${current.id}`}
+          previous={previousForEdit}
+          initial={{
+            id: current.id,
+            name: current.name,
+            windowStart: current.windowStart,
+            releaseDate: current.releaseDate,
+            goal: current.goal,
+            note: current.note,
+          }}
+        />
       )}
     </main>
   );

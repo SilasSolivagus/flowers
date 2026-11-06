@@ -32,6 +32,9 @@
            font:400 var(--t-body-s) var(--f-sans)}
 .vpage .kv dt{color:var(--c-text-3)}
 .vpage .kv dd{margin:0;text-align:right;font-family:var(--f-num);color:var(--c-text-1)}
+/* 目标 / 备注（P4-02 录进来的两段话）：比例字、左对齐、可折行。
+   它们是句子而不是数字，右对齐 + 等宽字会把一段话排成一面斜墙。 */
+.vpage .kv dd.long{text-align:left;font-family:var(--f-sans);line-height:18px;white-space:pre-line;overflow-wrap:anywhere}
 
 /* 进度：一个大的时间百分比 + 三个计数。 */
 .vpage .kpi{display:flex;align-items:flex-end;gap:8px;padding:12px 12px 0}

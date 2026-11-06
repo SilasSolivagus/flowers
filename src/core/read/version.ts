@@ -45,6 +45,9 @@ export type Release = {
   shipped: number;
   /** 延期 = 这个版本里「等的日期已过、还没上线」的条数（与看板同一个判定）。 */
   late: number;
+  /** 这一版要做什么 / 备注（P4-02 录入的，可空）。 */
+  goal: string | null;
+  note: string | null;
   requirements: ReleaseItem[];
 };
 
@@ -56,6 +59,8 @@ type ReleaseRow = {
   name: string;
   window_start: string;
   release_date: string;
+  goal: string | null;
+  note: string | null;
 };
 
 type ItemRow = {
@@ -86,7 +91,7 @@ export async function listReleases(): Promise<Release[]> {
   const today = shanghaiToday();
 
   const releaseRes = await db.execute<ReleaseRow>(sql`
-    select id, name, window_start, release_date
+    select id, name, window_start, release_date, goal, note
       from releases
      where deleted_at is null
      order by release_date, name`);
@@ -144,6 +149,8 @@ export async function listReleases(): Promise<Release[]> {
       inFlight: requirements.filter((r) => r.state !== 'live').length,
       shipped: requirements.filter((r) => r.state === 'live').length,
       late: requirements.filter((r) => r.late).length,
+      goal: row.goal,
+      note: row.note,
       requirements,
     };
   });
