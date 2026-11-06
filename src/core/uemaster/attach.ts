@@ -6,6 +6,8 @@ import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import { evaluateInTx } from '../requirements/evaluate.js';
+import type { Locked } from '../requirements/lock.js';
 import { isStage, type Stage } from './packs.js';
 
 const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
@@ -139,7 +141,7 @@ async function assertSiteFileExists(url: string): Promise<void> {
 }
 
 /**
- * 记一份 UEmaster 产物：校验 + 落库 + 事件。
+ * 记一份 UEmaster 产物：校验 + 落库 + 事件（+ 收集里的评估材料顺带推进到待设计）。
  *
  * 只存链接、不存正文（spec §5）：正文是 HTML，进库就成了「谁负责渲染、谁负责清理」
  * 的新问题；而 agent 写文件的位置是确定的 `public/uemaster/`，链接已经够用。
@@ -147,12 +149,14 @@ async function assertSiteFileExists(url: string): Promise<void> {
  * 同一 (requirement, stage) 允许多行：重做一次就是一条新版本，读侧取最新。
  * 不 update 旧行——历史版本是「当初评审看的什么」的证据。
  *
- * 存在性检查放在事务里、并且用一次 `select` 而不是直接 insert：外键冲突抛的是英文的
- * 23503，而「这条需求不存在」是调用方（MCP agent）最常撞上的错误，得给它中文 code。
- * 不加行锁——本次不改需求状态，没有需要串行化的写。
+ * 存在性检查放在事务里、并且用一次 `select ... for update` 而不是直接 insert：外键
+ * 冲突抛的是英文的 23503，而「这条需求不存在」是调用方（MCP agent）最常撞上的错误，
+ * 得给它中文 code。加行锁是为了 R-P2-8：这条需求如果还在收集里，本次 attach 会顺带
+ * 把它推进到待设计（见下面最后一段），那次判断必须读在一个不会被并发迁移改掉的
+ * 视图上。
  *
- * 顺序是「需求存在」→「站内文件存在」→ insert：需求 id 打错时该报「需求不存在」，
- * 而不是报一个跟这条需求毫无关系的文件缺失。
+ * 顺序是「需求存在」→「站内文件存在」→ insert → 事件 →（必要时）推进：需求 id 打错
+ * 时该报「需求不存在」，而不是报一个跟这条需求毫无关系的文件缺失。
  */
 export async function attachArtifact(
   db: Db,
@@ -166,10 +170,10 @@ export async function attachArtifact(
   const url = parseUrl(input.url);
 
   return db.transaction(async (tx) => {
-    const found = await tx.execute<{ id: string }>(
-      sql`select id from requirements where id = ${requirementId}`,
-    );
-    if (found.rows.length === 0) throw new AppError('not_found', NO_REQUIREMENT);
+    const found = await tx.execute<Locked>(
+      sql`select state, type, prd_url from requirements where id = ${requirementId} for update`);
+    const row = found.rows[0];
+    if (!row) throw new AppError('not_found', NO_REQUIREMENT);
 
     // 只验站内路径：http(s) 的产物在别人服务器上，这里够不着。
     if (url.startsWith('/')) await assertSiteFileExists(url);
@@ -185,6 +189,32 @@ export async function attachArtifact(
       type: 'uemaster.attached',
       payload: { stage, url },
     });
+
+    /**
+     * R-P2-8：**评估产物即通行证**。
+     *
+     * Task 4 把「评估」从动作条拿掉之后，`收集 → 待设计` 这道门在界面上没有入口了
+     * （只余 提交评审 / 拒绝 / 搁置）。裁决是让材料本身成为扳机：收集里的需求接上
+     * evaluate 材料，就说明评估这一步真的发生了，它该进待设计。
+     *
+     * 三条边界，缺一条都会造出更坏的行为：
+     * - 只认 `evaluate`：review / inspect 是旁证，不是这道门的材料，永远不改状态。
+     * - 只认 `inbox`：已经在待设计（或更后面）的需求重做评估，只该换一份新版本，
+     *   不该被打回——「补材料」变成「回退」是最难解释的一种。
+     * - 走 `evaluateInTx`，即真 evaluate 的那道门：没有类型就抛同一个 missing_type。
+     *   它在**本事务里**执行，所以门一响，上面那行产物与 uemaster.attached 一起回滚——
+     *   要么材料落地且需求推进，要么两件都没发生。
+     *
+     * 事件用两条而不是一条：`uemaster.attached`（材料，payload 带 stage/url）在前，
+     * `requirement.evaluated`（迁移，payload `{from,to}`）在后。理由见
+     * task-4-report.md「R-P2-8」一节：现有约定里每个事件类型只承载**一件**领域事实
+     * （`requirement.review_requested` 折进 skippedEvaluation 只是同一步的细节），
+     * 而 `requirement.evaluated` 是读侧、报表、时间轴都认的迁移事件——把它藏进
+     * attach 的 payload 里，会有一条「状态变了但没有迁移事件」的路。
+     */
+    if (stage === 'evaluate' && row.state === 'inbox') {
+      await evaluateInTx(tx, actor, requirementId, row);
+    }
 
     return { id: inserted.rows[0]!.id, stage, url };
   });

@@ -90,7 +90,7 @@ smoke 脚本另有一个作用：它**从任务包正文里抠出交付路径**�
 | 工具 | 参数 | 做什么 | 会不会写库 |
 | --- | --- | --- | --- |
 | `uemaster_plan` | `requirementId`, `stage` | 读需求 → 返回该阶段的任务包（中文、可直接执行：画什么、写到哪个文件、怎么交回）。附带需求身份（`PAN-n`、uuid、状态、类型） | **不写**。不改状态、不写事件 |
-| `uemaster_attach` | `requirementId`, `stage`, `url` | 把产物链接交回来。站内路径必须真有文件（`public/` 下），否则 `artifact_missing` | 写：一行 `uemaster_artifacts` + 一条 `uemaster.attached` 事件 |
+| `uemaster_attach` | `requirementId`, `stage`, `url` | 把产物链接交回来。站内路径必须真有文件（`public/` 下），否则 `artifact_missing` | 写：一行 `uemaster_artifacts` + 一条 `uemaster.attached` 事件。`stage=evaluate` 且需求还在**收集**时，同一个事务里再把它推进到**待设计**（多一条 `requirement.evaluated`；没有类型则 `missing_type`，整条 attach 回滚） |
 | `requirement_show` | `requirementId` | 现状：状态、类型、提出人、负责人、PRD、已有产物、还缺哪几个 stage、当前状态下合法的动作 | 不写 |
 
 `stage` 只有三个值：`evaluate`（评估）/ `review`（评审）/ `inspect`（走查）。
@@ -119,6 +119,10 @@ claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
 3. agent 照包做：装 UEmaster 的 `flow-canvas` / `flow-walkthrough`，生成**单个自足的 HTML**。
 4. 文件落到包指定的路径 `public/uemaster/PAN-<n>/<stage>.html`。
 5. `uemaster_attach` 交回 `/uemaster/PAN-<n>/<stage>.html` —— 抽屉「参考」段立刻出现这一行，点得开。
+
+   **评估材料就是那道门的通行证**：需求还在「收集」里时交回 `stage=evaluate`，它会在同一个
+   事务里被推进到「待设计」——用户不再需要在动作条上点一个按钮（那个按钮已经去掉了）。
+   已经在「待设计」或更后面的需求补一份新评估，只换材料，不会被打回。
 
 没有 PRD 的需求：评估照做（推断处标「PRD 未提供」），评审与走查的包会直接让你停下并把
 「缺少 PRD 链接」回报给用户——这两份材料的输入就是 PRD，没有它做出来的东西是编的。

@@ -2,6 +2,8 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { createRequirement } from '../src/core/requirements/create.js';
+import { evaluate } from '../src/core/requirements/evaluate.js';
+import { submitReview } from '../src/core/requirements/submit-review.js';
 import { packFor, STAGES, type Stage } from '../src/core/uemaster/packs.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listArtifacts } from '../src/core/uemaster/list.js';
@@ -450,6 +452,101 @@ describe('attachArtifact', () => {
     }
     expect(code).toBe('23514');        // check_violation
     expect(await artifactCount()).toBe(0);
+  });
+});
+
+/**
+ * R-P2-8：评估产物即通行证。
+ *
+ * Task 4 把「评估」从动作条拿掉之后，`收集 → 待设计` 这道门在界面上没有入口了
+ * （剩下的只有 提交评审 / 拒绝 / 搁置）。裁决：**产物本身是那道门的触发**——
+ * 给一条还在收集里的需求接上 evaluate 材料，就要在同一个事务里把它推进到待设计，
+ * 两件事要么都成、要么都不成。
+ *
+ * 三条边界都在这一个 describe 里钉住：只认 evaluate、只认 inbox、门禁与真 evaluate
+ * 同一条（没有类型就 missing_type，并且整条 attach 回滚）。
+ */
+describe('R-P2-8：评估产物即通行证', () => {
+  async function stateOf(id: string): Promise<string> {
+    const res = await db.execute<{ state: string }>(sql`select state from requirements where id = ${id}`);
+    return res.rows[0]!.state;
+  }
+
+  async function payloadOf(type: string): Promise<unknown> {
+    const res = await db.execute<{ payload: string }>(
+      sql`select payload from events where type = ${type} order by seq desc limit 1`);
+    return JSON.parse(res.rows[0]!.payload);
+  }
+
+  it('收集 + 评估产物：落材料的同时推进到待设计，两条事件按「材料 → 迁移」的次序写', async () => {
+    const { id } = await newRequirement();
+    expect(await stateOf(id)).toBe('inbox');
+
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');
+
+    // 状态：待设计。它不是 attach 的副作用，是这次 attach 的一部分。
+    expect(await stateOf(id)).toBe('design');
+    expect(await artifactCount()).toBe(1);
+    // 事件：建需求 → 提交评估材料 → 评估完成。相邻两条读起来是同一件事的两个事实。
+    expect(await eventTypes()).toEqual([
+      'requirement.created', 'uemaster.attached', 'requirement.evaluated',
+    ]);
+    // 迁移事件的 payload 与真 evaluate 的**逐字段一致**：时间轴 / 报表不该能分辨
+    // 「谁踩的这道门」，它只该看到一次 inbox → design。
+    expect(await payloadOf('requirement.evaluated')).toEqual({ from: 'inbox', to: 'design' });
+  });
+
+  it('评审 / 走查产物绝不改状态', async () => {
+    const { id } = await newRequirement();
+    await attachOk(id, 'review', '/uemaster/PAN-1/review.html');
+    await attachOk(id, 'inspect', '/uemaster/PAN-1/inspect.html');
+
+    expect(await stateOf(id)).toBe('inbox');
+    expect(await eventTypes()).toEqual([
+      'requirement.created', 'uemaster.attached', 'uemaster.attached',
+    ]);
+  });
+
+  it('待设计（以及更后面）重做评估：只落新材料，不把人拽回也不动状态', async () => {
+    const { id } = await newRequirement();
+    // 先正常评估到待设计，再提交评审到待评审——「重做评估」最常发生在更后面。
+    await evaluate(db, '吕品', { requirementId: id });
+    await submitReview(db, '吕品', { requirementId: id, prdUrl: 'https://x/prd' });
+    expect(await stateOf(id)).toBe('review');
+
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v2.html');
+
+    // 停在待评审：一条已经过了评审的需求，不该因为补一份评估材料被打回设计。
+    expect(await stateOf(id)).toBe('review');
+    expect(await artifactCount()).toBe(1);
+    // 只有材料事件，没有第二条 requirement.evaluated。
+    expect((await eventTypes()).filter((t) => t === 'requirement.evaluated')).toHaveLength(1);
+    expect(await eventTypes()).toEqual([
+      'requirement.created', 'requirement.evaluated',
+      'requirement.review_requested', 'uemaster.attached',
+    ]);
+  });
+
+  it('收集 + 没有类型：missing_type，整条 attach 回滚——不留产物行、不动状态', async () => {
+    const { id } = await newRequirement();
+    // 类型列是 NOT NULL，但门禁读的是**数据**：清空它才是「没有类型」的那条需求，
+    // 也是真 evaluate 撞 missing_type 的同一种输入。
+    await db.execute(sql`update requirements set type = '' where id = ${id}`);
+
+    const url = '/uemaster/PAN-1/evaluate.html';
+    await writeArtifact(url);
+    const e = await caught(attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'evaluate', url,
+    }));
+
+    // 同一条门、同一句话：与真 evaluate 的 missing_type 一字不差。
+    expect(e).toBeInstanceOf(AppError);
+    expect(e).toMatchObject({
+      code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步',
+    });
+    expect(await stateOf(id)).toBe('inbox');
+    expect(await artifactCount()).toBe(0);
+    expect(await eventTypes()).toEqual(['requirement.created']);
   });
 });
 
