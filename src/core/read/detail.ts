@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
+import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
@@ -102,6 +103,13 @@ const VERDICT_LABEL: Record<string, string> = {
   voided: '作废',
 };
 
+/** `uemaster.attached` 在时间轴上的中文名：按 payload 里的 stage 分词。 */
+const ATTACH_LABEL: Record<string, string> = {
+  evaluate: '提交评估材料',
+  review: '提交评审材料',
+  inspect: '提交走查材料',
+};
+
 /**
  * 状态 → 当前合法的动作。
  *
@@ -197,6 +205,12 @@ function describe(type: string, payload: Payload): { label: string; note: string
       return { label: '搁置', note: text(payload, 'reason') };
     case 'requirement.restored':
       return { label: '恢复，回到收集', note: null };
+    case 'uemaster.attached': {
+      // 时间轴上不能出现 `uemaster.attached` 这种库里的串（见上面这条函数的用意）。
+      // 三种 stage 各有各的中文名；认不出的 stage 退回「提交材料」，仍然不显示原始类型。
+      const label = ATTACH_LABEL[text(payload, 'stage') ?? ''] ?? '提交材料';
+      return { label, note: text(payload, 'url') };
+    }
     default:
       return { label: type, note: null };
   }
@@ -227,6 +241,43 @@ function timeUsed(
   const percent = percentBetween(windowStart, dueAt);
   if (percent === null || !windowStart || !dueAt) return null;
   return { percent, from: windowStart, to: dueAt };
+}
+
+/**
+ * 参考段里「一处 UEmaster 产物」那一行：有产物就是链接 + 那天的日期，没有就是空槽位。
+ *
+ * 没有产物时这一行仍留在数组里（`present: false`）：抽屉按 `present` 过滤渲染，行在
+ * 数据里存在、在页面上不出现；三处槽位是对外的固定次序，删行会让另外两行搬家。
+ */
+function artifactRef(
+  stage: DetailRef['stage'], label: string, artifact: ArtifactRef | undefined,
+): DetailRef {
+  if (!artifact) return { stage, label, url: null, at: null, atLabel: null, present: false };
+  const at = artifact.at.toISOString();
+  return { stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true };
+}
+
+/**
+ * review 槽位：语义是「PRD 快照」——它是这次评审的依据，不是 UEmaster 产物，所以
+ * 有了产物也不能让 PRD 消失。
+ *
+ * 有评审产物时这一行显示产物、阶段名跟着变成「评审材料」，理由是参考段一行只放一个
+ * 链接（`DetailRef` 只有一个 url），而产物才是这次评审实际看的那份材料；PRD 链接不靠
+ * 这一行承载——信息段的「PRD 链接」一直在，抽屉里两个链接都点得到，参考段也没多出一行。
+ * 没有产物时保持原样：PRD 快照 + 评审那次的时间。
+ */
+function reviewRef(
+  prdUrl: string | null, reviewAt: string | null, artifact: ArtifactRef | undefined,
+): DetailRef {
+  if (artifact) return artifactRef('review', '评审材料', artifact);
+  return {
+    stage: 'review',
+    label: 'PRD 快照',
+    url: prdUrl,
+    at: reviewAt,
+    atLabel: formatMonthDay(reviewAt),
+    present: prdUrl !== null,
+  };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -321,6 +372,11 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
     .filter((e) => e.type === 'requirement.review_requested')
     .at(-1)?.at ?? null;
 
+  // 参考段的产物：每 stage 只取最新一份（重做会留下历史行，读侧只认当前有效的）。
+  // 走 `listArtifacts` 而不是在这里再写一遍 `distinct on`：两个读侧各写一份 SQL，
+  // 迟早在「同毫秒写入怎么定序」这种细节上分叉。
+  const artifacts = new Map((await listArtifacts(db, id)).map((a) => [a.stage, a]));
+
   return {
     id: row.id,
     number: Number(row.number),
@@ -356,22 +412,9 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
       timeUsed: timeUsed(row.window_start, row.commit_due_at),
     },
     refs: [
-      // 评估 / 走查两处 UEmaster 还没有表（P2 的 uemaster_artifacts），槽位留着：
-      // 线稿里它们各占一行，写成“未生成”比把行去掉更接近终态。
-      {
-        stage: 'evaluate', label: '评估材料', url: null, at: null, atLabel: null, present: false,
-      },
-      {
-        stage: 'review',
-        label: 'PRD 快照',
-        url: row.prd_url,
-        at: reviewRow?.decided_at ?? reviewAskedAt,
-        atLabel: formatMonthDay(reviewRow?.decided_at ?? reviewAskedAt),
-        present: row.prd_url !== null,
-      },
-      {
-        stage: 'inspect', label: '走查材料', url: null, at: null, atLabel: null, present: false,
-      },
+      artifactRef('evaluate', '评估材料', artifacts.get('evaluate')),
+      reviewRef(row.prd_url, reviewRow?.decided_at ?? reviewAskedAt, artifacts.get('review')),
+      artifactRef('inspect', '走查材料', artifacts.get('inspect')),
     ],
     review,
     events: eventRes.rows.map((e) => ({

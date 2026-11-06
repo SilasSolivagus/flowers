@@ -11,6 +11,7 @@ import { resetDb, seedPeople } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
 import { getBoard } from '../src/core/read/board.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
+import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listReleases } from '../src/core/read/version.js';
 import { actorFromCookie, DEFAULT_MEMBER, listMembers } from '../src/core/read/member.js';
 
@@ -425,6 +426,121 @@ describe('getRequirementDetail', () => {
     expect(await getRequirementDetail('00000000-0000-0000-0000-000000000000')).toBeNull();
     // 非 uuid 也不该把页面炸掉：PG 的 22P02 不是给页面看的东西
     expect(await getRequirementDetail('not-a-uuid')).toBeNull();
+  });
+});
+
+/** 上海日历日的 'MM-DD'：产物刚写进去，那一行的时间必须是今天。 */
+function shanghaiMonthDay(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+  }).format(now);
+}
+
+/**
+ * 参考段的三处槽位现在读 `uemaster_artifacts`（P2 的 Task 2）。
+ *
+ * 断言的是读模型给页面看的那一份形状：`{ stage, label, url, at, atLabel, present }`。
+ * 抽屉只渲染 `present` 为真的行，所以「没有产物」必须是不出现，而不是出现一行「—」。
+ */
+describe('参考段：三处槽位从产物表读', () => {
+  it('有产物时该槽位 present 为真，带 url 与当天的 atLabel', async () => {
+    const r = await seedInbox('房超');
+    await attachArtifact(db, '吕品', {
+      requirementId: r.id, stage: 'evaluate', url: '/uemaster/PAN-7/evaluate.html',
+    });
+
+    const d = (await getRequirementDetail(r.id))!;
+    expect(d.refs.find((x) => x.stage === 'evaluate')).toMatchObject({
+      label: '评估材料',
+      url: '/uemaster/PAN-7/evaluate.html',
+      present: true,
+      atLabel: shanghaiMonthDay(),
+    });
+    expect(d.refs.find((x) => x.stage === 'evaluate')!.at).toBeTruthy();
+
+    // 只接了一处：走查那一行不能跟着一起点亮
+    expect(d.refs.find((x) => x.stage === 'inspect')).toMatchObject({
+      label: '走查材料', url: null, at: null, atLabel: null, present: false,
+    });
+  });
+
+  it('没有产物时两处 present 为假，url 与 atLabel 都是 null', async () => {
+    const r = await seedInbox('房超');
+    const d = (await getRequirementDetail(r.id))!;
+
+    for (const stage of ['evaluate', 'inspect'] as const) {
+      expect(d.refs.find((x) => x.stage === stage)).toMatchObject({
+        url: null, at: null, atLabel: null, present: false,
+      });
+    }
+  });
+
+  it('同一个 stage 有多份时读最新那一份', async () => {
+    const r = await seedInbox('房超');
+    const target = { requirementId: r.id, stage: 'evaluate' as const };
+    await attachArtifact(db, '吕品', { ...target, url: '/uemaster/PAN-7/evaluate-v1.html' });
+    // 两行同一毫秒写入时 `created_at desc` 会打平，定序就落到随机的 uuid 上：
+    // 用例把第一份按下去一小时，读侧的选择才有唯一答案。
+    await db.execute(sql`
+      update uemaster_artifacts set created_at = now() - interval '1 hour'
+       where requirement_id = ${r.id}`);
+    await attachArtifact(db, '吕品', { ...target, url: '/uemaster/PAN-7/evaluate-v2.html' });
+
+    const d = (await getRequirementDetail(r.id))!;
+    expect(d.refs.find((x) => x.stage === 'evaluate')!.url)
+      .toBe('/uemaster/PAN-7/evaluate-v2.html');
+  });
+
+  /**
+   * review 槽位的语义是「PRD 快照」，它是评审依据、不是 UEmaster 产物。
+   * 有评审产物时这一行显示产物（阶段名跟着变成「评审材料」），PRD 链接仍在信息段的
+   * 「PRD 链接」一行——抽屉里两个链接都还在，只是参考段仍然只有一行。
+   */
+  it('review 槽位：没产物是 PRD 快照，有产物就显示产物且 PRD 链接仍在', async () => {
+    const id = await seedInReview('feature');
+    const before = (await getRequirementDetail(id))!;
+    expect(before.refs.find((x) => x.stage === 'review')).toMatchObject({
+      label: 'PRD 快照', url: 'https://docs.example.com/prd/r', present: true,
+    });
+
+    await attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'review', url: '/uemaster/PAN-7/review.html',
+    });
+    const after = (await getRequirementDetail(id))!;
+    expect(after.refs.find((x) => x.stage === 'review')).toMatchObject({
+      label: '评审材料',
+      url: '/uemaster/PAN-7/review.html',
+      present: true,
+      atLabel: shanghaiMonthDay(),
+    });
+    // PRD 链接没有被产物顶掉：它还在信息段里
+    expect(after.info.prdUrl).toBe('https://docs.example.com/prd/r');
+    // 参考段仍然只有三行（产物不新增行）
+    expect(after.refs.map((x) => x.stage)).toEqual(['evaluate', 'review', 'inspect']);
+  });
+
+  it('既没有 PRD 也没有产物时 review 行不出现', async () => {
+    const r = await seedInbox('房超');
+    const d = (await getRequirementDetail(r.id))!;
+    expect(d.refs.find((x) => x.stage === 'review')).toMatchObject({
+      label: 'PRD 快照', url: null, present: false,
+    });
+  });
+
+  /**
+   * 接上产物后时间轴会立刻多一种事件。`describe` 的兜底会把没映射的类型原样吐出来
+   * （`uemaster.attached`），所以这条断言盯的是「中文 UI」这条硬口径。
+   */
+  it('提交产物的事件在时间轴上是中文，不是 uemaster.attached', async () => {
+    const r = await seedInbox('房超');
+    await attachArtifact(db, '吕品', {
+      requirementId: r.id, stage: 'inspect', url: '/uemaster/PAN-7/inspect.html',
+    });
+    const last = (await getRequirementDetail(r.id))!.events.at(-1)!;
+    expect(last).toMatchObject({
+      type: 'uemaster.attached', label: '提交走查材料', actor: '吕品',
+    });
+    expect(last.note).toBe('/uemaster/PAN-7/inspect.html');
   });
 });
 
