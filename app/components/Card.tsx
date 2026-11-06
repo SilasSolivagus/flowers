@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import type { BoardCard } from '../../src/core/read/board';
 
 /**
@@ -25,18 +26,22 @@ export function requirementKey(number: number): string {
  * - `mine` → `.card.mine`（主色 0.5px 框 + 内侧 2px 主色条 + 4% 主色底）；
  * - `late` → `.w.neg`（正在等的那个日期已经过去了，用负向色，不是加红框——框已经属于 mine）。
  *
- * `data-id` 是需求 id：Task 4 的抽屉要按它取详情，卡片是唯一的点击入口。
+ * 卡片本身是一个链接（`/?open=<id>`），不是带 onClick 的 div：
+ * - 抽屉的开合状态因此在 URL 里，刷新还在、能直接发给别人；
+ * - 键盘和读屏用户拿到的是一个可聚焦的链接，名字就是卡片那三行文字。
+ *   一个只挂了 onClick 的 div 对读屏用户等于不存在。
+ * `data-id` 仍然留着：需求 id 是这张卡在页面上的身份，链接之外的用途（脚本、用例）也认它。
  */
 export function Card({ card }: { card: BoardCard }) {
   return (
-    <div className={card.mine ? 'card mine' : 'card'} data-id={card.id}>
+    <Link className={card.mine ? 'card mine' : 'card'} href={`/?open=${card.id}`} data-id={card.id}>
       <span className="t">{card.title}</span>
       <div className={card.late ? 'w neg' : 'w'}>{card.waiting}</div>
       <div className="m">
         <span className="k">{requirementKey(card.number)}</span>
         <span className="d">{card.days} 天</span>
       </div>
-    </div>
+    </Link>
   );
 }
 
