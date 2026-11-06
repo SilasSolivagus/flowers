@@ -1,0 +1,14 @@
+{
+  "name": "silas-UX 设计变量",
+  "css_vars": {
+    "--wt-bg": "#F3F5F7",
+    "--wt-white": "#FFFFFF",
+    "--wt-border-light": "#E3E7EC",
+    "--wt-border": "#CCD3DB",
+    "--wt-text": "#161A21",
+    "--wt-dim": "#5E6776",
+    "--wt-light": "#8A92A0",
+    "--wt-fill": "#ECEFF2",
+    "--wt-accent": "#2448D0"
+  }
+}
