@@ -133,6 +133,22 @@ function contentOf(payload: unknown): string | null {
   return typeof content === 'string' ? content : null;
 }
 
+/**
+ * 这次回答「思考」了多久（字符数）。推理模型把思考放在 `reasoning_content`，
+ * 普通模型没有这个字段 → 0。只在 content 为空时用来区分两种「空」。
+ */
+function reasoningCharsOf(payload: unknown): number {
+  if (typeof payload !== 'object' || payload === null) return 0;
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices)) return 0;
+  const first: unknown = choices[0];
+  if (typeof first !== 'object' || first === null) return 0;
+  const message = (first as { message?: unknown }).message;
+  if (typeof message !== 'object' || message === null) return 0;
+  const reasoned = (message as { reasoning_content?: unknown }).reasoning_content;
+  return typeof reasoned === 'string' ? reasoned.length : 0;
+}
+
 /** `usage.prompt_tokens` / `completion_tokens` → 我们的两个字段；一个都没有就不带 usage。 */
 function usageOf(payload: unknown): { prompt?: number; completion?: number } | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined;
@@ -207,7 +223,20 @@ export async function complete(
 
     const content = contentOf(payload);
     if (content === null) return { ok: false, error: '响应不是 chat 补全的格式' };
-    if (content.trim() === '') return { ok: false, error: '模型返回了空内容' };
+    if (content.trim() === '') {
+      // 推理模型（deepseek-flash、o 系、各种 reasoner）会把 max_tokens 先花在思考上：
+      // 预算不够时 content 是空串、reasoning_content 却有一大段，finish_reason 为 length。
+      // 这时「模型返回了空内容」是错的诊断——模型说了话，只是没轮到答案。
+      // 实测 deepseek-flash max_tokens=60：reasoning 110 字、content 0 字。
+      const reasoned = reasoningCharsOf(payload);
+      if (reasoned > 0) {
+        return {
+          ok: false,
+          error: `模型把输出预算用在了思考上（max_tokens=${String(maxTokens)}，思考 ${String(reasoned)} 字、答案 0 字）。把这个阶段的 max_tokens 调大`,
+        };
+      }
+      return { ok: false, error: '模型返回了空内容' };
+    }
 
     const usage = usageOf(payload);
     return usage === undefined ? { ok: true, text: content } : { ok: true, text: content, usage };

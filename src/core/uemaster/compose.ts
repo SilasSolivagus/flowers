@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { sql } from 'drizzle-orm';
+import { coerceAnswer, normalizeFrame, normalizeKind } from './shape.js';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
@@ -71,7 +72,7 @@ export const MAX_PAGES_ATTEMPTS = 2;
 export const CALL_TIMEOUT_MS = 90_000;
 
 /** 一段 mermaid 用不了多少 token；给多了只会让模型开始写解释。 */
-const FLOW_MAX_TOKENS = 900;
+const FLOW_MAX_TOKENS = 4_000;         // 推理模型的思考也占这个预算
 
 /**
  * 页面片段的预算：N 屏 HTML + 标注。
@@ -80,7 +81,7 @@ const FLOW_MAX_TOKENS = 900;
  * 一屏 300–500 token 很正常，5 个页面节点就吃掉旧预算。给少了模型会开始截断，
  * 截断的 HTML 又会被 `wt-` 类校验拒掉——那是一次白花的调用。
  */
-const FRAGMENTS_MAX_TOKENS = 6000;
+const FRAGMENTS_MAX_TOKENS = 14_000;
 
 /** 形状判据（与本文件头「判据 1」对应）。上限刻意不判：图更大不是错。 */
 const MIN_NODES = 3;
@@ -428,14 +429,14 @@ const AnnoSchema = z.array(z.string().min(1)).min(2).max(3);
 
 const FragmentSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['page', 'system', 'decision']),
+  kind: z.preprocess(normalizeKind, z.enum(['page', 'system', 'decision'])),
   title: z.string().min(1),
-  frame: z.enum(['phone', 'wide']).default('phone'),
+  frame: z.preprocess(normalizeFrame, z.enum(['phone', 'wide'])).default('phone'),
   html: z.string().default(''),
   anno: z.array(AnnoSchema).default([]),
 });
 
-const FragmentsSchema = z.object({ nodes: z.array(FragmentSchema).min(1) });
+export const FragmentsSchema = z.object({ nodes: z.array(FragmentSchema).min(1) });
 
 function toAnno(pairs: string[][]): Anno[] {
   return pairs.map((pair) => (pair.length >= 3
@@ -460,7 +461,9 @@ export function readFragments(
   const raw = extractJson<unknown>(text);
   if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
 
-  const parsed = FragmentsSchema.safeParse(raw);
+  // 与走查共用同一层形状容错：anno 少一层数组、frame 写成中文、kind 写成"判断"、
+  // 顶层写成数组——这些早前只有走查那条路在收，评估材料这条一直裸奔。
+  const parsed = FragmentsSchema.safeParse(coerceAnswer(raw));
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     const where = issue === undefined ? '结构不对' : `${issue.path.join('.') || '(根)'}：${issue.message}`;

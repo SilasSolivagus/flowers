@@ -1,7 +1,11 @@
 import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
+import {
+  coerceAnno, coerceAnswer, coerceEvidence, normalizeFrame, normalizeKind, normalizeVerdict,
+} from './shape.js';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId } from '../validate.js';
@@ -100,7 +104,7 @@ export const MAX_STRUCTURE_ATTEMPTS = 2;
 export const MAX_VERIFY_ATTEMPTS = 2;
 
 /** 单次模型调用超时。这一条链路只有 3–4 次调用，给足 150 秒。 */
-export const CALL_TIMEOUT_MS = 150_000;
+export const CALL_TIMEOUT_MS = 420_000;  // 1M 上下文的推理模型单轮可跑几分钟
 
 /**
  * 结构那一段：PRD 一万字符 + 两张表；实测 12 条结论约 2100 个汉字，2200 够。
@@ -109,10 +113,10 @@ export const CALL_TIMEOUT_MS = 150_000;
  * 一次 8000 的预扣就能吃掉一个小账户的全部余额。真实跑一次 2100 字符的回话、
  * 预扣 8000，换来的是一句「预扣费额度失败」——钱没花完，但路走不动了。
  */
-const STRUCTURE_MAX_TOKENS = 2_200;
+const STRUCTURE_MAX_TOKENS = 32_000;   // 推理模型先花思考：2200 时代 content 为空，12k 也紧
 
 /** 深读那一段：结论复核 + 每个节点一屏 `wt-*` HTML（实测 8 个节点约 7.8k 字符）。 */
-const VERIFY_MAX_TOKENS = 5_000;
+const VERIFY_MAX_TOKENS = 64_000;      // 实测这一格思考 50,554 字：预算要给答案留出同等空间
 
 /** 阶段一 grep 每次最多回多少条命中：只用来排序，命中 200 条和 2000 条没有区别。 */
 const GREP_MAX = 60;
@@ -576,7 +580,7 @@ export function structurePrompt(
     ' 3. evidence 每条给 { repo, path, note }：repo 必须是上面两个 id 之一，path 必须是仓内相对路径',
     '    且真实存在（我们会核对）。note 一句话说清「为什么这条能证明这件事」。',
     ' 4. **missing 的 evidence 必须是空数组**（没有代码可引），并且必须给 "searched": ["搜过的关键词"]，',
-    '    让读者自己判断这次搜索的覆盖面。missing 却带了证据路径会被退回。',
+    '    让读者自己判断这次搜索的覆盖面。missing 也可以指一个"它本该在的文件"（拿得到路径更可信）。',
     ' 5. differs 至少要有一条 evidence；implemented 与 extra 也要有（没有证据的判断等于没判断）。',
     ' 6. prd / code 各写一句短句（不超过 40 字），中文；不要写「详见 PRD」这种空话。',
     ' 7. 找不到就写 missing，不要为了凑条数编一条 implemented。',
@@ -628,28 +632,9 @@ const EvidenceSchema = z.object({
   note: z.string().default(''),
 });
 
-/**
- * verdict 的别名表。
- *
- * 为什么要有它：真实跑出来的第一版回话写的是 `"verdict": "missing/缺失"`——模型把
- * 枚举值和自己要写的中文标注粘在了一起。这**不是**「判断错了」，只是同一个判断的
- * 另一种拼法；为它整份退回重答，等于拿一次调用（和一次预扣）换一个斜杠。
- * 收窄回四选一仍然是硬要求：认不出来的字符串照样让 zod 拒掉。
- */
-const VERDICT_ALIASES: Record<string, Verdict> = {
-  implemented: 'implemented', missing: 'missing', extra: 'extra', differs: 'differs',
-  一致: 'implemented', 缺失: 'missing', 多余: 'extra', 不一致: 'differs',
-};
 
-export function normalizeVerdict(value: unknown): unknown {
-  if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  const direct = VERDICT_ALIASES[trimmed] ?? VERDICT_ALIASES[trimmed.toLowerCase()];
-  if (direct !== undefined) return direct;
-  // `missing/缺失` / `implemented（一致）` / `differs | 不一致`：取第一个片段。
-  const head = trimmed.split(/[/|｜、,，;；\s（()）]+/).map((part) => part.trim()).filter((part) => part !== '')[0] ?? '';
-  return VERDICT_ALIASES[head] ?? VERDICT_ALIASES[head.toLowerCase()] ?? value;
-}
+
+
 
 const FindingSchema = z.object({
   verdict: z.preprocess(normalizeVerdict, z.enum(['implemented', 'missing', 'extra', 'differs'])),
@@ -662,10 +647,10 @@ const FindingSchema = z.object({
 const FlowSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
-  kind: z.enum(['page', 'decision', 'system']),
+  kind: z.preprocess(normalizeKind, z.enum(['page', 'decision', 'system'])),
 });
 
-const StructureSchema = z.object({
+export const StructureSchema = z.object({
   flows: z.array(FlowSchema).default([]),
   findings: z.array(FindingSchema).default([]),
 });
@@ -673,11 +658,38 @@ const StructureSchema = z.object({
 /** mermaid 的节点 id 只认这几个字符；模型写 `节点1` 或 `A-1` 都会画不出来。 */
 const FLOW_ID = /^[A-Za-z0-9_]+$/;
 
-export function readStructure(text: string): { ok: true; doc: Structure } | { ok: false; why: string } {
+
+
+
+
+
+/**
+ * 解析被拒时把模型原文落盘，只在一个环境变量开着时写。
+ *
+ * 为什么需要：形状漂移是**一次只暴露一条**的（zod 报第一个 issue），而每轮真实调用
+ * 要两分钟。开着这个开关跑一次，就能一次看清「evidence 不是数组」「verdict 写了整句」
+ * 「frame 写成中文」全部问题，而不是修一个跑一次。
+ */
+function dumpRejected(phase: string, text: string, issues: unknown): void {
+  if (process.env.FLOWERS_DEBUG_REPLY !== '1') return;
+  try {
+    const file = `/tmp/uemaster-reply-${phase}.json`;
+    writeFileSync(file, JSON.stringify({ issues, text }, null, 1));
+  } catch {
+    // 诊断辅助，写不了就算了，绝不影响主流程。
+  }
+}
+
+export function readStructure(
+  text: string,
+  repoIds: string[] = [],
+): { ok: true; doc: Structure } | { ok: false; why: string } {
   const raw = extractJson<unknown>(text);
   if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
-  const parsed = StructureSchema.safeParse(raw);
+  const shaped = coerceAnswer(raw, repoIds);
+  const parsed = StructureSchema.safeParse(shaped);
   if (!parsed.success) {
+    dumpRejected('structure', text, parsed.error.issues);
     const issue = parsed.error.issues[0];
     const where = issue === undefined ? '结构不对' : `${issue.path.join('.') || '(根)'}：${issue.message}`;
     return { ok: false, why: `JSON 结构不对 —— ${where}` };
@@ -732,10 +744,14 @@ export function validateStructure(doc: Structure, trees: TreeIndex): { ok: boole
 
     if (finding.verdict === 'missing') {
       if (finding.evidence.length > 0) {
-        problems.push(`${at} 是 missing，但带了证据路径（${finding.evidence.map((e) => `${e.repo}:${e.path}`).join('、')}）：没有代码可引就不许引`);
+        // 早前这里禁止 missing 带证据，理由是「没有代码可引就不许引」。**这条是错的**：
+        // 真实的缺失几乎总有"它本该在的那个文件"（「这个页面里没有面包屑」要指到页面文件），
+        // 而且指了之后读者能自己去看一眼——比一句空白的「缺失」更有据可查。
+        // 实测模型第二次就是被这条拦下的（3 处 missing 都带了路径）。
+        // 真正要守的是：路径必须真实存在（上面那道 lsTree 硬门），以及**说清搜了什么**。
       }
-      if ((finding.searched ?? []).length === 0) {
-        problems.push(`${at} 是 missing，但没有给 searched：读者无法判断这次搜索的覆盖面`);
+      if ((finding.searched ?? []).length === 0 && finding.evidence.length === 0) {
+        problems.push(`${at} 是 missing，但既没给 searched 也没指一个"本该在哪"的文件：读者无法判断这次搜索的覆盖面`);
       }
     } else if (finding.evidence.length === 0) {
       problems.push(`${at} 没有任何证据路径：${finding.verdict} 必须至少指一个真实文件`);
@@ -943,14 +959,14 @@ export function verifyRepairPrompt(
 
 const NodeSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['page', 'system', 'decision']),
+  kind: z.preprocess(normalizeKind, z.enum(['page', 'system', 'decision'])),
   title: z.string().min(1),
-  frame: z.enum(['phone', 'wide']).default('phone'),
+  frame: z.preprocess(normalizeFrame, z.enum(['phone', 'wide'])).default('phone'),
   html: z.string().default(''),
   anno: z.array(z.array(z.string().min(1)).min(2).max(3)).default([]),
 });
 
-const VerifySchema = z.object({
+export const VerifySchema = z.object({
   findings: z.array(FindingSchema).optional(),
   nodes: z.array(NodeSchema).default([]),
 });
@@ -981,8 +997,11 @@ export function readVerify(
 ): { ok: true; doc: VerifyDoc } | { ok: false; why: string } {
   const raw = extractJson<unknown>(text);
   if (raw === null) return { ok: false, why: '回话里没有 JSON 对象（第一个字符就该是 {）' };
-  const parsed = VerifySchema.safeParse(raw);
+  // 复核段的形状漂移与结构段同源（evidence 写成字符串、顶层写成数组），走同一套扶正。
+  const repoIds = [...trees.keys()];
+  const parsed = VerifySchema.safeParse(coerceAnswer(raw, repoIds));
   if (!parsed.success) {
+    dumpRejected('verify', text, parsed.error.issues);
     const issue = parsed.error.issues[0];
     const where = issue === undefined ? '结构不对' : `${issue.path.join('.') || '(根)'}：${issue.message}`;
     return { ok: false, why: `JSON 结构不对 —— ${where}` };
@@ -1119,7 +1138,7 @@ export async function inspect(
       throw new AppError('provider_error', reply.error);
     }
 
-    const read = readStructure(reply.text);
+    const read = readStructure(reply.text, [...trees.keys()]);
     if (!read.ok) {
       lastProblems = [read.why];
     } else {

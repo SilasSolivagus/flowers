@@ -9,12 +9,8 @@ import { AppError } from '../src/core/errors.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { DEFAULT_SSH_HOST, head } from '../src/core/codemirror/mirror.js';
 import { hashMarkdown, saveSnapshot, type Snapshot } from '../src/core/prd/snapshots.js';
-import {
-  CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, PRD_PROMPT_MAX,
-  inspect, keywordsFrom, mermaidFromFlows, normalizeVerdict, prdVersionOf, truncatePrd,
-  validateStructure,
-  type Finding, type InspectDeps, type Structure,
-} from '../src/core/uemaster/inspect.js';
+import { CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, PRD_PROMPT_MAX, inspect, keywordsFrom, mermaidFromFlows, prdVersionOf, truncatePrd, validateStructure, type Finding, type InspectDeps, type Structure } from '../src/core/uemaster/inspect.js';
+import { normalizeVerdict } from '../src/core/uemaster/shape.js';
 import type { ProviderConfig, ProviderResult } from '../src/core/uemaster/provider.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
@@ -395,7 +391,7 @@ describe('纯函数：关键词、版本、图、校验', () => {
     expect(normalizeVerdict('大概还没做')).toBe('大概还没做');
   });
 
-  it('校验器：编造的路径、missing 带证据、differs 无证据都点名', () => {
+  it('校验器：编造的路径、differs 无证据点名、missing 给不出任何指向也点名', () => {
     const trees = new Map([['123pan-pc', new Set(['src/pages/Share/Share.tsx'])]]);
     const base = (findings: Finding[]): Structure => ({
       flows: [
@@ -417,8 +413,13 @@ describe('纯函数：关键词、版本、图、校验', () => {
       verdict: 'missing', prd: 'p', code: '未找到', searched: ['x'],
       evidence: [{ repo: '123pan-pc', path: 'src/pages/Share/Share.tsx', note: '' }],
     }]), trees);
-    expect(missingWithEvidence.ok).toBe(false);
-    expect(missingWithEvidence.problems.join('；')).toContain('missing');
+    // 新语义：missing 指到真实存在的文件是允许的（那是"本该在的位置"）。
+    expect(missingWithEvidence.ok).toBe(true);
+
+    // 但既没 searched 也没指任何位置 → 拒（读者无从判断搜索覆盖面）。
+    const missingBlind = validateStructure(base([{ verdict: 'missing', prd: 'p', code: '未找到', evidence: [] }]), trees);
+    expect(missingBlind.ok).toBe(false);
+    expect(missingBlind.problems.join('；')).toContain('覆盖面');
 
     const differsNoEvidence = validateStructure(base([{ verdict: 'differs', prd: 'p', code: 'c', evidence: [] }]), trees);
     expect(differsNoEvidence.ok).toBe(false);
@@ -542,7 +543,7 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(await artifactExists(`/uemaster/PAN-${r.number}/inspect.html`)).toBe(false);
   }, 60_000);
 
-  it('missing 带了证据路径 → 被拒（自相矛盾的结论不许进材料）', async () => {
+  it('missing 带了证据路径 → 接受（那是"它本该在的位置"，读者能去看一眼）', async () => {
     const r = await inspectable();
     const contradictory = JSON.stringify({
       flows: [
@@ -556,13 +557,13 @@ describe('inspect：PRD ⇄ 真实代码', () => {
         searched: ['面包屑'],
       }],
     });
-    fake.enqueue(contradictory, contradictory);
+    fake.enqueue(contradictory, VERIFY_OK);
 
-    const error = await caught(inspect(db, '吕品', { requirementId: r.id }, deps()));
-
-    expect(error.code).toBe('inspect_invalid');
-    expect(error.message).toContain('missing');
-    expect(await artifactCount()).toBe(0);
+    // 新语义：missing 指到「它本该在的文件」是**好事**，不该被拒。
+    // 这条用例原来断言相反（早前规则禁止 missing 带证据），实测被真实模型打回后改的。
+    const out = await inspect(db, '吕品', { requirementId: r.id }, deps());
+    expect(out.url).toContain('/uemaster/PAN-');
+    expect(await artifactCount()).toBe(1);
   }, 60_000);
 
   it('没有 PRD 快照 → 先 readPrd；有快照 → 不读', async () => {
@@ -649,7 +650,11 @@ describe('镜像基线', () => {
     if (pc.ok) expect(pc.data?.sha).toBe(fixture.shas['123pan-pc']);
   });
 
-  it('CALL_TIMEOUT_MS 比 provider 默认短：一次走查最多 4 次调用', () => {
-    expect(CALL_TIMEOUT_MS).toBeLessThanOrEqual(150_000);
+  it('单次调用有上限，但得容得下会思考的模型', () => {
+    // 原来卡 150s。实测 deepseek-flash 在复核段要思考 50k 字、单轮 120s 以上，
+    // 150s 会把**能成功的调用**判成超时。上限放宽到 7 分钟，同时留一个天花板
+    // 防止配错时一次作业挂死（4 次调用 × 7 分钟 = 28 分钟封顶）。
+    expect(CALL_TIMEOUT_MS).toBeLessThanOrEqual(420_000);
+    expect(CALL_TIMEOUT_MS).toBeGreaterThan(150_000);
   });
 });
