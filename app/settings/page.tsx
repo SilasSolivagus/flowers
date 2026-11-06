@@ -1,8 +1,12 @@
 import Link from 'next/link';
 
+import { db } from '../../src/db/client';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
+import type { GeneratorView } from '../../src/core/uemaster/candidates';
+import { generatorView } from '../../src/core/uemaster/settings';
+import { GeneratorRow } from './GeneratorRow';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
 
@@ -57,7 +61,13 @@ export default async function SettingsPage({
   // 没带参数、带了个手改出来的值，都落回「我的」：一个坏链接不该让设置页白屏。
   const active: TabId = tab === 'project' ? 'project' : 'me';
 
-  const [members, actor] = await Promise.all([listMembers(), currentMember()]);
+  const [members, actor, generator] = await Promise.all([
+    listMembers(),
+    currentMember(),
+    // 「生成器」这一行在「项目」栏里，但这一页只有两个 server component 分支：
+    // 顺手一起读，省得为一行再开一次请求。`app_settings` 是主键读，探测有进程缓存。
+    generatorView(db),
+  ]);
 
   return (
     <main className="view">
@@ -74,7 +84,9 @@ export default async function SettingsPage({
             </Link>
           ))}
         </nav>
-        {active === 'me' ? <MePanel actor={actor} members={members} /> : <ProjectPanel members={members} />}
+        {active === 'me'
+          ? <MePanel actor={actor} members={members} />
+          : <ProjectPanel members={members} generator={generator} />}
       </div>
     </main>
   );
@@ -122,9 +134,15 @@ function MePanel({ actor, members }: { actor: string; members: Member[] }) {
  * （那要走领域层，而领域层这一版没有对应服务）。所以这里一行可点的控件都没有：
  * 一个点不动的按钮，比它不在更糟。
  */
-function ProjectPanel({ members }: { members: Member[] }) {
+function ProjectPanel({
+  members, generator,
+}: { members: Member[]; generator: GeneratorView }) {
   return (
     <>
+      {/* 生成器：这一页上唯一一个可写的格子。它必须可写——「谁在跑」是这台机器的
+          事实，不是代码里的常量；而写不写对只有「测试」能回答（见 settings.ts）。 */}
+      <GeneratorRow view={generator} />
+
       <section className="sg">
         <div className="h">成员</div>
         {members.length === 0 ? (

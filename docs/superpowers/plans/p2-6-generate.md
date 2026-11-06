@@ -18,7 +18,7 @@ owner 的原话：「我要的是拿这个需求里已经填写好的信息作�
 
 ## 1. 生成器契约
 
-`src/core/uemaster/generator.ts` 只有两个导出（外加一个常量表）：
+`src/core/uemaster/generator.ts` 的主导出（P2.7 之后多了几个，见那份收口报告）：
 
 ```ts
 export type GenResult = { ok: true; url: string } | { ok: false; error: string };
@@ -40,23 +40,37 @@ const SITE_PATH = /\/uemaster\/PAN-\d+\/(?:evaluate|review|inspect)\.html/;
 `/uemaster/<PAN-n>/<stage>.html`，生成器与 worker 用同一个正则取它；包怎么写，文件就
 该在哪，两边不靠第二份约定。
 
-### 1.1 两条默认命令（以及为什么是这些 flag）
+### 1.1 候选表与两种模式（P2.7 更正）
 
-`FLOWERS_GEN_CMD` 非空时用它；否则按 `claude` → `codex` 的顺序在 `PATH` 里探测。
+> P2.6 这一节原来写的是「`FLOWERS_GEN_CMD` 否则按 `claude` → `codex` 的顺序探测」。
+> 那条顺序已经删了：它把这个仓库作者**这一台机器上的运气**写成了产品策略。P2.7 换成了
+> 下面这张固定的表 + 两种显式的模式契约，解析顺序也改了（见 `p2-7-generator-selection.md`）。
 
-| CLI | 默认命令 | 为什么 |
+五个候选（`src/core/uemaster/candidates.ts`，服务端探测与客户端选择器共用同一份）：
+
+| id | 显示名 | 命令 | 任务包怎么进去 |
+| --- | --- | --- | --- |
+| `claude` | Claude Code | `claude -p --permission-mode acceptEdits` | stdin |
+| `codex` | Codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | stdin |
+| `dsh` | DeepSeek Harness | `dsh headless {prompt}` | 命令里的 `{prompt}`（作为 argv 的一个元素） |
+| `ollama` | Ollama | `ollama run <模型名>` | stdin；模型名要先填，没填不允许执行 |
+| `custom` | 自建 / 自定义 | 自己写 | 两种都行 |
+
+**两种模式**（都由模板本身决定，不是配置项）：
+
+| 格子 | 判据 | 行为 |
 | --- | --- | --- |
-| claude | `claude -p --permission-mode acceptEdits` | `-p` = print 模式、非交互，prompt 从 stdin 读；`acceptEdits` 让它在工作目录里直接写文件，不再逐次问权限（否则后台生成会停在确认上直到超时） |
-| codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | `-` = 从 stdin 读 prompt；`workspace-write` 才允许它写产物（`read-only` 写不了）；`--skip-git-repo-check` 是因为部署副本不一定有 `.git` |
+| 任务包怎么进 | 模板里有 `{prompt}` | 替换成 shell 引号包好的整段包，作为一个 argv 元素（`dsh headless {prompt}`）；否则把包写进 stdin（`claude -p` / `codex exec -` / `ollama run x`） |
+| 产物怎么出 | 命令退出 0 之后 | 产物文件 mtime 变了 → 用文件（文件模式）；文件没动而 stdout 里有一个 HTML 文档 → 由 Flowers 写到产物路径（stdout 模式）；两者都没有 → 失败，附 stderr 尾巴 |
 
-**为什么 `claude` 用 `acceptEdits` 而不是 `--dangerously-skip-permissions`**：这条命令
-只会收到一段固定的任务包（`packFor` 的输出：人写的模板 + 这条需求的字段），它要做的事
-就是画图、写一个 HTML 到 `data/uemaster/`。`acceptEdits` 恰好把「写 / 改文件」这一格
-放开，仍不给任意 bash 的免确认执行；skip-permissions 会把 bash、hook、网络工具一起
-放开，对一件事来说太宽。真正的落盘动作是 Write/Edit 工具，不是 bash，所以够用。
+**装了 ≠ 能用，测试是唯一的真相。** PATH 只回答「要不要把它列出来」；`--version` 只回答
+「装了」；`login status` 会撒谎——本机的 `codex login status` 打印
+“Logged in using ChatGPT”，紧接着 `codex exec` 回 401 `refresh token already used`。
+所以候选表旁边多了一行「测试」（设置页），真跑一次极小的包，10 秒，两种交法都认；
+失败时 stderr 原文照登。没有一次通过的测试，那一行就写着「未通过测试」。
 
-两条命令都是 2026-11 的 `claude --help` / `codex exec --help` 对出来的；CLI 升级后
-flag 可能变，那时改的就是这张表（`DEFAULT_COMMANDS`）。
+`acceptEdits` 仍然是对的（写/改文件这一格放开，但不同时放开 bash / 网络）：它现在只是
+`claude` 那一行命令的 flag，不再是「默认生成器」这个身份。
 
 ### 1.2 失败原因：stderr 的尾巴，不是「生成失败」
 
@@ -325,17 +339,20 @@ claude 真的因为登录过期拒绝了，界面把这句话原样交给 owner*
 
 ## 5. owner 要做什么才能让它真的出材料
 
-只需要补上「登录」这一格，什么都不用改代码：
+P2.7 之后不用改代码，也不用设环境变量：**打开「设置 · 项目 · 生成器」，选一条，点「测试」**。
+五个候选各自的补法（测试没过时，行下面那句 stderr 就是缺的那一格）：
 
-1. **用 claude**：在一个终端里跑一次 `claude`，按提示在浏览器完成登录（或 `claude /login`）；
-   也可以 `export ANTHROPIC_API_KEY=…`（`claude -p` 会直接用它）。然后回到抽屉点「生成」。
-2. **用 codex**：`codex login`（浏览器），或 `export OPENAI_API_KEY=…`。
-3. **换一条命令**：`export FLOWERS_GEN_CMD='<你的命令>'`。约定只有一条：读 stdin 的整段
-   任务包，按包里的路径写出 HTML，退出码 0。命令要在**跑 dev server 的那个环境**里设置
-   （`npm run dev` 继承它），不是浏览器里。
+| 候选 | 缺什么时它会怎么说 | 补法 |
+| --- | --- | --- |
+| `claude` | `Failed to authenticate: OAuth session expired and could not be refreshed` | 终端里跑一次 `claude` 完成登录，或 `export ANTHROPIC_API_KEY=…` |
+| `codex` | `token: Your access token could not be refreshed because your refresh token was already used` | `codex login`，或 `export OPENAI_API_KEY=…` |
+| `dsh` | `MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"` | `export DEEPSEEK_API_KEY=…`（要设在跑 dev server 的那个环境） |
+| `ollama` | `命令里还有占位符 <模型名>，先填上再测` | 把模型名填进命令（`ollama run qwen2.5`），并先把 `ollama serve` 起起来 |
+| `custom` | 你自己的命令报什么就是什么 | 一条读 stdin 或带 `{prompt}` 的命令，HTML 写文件或打 stdout 都行 |
 
-判断是否生效：点一次「生成」，行里从「生成中」变成 `/uemaster/…` 链接就是通了；还是
-「生成失败：…」时，那句话就是生成器给的原话，照着修即可。
+**测试通过**之后，抽屉里点「生成」就会走这条命令；产物落回 `data/uemaster/`，那一行变成
+`/uemaster/…` 链接。`FLOWERS_GEN_CMD` 仍然是最高的那一档（临时换一条、跑 stub 用例），
+但它现在是「临时覆盖」，不再是「唯一的口子」。
 
 ---
 
@@ -353,8 +370,8 @@ claude 真的因为登录过期拒绝了，界面把这句话原样交给 owner*
   就有的形状，生成让它变成常态。
 - **没有进度**：只有「生成中」，没有百分比/日志。真 CLI 的中间输出被吞掉（`stdio` 收在
   worker 里），失败时才取尾巴。
-- **默认命令依赖 CLI 版本**：`claude` / `codex` 的 flag 是 2026-11 对出来的；升级后如果
-  flag 变了，`DEFAULT_COMMANDS` 要跟着改。`FLOWERS_GEN_CMD` 是绕开它的口子。
+- **候选命令依赖 CLI 版本**：`CANDIDATES` 里那五行是 2026-11 对出来的；升级后如果 flag 变了，
+  改的是那张表（设置页的「改」当场能改一条，但默认值在代码里）。`FLOWERS_GEN_CMD` 是绕开它的口子。
 - **worker 用 `tsx` 跑 `.ts`**：没有「worker 单独构建」这一步；`node_modules/tsx` 不在时
   生成直接失败并说明原因（`后台执行器不可用：找不到 node_modules/tsx`）。生产部署要
   保证 devDependencies 也在（或改为预编译 worker）。

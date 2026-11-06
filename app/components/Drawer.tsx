@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail';
 import { formatMonthDay } from '../../src/core/read/board';
 import { requirementKey } from './Card';
@@ -38,8 +39,8 @@ const PILL: Record<string, string> = {
 };
 
 function RefRow({
-  item, id, number,
-}: { item: DetailRef; id: string; number: number }) {
+  item, id, number, generator,
+}: { item: DetailRef; id: string; number: number; generator: GeneratorView }) {
   // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「生成」。
   // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
   //
@@ -65,6 +66,7 @@ function RefRow({
           requirementId={id}
           stage={item.stage}
           runningJobId={item.generation?.id ?? null}
+          generator={generator}
         />
         <AttachForm id={id} number={number} stage={item.stage} />
       </div>
@@ -86,7 +88,9 @@ function ReviewRow({ review }: { review: DetailReview }) {
   );
 }
 
-export function Drawer({ detail, releases }: { detail: Detail; releases: ReleaseOption[] }) {
+export function Drawer({
+  detail, releases, generator,
+}: { detail: Detail; releases: ReleaseOption[]; generator: GeneratorView }) {
   const { info, commit, review } = detail;
   // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
   const refs = detail.refs;
@@ -173,6 +177,7 @@ export function Drawer({ detail, releases }: { detail: Detail; releases: Release
                 item={item}
                 id={detail.id}
                 number={detail.number}
+                generator={generator}
               />
             ))}
           </section>

@@ -1,6 +1,8 @@
+import { db } from '../src/db/client';
 import { getBoard } from '../src/core/read/board';
 import { getRequirementDetail } from '../src/core/read/detail';
 import { listReleases } from '../src/core/read/version';
+import { generatorView } from '../src/core/uemaster/settings';
 import { Board } from './components/Board';
 import { Drawer } from './components/Drawer';
 
@@ -24,9 +26,13 @@ export default async function BoardPage({
   const { open } = await searchParams;
   const openId = typeof open === 'string' ? open : null;
 
-  const [columns, detail] = await Promise.all([
+  // 抽屉里那三行「生成」要知道**现在会跑哪条命令**（P2.7）：一条都没有时按钮禁用，
+  // 多条时按下先开选择器。这件事只跟开着的抽屉有关，所以抽屉没开就不读——看板本身
+  // 不需要知道生成器的存在。
+  const [columns, detail, generator] = await Promise.all([
     getBoard(),
     openId === null ? Promise.resolve(null) : getRequirementDetail(openId),
+    openId === null ? Promise.resolve(null) : generatorView(db),
   ]);
 
   // 版本列表只给排期表单用：抽屉里没有「排期」这个动作时不查（版本页有自己的口径）。
@@ -43,7 +49,9 @@ export default async function BoardPage({
       <Board columns={columns} />
       {/* key 是需求 id：从 A 的抽屉直接跳到 B 的抽屉（URL 导航）时，整块重新挂载，
           上一个动作留下的失败消息与表单值不会跟着漂到另一条需求上。 */}
-      {detail !== null && <Drawer key={detail.id} detail={detail} releases={releases} />}
+      {detail !== null && generator !== null && (
+        <Drawer key={detail.id} detail={detail} releases={releases} generator={generator} />
+      )}
     </main>
   );
 }

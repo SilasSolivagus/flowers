@@ -53,10 +53,10 @@ npm run demo         # 领域冒烟脚本：一条需求从收集走到上线，
 点下去要填什么，由读模型按当前状态给出；失败就在抽屉里显示服务抛出的那句中文，
 刷新也不会把它弄丢。
 
-「评估」不在动作条里：Flowers 后端不调模型（D1），这个按钮点不出材料。评估、评审、
-走查三处的材料由**你自己的 agent** 用 UEmaster 生成，接法见下一节。抽屉「参考」段
-那三行是三处固定槽位：没有产物时是「评估材料 / 评审材料 / 走查材料 + 复制任务包」，
-有了产物就是链接 + 日期。
+「评估」不在动作条里：它没有单独的一步。抽屉「参考」段那三行各有一个「生成」——服务端
+把任务包喂给本机装着的生成器，产物落回 `data/uemaster/PAN-n/<stage>.html`，那一行就变成
+链接 + 日期。生成器怎么选见下面「生成器：装了 ≠ 能用」；不装生成器也能走「交回材料」，
+或者接 MCP 让别的 agent 干（见 `docs/mcp.md`）。
 
 身份暂时只是一个 cookie（`flowers_actor`，缺省「吕品」），没有登录；界面上**没有切换入口**——
 左轨底部那块只是把当前身份读出来（姓名 + 角色），SSO 之前身份由配置决定。
@@ -84,7 +84,7 @@ uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<st
 ```
 
 `stage` 只有三个值：`evaluate` / `review` / `inspect`（评估 / 评审 / 走查）。交回之后抽屉
-「参考」段对应那一行立刻从「复制任务包」变成链接 + 日期，记录段多一条
+「参考」段对应那一行立刻变成链接 + 日期，记录段多一条
 `uemaster.attached`。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing`——
 包自己写着该往哪写，写不对就是没干活。文件不在 `public/` 里：`/uemaster/...` 由动态路由
 `app/uemaster/[...path]/route.ts` 服务，每个响应带
@@ -92,6 +92,38 @@ uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<st
 ——产物是同源的第三方 HTML，它的脚本能跑（走查页的点击切换因此在站内是活的），但没有
 `allow-same-origin`，所以它读不到本站 cookie、用不了 storage、同源请求也发不出去
 （R-P2-9）。
+
+### 生成器：装了 ≠ 能用
+
+「生成」跑的是**本机的一条命令**，不是任何 LLM SDK。可选的是这五个，`src/core/uemaster/candidates.ts`
+里各有一行（id / 显示名 / 命令 / 一句说明）：
+
+| id | 显示名 | 命令 | 任务包怎么进去 |
+| --- | --- | --- | --- |
+| `claude` | Claude Code | `claude -p --permission-mode acceptEdits` | stdin |
+| `codex` | Codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | stdin |
+| `dsh` | DeepSeek Harness | `dsh headless {prompt}` | 命令里的 `{prompt}`（argv） |
+| `ollama` | Ollama | `ollama run <模型名>` | stdin（先把模型名填上） |
+| `custom` | 自建 / 自定义 | 自己写 | 两种都行 |
+
+**命令契约**只有两条：
+
+| 格子 | 两种形状 | 判据 |
+| --- | --- | --- |
+| 任务包怎么进 | 模板里有 `{prompt}` → 作为那个 argv 元素；没有 → 写 stdin | 看模板里有没有 `{prompt}` |
+| 产物怎么出 | 命令自己写文件 → 用那份新鲜文件；没写、但 stdout 里有 HTML → 由 Flowers 写到产物路径 | 退出 0 之后先看文件 mtime，再看 stdout；都没有就是失败 |
+
+**解析顺序**：`FLOWERS_GEN_CMD` → 设置页「生成器」保存的那条 → PATH 探测。
+探测到一条就直接用（第一次失败会打开选择器）；探测到多条就让人选；一条都没有时
+「生成」按钮禁用，旁边写着「未检测到生成器」。
+
+**装了 ≠ 能用，测试是唯一的真相。** PATH 只告诉你「要不要把它列出来」；`--version` 只告诉你
+「装了」；`login status` 甚至会撒谎——本机的 `codex login status` 打印
+“Logged in using ChatGPT”，紧接着 `codex exec` 回 401 `refresh token already used`。
+所以设置页那一行有个「测试」：拿一条固定的极小任务（`生成一个 HTML 文档，<title>flowers</title>，
+正文一行 hello`）真跑一次，10 秒，两种交法都认。通过就写「通过（字节 · 毫秒）」，
+失败就把 stderr 原文写在行下面。**保存不要求先测通**（模型名、代理、key 都可能要慢慢调），
+但没通过时那一行就写着「未通过测试」——它不会假装这条命令能用。
 
 ### 入口是 MCP server
 
@@ -115,7 +147,8 @@ codex mcp add flowers --env FLOWERS_MCP_ACTOR=codex -- npx tsx mcp/server.ts
 直接写 `node /绝对路径/dist/mcp/server.js`。
 
 三个工具（`uemaster_plan` / `uemaster_attach` / `requirement_show`）的参数、失败文案、
-cwd 与产物根的关系、`claude` / `codex` 两份完整配置：见 [`docs/mcp.md`](docs/mcp.md)。
+cwd 与产物根的关系、几种客户端的接法：见 [`docs/mcp.md`](docs/mcp.md)。生成器（抽屉里那三个
+「生成」按钮跑什么）见上面「生成器：装了 ≠ 能用」。
 想不接客户端先验一遍：
 
 ```bash
@@ -167,6 +200,12 @@ src/core
 ├── uemaster/            UEmaster 材料（P2）：只发任务包、收链接，不调模型
 │   ├── packs.ts           packFor(stage, req)：三份任务包正文（纯函数，不碰库）
 │   ├── attach.ts          attachArtifact()：校验链接与文件 → 落库 → 写事件；evaluate 时同事务推进状态
+│   ├── candidates.ts      五个生成器候选（显示名 / 命令模板 / 一句说明），纯数据，服务端与客户端共用
+│   ├── detect.ts          detect()：只查 PATH 里有哪些可执行文件，不执行它们；按 PATH 缓存
+│   ├── generator.ts       runGenerator() / testGenerator()：{prompt} 与 stdin、文件与 stdout、硬超时
+│   ├── settings.ts        app_settings 的读写：generator.command / generator.test
+│   ├── start.ts           startGeneration() + runJob()：作业的起点与 worker 的执行体
+│   ├── store.ts           站内路径 ↔ data/uemaster 的翻译（含越界守卫）
 │   └── list.ts            listArtifacts()：每个 stage 取最新一条
 └── read/                只读模型（SQL），页面的唯一数据来源
     ├── board.ts           getBoard()：10 列 + 卡片摘要（等谁、停留几天、是否要你动手）
@@ -175,11 +214,12 @@ src/core
     └── member.ts          listMembers() / currentMember()：名册与 cookie 里的当前成员
 
 src/db
-├── schema.ts            表结构（requirements / review_assignments / events / releases / members / uemaster_artifacts）
+├── schema.ts            表结构（requirements / review_assignments / events / releases / members /
+│                        uemaster_artifacts / uemaster_jobs / app_settings）
 ├── migrations/          drizzle 生成的 SQL 迁移，`npm run db:migrate` 逐个应用
 ├── client.ts            pg 连接池 + drizzle 实例
 ├── migrate.ts           迁移执行器
-└── reset.ts             resetDb()：truncate 五张表并复位序列（含「这库能不能清」的守卫）
+└── reset.ts             resetDb()：truncate 六张表并复位序列（含「这库能不能清」的守卫）
 
 mcp/
 ├── server.ts             stdio MCP server（`npm run mcp`）：只做接线，不起端口
@@ -187,8 +227,9 @@ mcp/
 ```
 
 界面层在 `app/`：`page.tsx` 是看板，`releases/`、`settings/` 是另外两页，`actions.ts` 是
-`'use server'` 的九个入口（只做「取字段 → 解身份 → 调服务 → 翻译 AppError」），
-`components/` 是外壳、左轨、看板、甘特、抽屉与动作条（`CopyPack` 是参考段那个复制按钮）。
+`'use server'` 的入口（只做「取字段 → 解身份 → 调服务 → 翻译 AppError」），
+`components/` 是外壳、左轨、看板、甘特、抽屉与动作条；参考段那一行有「生成 / 交回材料」，
+`GeneratorPicker` 是「探测到多条时选一个」的那张表。
 
 ## 两个坑（新人一定会踩）
 
@@ -200,7 +241,7 @@ mcp/
 `next dev -p 3000 --webpack` / `next build --webpack`。
 
 **二、`resetDb()` 清空的是 `DATABASE_URL` 指向的那个库；`npm run seed` 不带 `--reset` 会拒绝。**
-`resetDb()` 直接 truncate 五张表（脚本里另有 `current_database()` 守卫，只放行名为 `flowers` 的库）。
+`resetDb()` 直接 truncate 六张表（脚本里另有 `current_database()` 守卫，只放行名为 `flowers` 的库）。
 测试用例跑的就是这张 `flowers`，所以 **`npx vitest run` 会把演示数据清掉**——跑完测试或 `npm run demo`
 之后，界面会是空的，要补一次：
 

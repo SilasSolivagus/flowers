@@ -29,6 +29,13 @@
       "when": 1793943100624,
       "tag": "0003_uemaster_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793944452540,
+      "tag": "0004_app_settings",
+      "breakpoints": true
     }
   ]
 }

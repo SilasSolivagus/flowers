@@ -14,6 +14,8 @@ import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal';
 import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
+import { testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
+import { generatorCommand, saveGeneratorCommand, writeTest } from '../src/core/uemaster/settings';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -222,4 +224,61 @@ export async function runAction(formData: FormData): Promise<ActionResult> {
     return { ok: false, message: '未知动作' };
   }
   return ACTIONS[name as DetailAction](formData);
+}
+
+/**
+ * 生成器设置（P2.7）：保存一条命令，以及就地测它一下。
+ *
+ * 两个动作都不碰 `src/core` 里的服务：保存走 `saveGeneratorCommand`（只拦空串与未填
+ * 的占位符），测试走 `testGenerator`（真跑一次，10 秒，与真生成同一条命令契约）。
+ * 这一层只做三件 Next 专有的事：从 FormData 取字段、把 AppError 翻成一句话、失效页面。
+ *
+ * 为什么保存**不要求**先测通：这条机器的现实是「装了 ≠ 能用」，而一个人可能先要把
+ * 命令存下来、再慢慢调（模型名、代理、key）。要求「测通了才能存」会让他在设置页上
+ * 无处可存。代价是那一行必须诚实：测过没通过、或者根本还没测，都要写出来。
+ */
+export async function saveGeneratorAction(formData: FormData): Promise<ActionResult> {
+  try {
+    await saveGeneratorCommand(db, field(formData, 'command'));
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    revalidatePath('/settings');
+    revalidatePath('/');
+  }
+}
+
+export type GeneratorTestResult = { ok: boolean; message: string };
+
+/**
+ * 就地测试：把当前生效的那条命令真跑一次。
+ *
+ * 结果落库（`app_settings.generator.test`）而不只是返回给这一次点击：刷新之后那一行
+ * 仍要显示「未通过测试」，否则一次刷新就把失败洗成了「未配置」。
+ *
+ * 失败文案就是 stderr 的原文（去掉 ANSI 与 node 噪声）——`OAuth session expired`、
+ * `MISSING_CREDENTIAL: … DEEPSEEK_API_KEY` 这两句本身就是给 owner 的下一步。
+ */
+export async function testGeneratorAction(): Promise<GeneratorTestResult> {
+  const command = await generatorCommand(db);
+  if (command === null) return { ok: false, message: '未配置生成器命令' };
+
+  const result = await testGenerator(command, { timeoutMs: TEST_TIMEOUT_MS });
+  const at = new Date().toISOString();
+  await writeTest(db, {
+    ok: result.ok,
+    command,
+    at,
+    size: result.ok ? result.size : null,
+    ms: result.ms,
+    error: result.ok ? null : result.error,
+  });
+  revalidatePath('/settings');
+  revalidatePath('/');
+
+  return result.ok
+    ? { ok: true, message: `通过（${result.size} 字节 · ${result.ms} ms）` }
+    : { ok: false, message: `失败：${result.error}` };
 }

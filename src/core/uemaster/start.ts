@@ -8,8 +8,9 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { attachArtifact } from './attach.js';
-import { artifactUrlIn, runGenerator } from './generator.js';
+import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
+import { generatorCommand } from './settings.js';
 import { artifactFile } from './store.js';
 
 /**
@@ -135,6 +136,25 @@ export async function startGeneration(
          where id = ${current.id} and status = 'running'`);
     }
 
+    // 生成器在不在？放在**防重之后**：用户先要知道「这个阶段已经在跑了」，而不是
+    // 先被问「用哪个生成器」。两句话同时成立时，前者是他这次点击的直接结果。
+    //
+    // `choose` 与 `none` 都在这里拒绝，作业一行都不落——界面上它们本来就不该走到
+    // 这一步（多条时按钮先开选择器，零条时按钮直接禁用），这里是绕过界面的兜底。
+    const resolution = await resolveGenerator(await generatorCommand(tx));
+    if (resolution.kind === 'none') {
+      throw new AppError(
+        'generator_unavailable',
+        '未检测到生成器：到「设置 · 项目 · 生成器」配置一条',
+      );
+    }
+    if (resolution.kind === 'choose') {
+      throw new AppError(
+        'generator_unconfigured',
+        '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个',
+      );
+    }
+
     const inserted = await tx.execute<{ id: string }>(sql`
       insert into uemaster_jobs (requirement_id, stage, status)
       values (${requirementId}, ${stage}, 'running')
@@ -258,6 +278,16 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       prdUrl: job.prd_url,
     });
 
+    // 命令按同一条解析顺序再取一次（worker 是另一个进程，不能信请求那一刻的结论）。
+    // 走到这里还没有唯一一条命令，就不必花十分钟去试：直接说清楚缺什么。
+    const resolution = await resolveGenerator(await generatorCommand(db));
+    if (resolution.kind !== 'ready') {
+      await failJob(db, jobId, resolution.kind === 'choose'
+        ? '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个'
+        : '未检测到生成器：到「设置 · 项目 · 生成器」配置一条');
+      return;
+    }
+
     // 产物路径从包里来（包写死了它），跑之前先记一份快照。
     const url = artifactUrlIn(pack);
     const file = artifactFile(url);
@@ -266,6 +296,9 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     const result = await runGenerator(pack, {
       cwd: opts.cwd ?? REPO_ROOT,
       timeoutMs,
+      command: resolution.command,
+      file,
+      before,
     });
 
     if (!result.ok) {

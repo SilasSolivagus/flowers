@@ -137,3 +137,20 @@ export const events = pgTable('events', {
   payload: text('payload').notNull(),        // JSON 字符串
   at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * 键值设置（P2.7 起）。
+ *
+ * 第一件住进来的东西是生成器命令（`generator.command`）与它上一次的测试结果
+ * （`generator.test`）。为什么不新开两张列明确的表：设置这一层要回答的问题是
+ * 「这个部署把这一格设成了什么」，键值表是它的最小形状；而键是**服务层常量**
+ * （见 `src/core/uemaster/settings.ts`），不是散在代码里的字符串字面量。
+ *
+ * `value` 一律是文本：命令是一行 shell，测试结果是 JSON。库不解释它们——
+ * 解释权在服务层，改口径不用改表。
+ */
+export const appSettings = pgTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});

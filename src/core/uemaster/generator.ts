@@ -1,22 +1,38 @@
 import { spawn } from 'node:child_process';
-import { access, constants } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { AppError } from '../errors.js';
+import {
+  commandReady, placeholderIn, type Candidate,
+} from './candidates.js';
+import { detect } from './detect.js';
 
 /**
  * 「把一段任务包变成一份 HTML」的那一层：只认一条命令，别的都不认。
  *
  * P2.6 之前任务包是给人复制的（`复制任务包`），材料要靠用户自己的 agent 生成。
- * 裁决把它反过来：Flowers 自己把包喂给本机装着的 agent CLI，产物落回
- * `data/uemaster/`，抽屉里那一行直接变成链接。这个文件就是「喂」的那一步。
+ * 裁决把它反过来：Flowers 自己把包喂给本机装着的 CLI，产物落回 `data/uemaster/`，
+ * 抽屉里那一行直接变成链接。这个文件就是「喂」的那一步。
+ *
+ * P2.7 改掉了 P2.6 的一条策略：「claude，否则 codex」是**一台机器上的运气**被写成了
+ * 产品规则。现在这里是三件事，各占一段：
+ *
+ * 1. **命令契约**（`commandFor` + `runRaw`）：模板里有 `{prompt}` 就把它当 argv 的
+ *    一个元素传（`dsh headless {prompt}`），没有就走 stdin（`claude -p`、`codex exec -`、
+ *    `ollama run x`）。这两条覆盖了本机这五个候选的全部形状。
+ * 2. **产物契约**（`runGenerator`）：命令退出 0 之后，**先看文件、再看 stdout**——
+ *    产物文件是新鲜的（mtime 变了）就用它；文件没动而 stdout 里有一个 HTML 文档，
+ *    就由这一层自己写进产物路径；两者都没有才算失败。这一条是 `ollama` 或任何
+ *    「管道式」生成器能成立的全部原因：它们不会写文件，只会把 HTML 打到 stdout。
+ * 3. **解析顺序**（`resolveGenerator`）：`FLOWERS_GEN_CMD` → 库里存着的那条
+ *    （`app_settings.generator.command`）→ 探测。探测到一条就直接用，探测到多条
+ *    就交给人选（本层只回答 `choose`，选择器在界面上），一条都没有就是 `none`。
  *
  * 刻意不做的事（越少越好）：
- * - 不引入任何 LLM SDK。跑的是一个已安装的 CLI（`claude` / `codex`），
- *   或者 `FLOWERS_GEN_CMD` 指定的任意命令——它读 stdin、自己写文件，退出码说话。
- * - 不解析模型输出。产物在文件系统里，不在 stdout 里；stdout 只用来在失败时
- *   补一句原因。这是 CLI 们的既有形状（`claude -p` / `codex exec` 都会自己写文件）。
+ * - 不引入任何 LLM SDK，也不解析模型输出。
  * - 不重试、不降级。失败了就把 stderr 的尾巴交给用户——他读到的应该是
- *   「OAuth session expired」，而不是一句「生成失败」。
+ *   「OAuth session expired」或「MISSING_CREDENTIAL」，而不是一句「生成失败」。
  *
  * 契约（对 worker 而言只有这一个函数）：
  * ```
@@ -34,6 +50,12 @@ export type GenOptions = {
   cwd: string;
   /** 硬超时。到点就杀掉整个进程组，返回失败——绝不让一次生成挂死在那里。 */
   timeoutMs: number;
+  /** 这次用的命令。不传时按 env → 探测自己解析；解析不出唯一一条就失败。 */
+  command?: string;
+  /** 产物文件的绝对路径。有它才做「文件 / stdout」二选一。 */
+  file?: string;
+  /** 跑之前的 mtime（null = 之前不存在）。用来判断文件是不是这一次写的。 */
+  before?: number | null;
 };
 
 /** 任务包里那行站内路径。三份包各写一次，形状固定。 */
@@ -51,70 +73,92 @@ export function artifactUrlIn(pack: string): string {
   return found[0];
 }
 
-export type AgentKind = 'claude' | 'codex';
+// ─── 解析：这次跑什么 ────────────────────────────────────────────────────────
+
+export type GenSource = 'env' | 'settings' | 'detected';
 
 /**
- * 两种 CLI 的默认命令行。**这里的每个 flag 都是被验证过的**（`claude --help` /
- * `codex exec --help`，2026-11）。
- *
- * `claude -p`：print 模式，非交互；prompt 从 stdin 读（帮助里 prompt 是位置参数，
- * 不给就吃 stdin）。`--permission-mode acceptEdits` 让它在工作目录里**直接写文件**，
- * 不再逐次问人——没有它，一次后台生成会停在权限确认上，直到超时。
- *
- * 为什么是 `acceptEdits` 而不是 `--dangerously-skip-permissions`：这条命令只会收到
- * 一段**固定的任务包**（`packFor` 的输出，人写的模板 + 需求字段），模型要做的事是
- * 「画图、写一个 HTML 到 data/uemaster/」。`acceptEdits` 恰好把「改/写文件」这一格
- * 放开，同时仍不给任意 shell 的免确认执行；而 skip-permissions 连 bash、hook、
- * 网络工具一起放开，对一件事来说太宽。真实的写盘动作是 Write/Edit 工具，不是 bash，
- * 所以 acceptEdits 够用。
- *
- * `codex exec`：非交互。`-` 表示 prompt 从 stdin 读（帮助原文：“If not provided as
- * an argument (or if `-` is used), instructions are read from stdin”）。
- * `--sandbox workspace-write` 是让它能在仓库里写文件的那一格（read-only 会让它写不了
- * 产物）；`--skip-git-repo-check` 是因为部署副本 / 构建产物里不一定有 `.git`，
- * 而这条检查与生成无关。
+ * 解析的结果。三种形状对应界面上的三件事：
+ * - `ready`：有唯一一条命令，可以跑（`source` 说明它是从哪来的）；
+ * - `choose`：探测到多条，需要人挑一个（选择器）；
+ * - `none`：一条都没有，按钮禁用并指路去设置。
  */
-export const DEFAULT_COMMANDS: Record<AgentKind, string> = {
-  claude: 'claude -p --permission-mode acceptEdits',
-  codex: 'codex exec --sandbox workspace-write --skip-git-repo-check -',
-};
-
-/** 顺序即偏好：装了 claude 就用 claude，否则 codex。 */
-const AGENTS: AgentKind[] = ['claude', 'codex'];
-
-/** PATH 里有没有这个可执行文件（不执行它，只问文件系统）。 */
-async function onPath(name: string): Promise<boolean> {
-  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
-    if (dir === '') continue;
-    try {
-      await access(path.join(dir, name), constants.X_OK);
-      return true;
-    } catch {
-      // 继续找下一个目录：找不到是常态，不是错误。
-    }
-  }
-  return false;
-}
+export type Resolution =
+  | { kind: 'ready'; command: string; source: GenSource; candidate: Candidate | null }
+  | { kind: 'choose'; candidates: Candidate[] }
+  | { kind: 'none' };
 
 /**
  * 这次用哪条命令。
  *
- * 1. `FLOWERS_GEN_CMD`（非空）——唯一的口子，也是 stub 用例与「换一个生成器」的入口。
- * 2. 否则自动探测：`claude` → `codex`，用上面那两条默认命令行。
- * 3. 都没有：中文错误，说清楚缺什么。这一句会原样显示在抽屉那一行里。
+ * 1. `FLOWERS_GEN_CMD`（非空）——唯一的口子，也是 stub 用例与「临时换一条」的入口。
+ * 2. 库里存着的那条（设置页「生成器」保存的）。
+ * 3. 探测：一条 → 用它（但仍要当成**未被验证**的，见 `start.ts` 的说明）；
+ *    多条 → `choose`；零条 → `none`。
+ *
+ * 为什么「一条就自动用」而不是「也让人确认」：只装了一个生成器的人，每次都弹一次
+ * 选择器是把配置问题变成了日常税。自动用不等于信任它——第一次真跑失败时会打开
+ * 选择器，而不是把一句 stderr 留在那一行让人自己猜。
+ *
+ * `ollama` 那种还带着 `<模型名>` 的候选不算「可以直接跑」：它是被探测到了，但命令
+ * 不完整，所以它只会出现在 `choose` 的列表里等人填。
  */
-export async function resolveCommand(): Promise<string> {
+export async function resolveGenerator(saved: string | null): Promise<Resolution> {
   const configured = process.env.FLOWERS_GEN_CMD?.trim();
-  if (configured) return configured;
-
-  for (const kind of AGENTS) {
-    if (await onPath(kind)) return DEFAULT_COMMANDS[kind];
+  if (configured) {
+    return { kind: 'ready', command: configured, source: 'env', candidate: null };
   }
-  throw new AppError(
-    'generator_unavailable',
-    '本机没有可用的生成器：装好 claude 或 codex 并登录，或设置 FLOWERS_GEN_CMD',
-  );
+  const stored = saved?.trim();
+  if (stored) {
+    return { kind: 'ready', command: stored, source: 'settings', candidate: null };
+  }
+
+  const found = await detect();
+  const usable = found.filter((item) => item.ready);
+  if (usable.length === 1) {
+    const only = usable[0]!;
+    return { kind: 'ready', command: only.candidate.command, source: 'detected', candidate: only.candidate };
+  }
+  if (usable.length > 1 || (usable.length === 0 && found.length > 0)) {
+    // 多条：让人选。一条都不能直接跑（例如只探到 ollama 的 `<模型名>`）：也得让人
+    // 先把它改完整——那同样是一次选择。
+    return { kind: 'choose', candidates: found.map((item) => item.candidate) };
+  }
+  return { kind: 'none' };
 }
+
+// ─── 命令的形状：stdin 还是 {prompt} ─────────────────────────────────────────
+
+/** 模板里的任务包槽位。 */
+const PROMPT_SLOT = '{prompt}';
+
+/**
+ * 把一段任意文本变成 shell 里的**一个** argv 元素。
+ *
+ * 任务包里什么都有：换行、单引号、反引号、`$(...)`、中文。单引号包裹是 POSIX sh
+ * 里唯一不用逐字符转义的形状，而单引号自己用 `'\''` 拼接——这是 shell 引号的标准
+ * 做法，不是土办法。命令模板是用户给的、走 `shell: true`（`FLOWERS_GEN_CMD` 可能
+ * 自带管道或 env 前缀），所以这一段必须在 shell 那一层就正确，而不是靠 spawn 的
+ * argv 数组——那条路只对「命令本身就是数组」的情况成立。
+ */
+export function quoteForShell(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * 模板 + 任务包 → 真会被执行的那一行，以及任务包走不走 stdin。
+ *
+ * 两种模式不是风格选择，是这五个 CLI 的既成事实：`claude -p` / `codex exec -` /
+ * `ollama run x` 从 stdin 读；`dsh headless` 收位置参数，给 stdin 它会忽略。
+ */
+export function commandFor(template: string, pack: string): { line: string; stdin: boolean } {
+  if (template.includes(PROMPT_SLOT)) {
+    return { line: template.split(PROMPT_SLOT).join(quoteForShell(pack)), stdin: false };
+  }
+  return { line: template, stdin: true };
+}
+
+// ─── 跑一条命令 ──────────────────────────────────────────────────────────────
 
 /** 终端转义序列（CLI 的彩色输出）不该进到界面里，也不该进到「失败原因」那一行。 */
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -163,48 +207,47 @@ function killTree(pid: number | undefined): void {
   }
 }
 
+type RawRun = {
+  /** 命令自己退出 0。 */
+  ok: boolean;
+  /** 被硬超时杀掉。 */
+  timedOut: boolean;
+  out: string;
+  err: string;
+  ms: number;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  /** 连进程都没起来（工作目录不存在之类）。 */
+  spawnError: string | null;
+};
+
 /**
- * 跑一次生成。
+ * 跑一行命令，收集 stdout / stderr 的尾巴，到点连进程组一起杀。
  *
- * 命令从 stdin 拿到完整的任务包，然后**自己**把 HTML 写到包里指定的路径——
- * 这正是 `claude -p` 与 `codex exec` 的工作方式（让 agent 用 Write 工具落盘，
- * 而不是把几 MB 的 HTML 从 stdout 里捞出来）。
- *
- * 失败时返回 `{ ok:false, error }`，error 是 stderr 的**尾巴**：OAuth 过期、
- * 401、模型报错，用户要看到的就是那一句原文。只有 stderr 为空时才退到 stdout，
- * 再退到退出码——绝不把三者混成一句「生成失败」。
+ * 这一层只管「一条 shell 命令跑完了没有、说了什么」，不知道任务包、不知道产物。
+ * 两件上层的事（真生成、设置页那 10 秒小测）都从它出发，于是超时、进程组、
+ * 噪声过滤只有一份实现。
  */
-export async function runGenerator(pack: string, opts: GenOptions): Promise<GenResult> {
-  let url: string;
-  try {
-    url = artifactUrlIn(pack);
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-
-  let command: string;
-  try {
-    command = await resolveCommand();
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-
-  return new Promise<GenResult>((resolve) => {
+function runRaw(line: string, opts: {
+  cwd: string; timeoutMs: number; stdin: string | null;
+}): Promise<RawRun> {
+  return new Promise<RawRun>((resolve) => {
+    const started = Date.now();
     let out = '';
     let err = '';
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (result: GenResult): void => {
+    const finish = (result: Omit<RawRun, 'ms'>): void => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
-      resolve(result);
+      resolve({ ...result, ms: Date.now() - started });
     };
 
     let child;
     try {
-      child = spawn(command, {
+      child = spawn(line, {
         cwd: opts.cwd,
         shell: true,
         // 自己一个进程组：超时的时候能把 shell 连同它拉起的 agent 一起杀掉，
@@ -213,16 +256,20 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
-      // 工作目录不存在、shell 起不来：这是失败，不是拒绝——契约只返回 GenResult。
-      finish({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      // 工作目录不存在、shell 起不来：这是失败，不是拒绝。
+      finish({
+        ok: false, timedOut: false, out: '', err: '',
+        code: null, signal: null,
+        spawnError: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
 
     timer = setTimeout(() => {
       killTree(child.pid);
       finish({
-        ok: false,
-        error: `生成超时（${Math.round(opts.timeoutMs / 1000)} 秒）——命令没有在时限内结束，已终止`,
+        ok: false, timedOut: true, out, err: keepTail(err),
+        code: null, signal: null, spawnError: null,
       });
     }, opts.timeoutMs);
 
@@ -236,22 +283,252 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
     // 子进程不读 stdin 就退出（例如立刻认证失败）时，写入会 EPIPE——那已经由 close
     // 的退出码回答，不需要多一条未捕获异常。
     child.stdin?.on('error', () => undefined);
-    child.stdin?.end(pack, 'utf8');
+    if (opts.stdin === null) child.stdin?.end();
+    else child.stdin?.end(opts.stdin, 'utf8');
 
-    child.on('error', (error) => finish({ ok: false, error: error.message }));
-
-    child.on('close', (code, signal) => {
-      if (code === 0) {
-        finish({ ok: true, url });
-        return;
-      }
-      const reason = reasonOf(err) || reasonOf(out);
+    child.on('error', (error) => {
       finish({
-        ok: false,
-        error: reason === ''
-          ? `生成命令失败（${signal ?? `退出码 ${code}`}），没有输出原因`
-          : reason,
+        ok: false, timedOut: false, out, err: keepTail(err),
+        code: null, signal: null, spawnError: error.message,
       });
     });
+
+    child.on('close', (code, signal) => {
+      finish({ ok: code === 0, timedOut: false, out, err: keepTail(err), code, signal, spawnError: null });
+    });
   });
+}
+
+/** 失败的那一句：stderr 优先、stdout 次之、退出码兜底。绝不混成「生成失败」。 */
+function failureText(raw: RawRun): string {
+  if (raw.spawnError !== null) return raw.spawnError;
+  if (raw.timedOut) return ''; // 超时由调用方写它自己的那一句（带秒数）
+  const reason = reasonOf(raw.err) || reasonOf(raw.out);
+  if (reason !== '') return reason;
+  const how = raw.signal ?? `退出码 ${raw.code}`;
+  return `生成命令失败（${how}），没有输出原因`;
+}
+
+// ─── 产物：文件模式 / stdout 模式 ───────────────────────────────────────────
+
+/**
+ * stdout 里那一段 HTML 文档，没有就 null。
+ *
+ * 「包含」而不是「以…开头」：agent CLI 在 stdout 里会先讲两句人话（「我来生成…」），
+ * 再把文档贴出来；`ollama run` 更会带上自己的提示与统计。从第一个 `<!doctype html>`
+ * 或 `<html` 开始截到结尾，是这几种输出都能成立的读法——后置的废话留在文件里也不会
+ * 改变它是一份 HTML 这件事（浏览器照样渲染）。
+ */
+export function htmlDocumentIn(text: string): string | null {
+  const lower = text.toLowerCase();
+  const doctype = lower.indexOf('<!doctype html');
+  const root = lower.search(/<html[\s>]/);
+  const starts = [doctype, root].filter((index) => index >= 0);
+  if (starts.length === 0) return null;
+  const from = Math.min(...starts);
+  const doc = text.slice(from).trim();
+  return doc === '' ? null : doc;
+}
+
+/** 文件在不在、什么时候写的。`null` = 不在。 */
+async function mtimeOf(file: string): Promise<number | null> {
+  try {
+    return (await stat(file)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+// ─── 真生成 ──────────────────────────────────────────────────────────────────
+
+/**
+ * 跑一次生成。
+ *
+ * 命令从 stdin（或 `{prompt}` 那个 argv 位）拿到完整的任务包，然后**自己**把 HTML
+ * 交出来——两种交法都收，见文件头第 2 条：写文件，或者打到 stdout。
+ *
+ * 失败时返回 `{ ok:false, error }`，error 是 stderr 的**尾巴**：OAuth 过期、
+ * 401、模型报错，用户要看到的就是那一句原文。只有 stderr 为空时才退到 stdout，
+ * 再退到退出码。
+ */
+export async function runGenerator(pack: string, opts: GenOptions): Promise<GenResult> {
+  let url: string;
+  try {
+    url = artifactUrlIn(pack);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  let command = opts.command;
+  if (command === undefined) {
+    const resolution = await resolveGenerator(null);
+    if (resolution.kind !== 'ready') {
+      return {
+        ok: false,
+        error: resolution.kind === 'choose'
+          ? '检测到多个生成器：先到「设置 · 项目 · 生成器」选一个'
+          : '未检测到生成器：到「设置 · 项目 · 生成器」配置一条',
+      };
+    }
+    command = resolution.command;
+  }
+
+  // 未填的占位符（`ollama run <模型名>`）绝不能交给 shell：那是重定向，失败原因会
+  // 与生成毫无关系。在这里说清楚要填什么。
+  const placeholder = placeholderIn(command);
+  if (placeholder !== null) {
+    return { ok: false, error: `生成命令里还有占位符 ${placeholder}，先在设置里把它填上` };
+  }
+  if (!commandReady(command)) {
+    return { ok: false, error: '生成命令是空的：到「设置 · 项目 · 生成器」配置一条' };
+  }
+
+  const { line, stdin } = commandFor(command, pack);
+  const raw = await runRaw(line, {
+    cwd: opts.cwd,
+    timeoutMs: opts.timeoutMs,
+    stdin: stdin ? pack : null,
+  });
+
+  if (raw.timedOut) {
+    return {
+      ok: false,
+      error: `生成超时（${Math.round(opts.timeoutMs / 1000)} 秒）——命令没有在时限内结束，已终止`,
+    };
+  }
+  if (!raw.ok) return { ok: false, error: failureText(raw) };
+
+  // 没有产物路径可比对（调用方自己管文件）：退出 0 就是成功。
+  if (opts.file === undefined) return { ok: true, url };
+
+  const after = await mtimeOf(opts.file);
+  const before = opts.before ?? null;
+  const fresh = after !== null && (before === null || after !== before);
+
+  // 文件模式：命令自己写出来了，而且确实是这一次写的（mtime 变了）。
+  if (fresh) return { ok: true, url };
+
+  // stdout 模式：命令没写文件，但把文档打在 stdout 里——这一层替它落盘。
+  // 这一条是 `ollama run x` 这类纯管道生成器唯一的活路。
+  const html = htmlDocumentIn(raw.out);
+  if (html !== null) {
+    try {
+      await mkdir(path.dirname(opts.file), { recursive: true });
+      await writeFile(opts.file, html, 'utf8');
+    } catch (error) {
+      return {
+        ok: false,
+        error: `命令把 HTML 打到了 stdout，但写不进产物文件：${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    return { ok: true, url };
+  }
+
+  return {
+    ok: false,
+    error: after === null
+      ? `生成命令已结束，但产物文件不存在：data${url}`
+      : `生成命令已结束，但产物文件没有更新：data${url}`,
+  };
+}
+
+// ─── 设置页那 10 秒小测 ──────────────────────────────────────────────────────
+
+/**
+ * 测试用的固定小包。
+ *
+ * 它**不是**任务包：没有 PAN 编号、没有产物路径，也不许携带任何需求内容。它只问
+ * 一件事——这条命令会不会真的跑出一份 HTML。所以它写得极小、极具体，任何合格的
+ * 生成器（agent CLI 或本地模型）都能完成，也不会因为「它不知道 UEmaster 是什么」
+ * 而失败。
+ */
+export const TEST_PACK = '生成一个 HTML 文档，<title>flowers</title>，正文一行 hello';
+
+/** 小测的硬超时：10 秒。等得起，又短到在一行里能说清「它没动」。 */
+export const TEST_TIMEOUT_MS = 10_000;
+
+export type TestResult =
+  | { ok: true; size: number; ms: number; mode: 'file' | 'stdout' }
+  | { ok: false; error: string; ms: number };
+
+/** 临时目录里任何一份 HTML（命令写文件的情况）。最多看两层，够用又不扫全盘。 */
+async function firstHtml(dir: string, depth = 2): Promise<string | null> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isFile() && /\.html?$/i.test(entry.name)) return full;
+  }
+  if (depth <= 1) return null;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = await firstHtml(path.join(dir, entry.name), depth - 1);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * 就地测一条命令：真跑一次，10 秒，看它到底交不交得出 HTML。
+ *
+ * 这是全仓库**唯一**能回答「它能不能用」的地方。`--version` 不行（装了就有版本），
+ * `login status` 不行（本机的 codex 在这一步说了谎），PATH 不行（只说明装了）。
+ * 所以设置页的「测试」不是装饰：它与真生成走同一条 `commandFor` + `runRaw`，
+ * 两种交法（写文件 / stdout）都认，成功时报出产物大小与耗时，失败时把 stderr
+ * 原文照登。
+ *
+ * 跑在系统临时目录里：一次小测不该在仓库里留下任何文件，也不该被仓库里的旧产物
+ * 骗成「通过」。
+ */
+export async function testGenerator(
+  command: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<TestResult> {
+  const timeoutMs = opts.timeoutMs ?? TEST_TIMEOUT_MS;
+
+  const placeholder = placeholderIn(command);
+  if (placeholder !== null) {
+    return { ok: false, error: `命令里还有占位符 ${placeholder}，先填上再测`, ms: 0 };
+  }
+  if (!commandReady(command)) {
+    return { ok: false, error: '命令是空的', ms: 0 };
+  }
+
+  let dir: string;
+  try {
+    dir = await mkdtemp(path.join(tmpdir(), 'flowers-gen-'));
+  } catch (error) {
+    return { ok: false, error: `建不了临时目录：${error instanceof Error ? error.message : String(error)}`, ms: 0 };
+  }
+
+  const { line, stdin } = commandFor(command, TEST_PACK);
+  try {
+    // 永远跑在临时目录里：小测不该在仓库里留下文件，也不该被仓库里的旧产物骗成「通过」。
+    const raw = await runRaw(line, { cwd: dir, timeoutMs, stdin: stdin ? TEST_PACK : null });
+    if (raw.timedOut) {
+      return { ok: false, error: `超时（${Math.round(timeoutMs / 1000)} 秒）没有结束`, ms: raw.ms };
+    }
+    if (!raw.ok) return { ok: false, error: failureText(raw), ms: raw.ms };
+
+    const file = await firstHtml(dir);
+    if (file !== null) {
+      const size = (await stat(file)).size;
+      return { ok: true, size, ms: raw.ms, mode: 'file' };
+    }
+    const html = htmlDocumentIn(raw.out);
+    if (html !== null) {
+      return { ok: true, size: Buffer.byteLength(html, 'utf8'), ms: raw.ms, mode: 'stdout' };
+    }
+    return {
+      ok: false,
+      error: reasonOf(raw.err) || '命令退出 0，但没有写出 HTML，stdout 里也没有',
+      ms: raw.ms,
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }

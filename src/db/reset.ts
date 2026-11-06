@@ -4,7 +4,7 @@ import { db } from './client.js';
 /**
  * 库里允许被重置的那张库。
  *
- * `resetDb` 是 truncate 五张表、`restart identity cascade` —— 对生产库就是一个瞬间的
+ * `resetDb` 是 truncate 六张表、`restart identity cascade` —— 对生产库就是一个瞬间的
  * 空库。用例天天调它是安全的（跑的就是这张 flowers），但脚本不是：`scripts/demo.ts`
  * 尊重 `DATABASE_URL`，有人把它指到线上库跑一次冒烟，数据就没了。
  */
@@ -54,5 +54,5 @@ export async function resetDb() {
   // 原子性用例会建这个触发器；进程被 kill 时它会留在库里，而 truncate 清不掉
   // 触发器，之后每个写事件的用例都会撞 'boom'。先 drop 再 truncate。
   await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
-  await db.execute(sql`truncate requirements, review_assignments, events, releases, members restart identity cascade`);
+  await db.execute(sql`truncate requirements, review_assignments, events, releases, members, app_settings restart identity cascade`);
 }

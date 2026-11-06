@@ -296,3 +296,26 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
   /* 动作表单（sheet）里的 480px 定宽在 390 宽下同样会捅出去：抽屉里的每个动作都从这里开。 */
   .sheet .box{width:min(480px,calc(100vw - 32px))}
 }
+
+/* ── 生成器选择器（P2.7） ─────────────────────────────────────────────
+   一行一个候选：名字与按钮一行，命令在下面单独一行。命令要走等宽字（`--f-mono`）：
+   它是 shell 的一行，`--`、`{}`、`<模型名>` 这些字符在比例字里会和数字混淆。
+   同一份标记出现在两个容器里（抽屉的 .sheet、设置页的那一节），所以样式放在共享表里，
+   不跟着某一页走。类名一律 `gen-` 前缀——共享表里已经有 `.grow`（看板的一行）与
+   `.pill` 这些通用名，撞一次就会把别人的 height/display 一起继承过来。 */
+.gen-pick{display:block}
+.gen-opt{padding:10px 0;border-top:1px solid var(--c-line)}
+.gen-opt:first-child{border-top:0;padding-top:0}
+.gen-head{display:flex;align-items:center;gap:8px}
+.gen-name{font:500 var(--t-body-s) var(--f-sans);color:var(--c-text-1)}
+.gen-use{margin-left:auto}
+.gen-input{display:block;width:100%;margin-top:6px;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 10px;font:400 var(--t-caption) var(--f-mono);background:var(--c-surface);color:var(--c-text-1)}
+.gen-input:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+.gen-err{margin-top:10px;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);overflow-wrap:anywhere}
+.gen-foot{display:flex;justify-content:flex-end;padding-top:12px}
+/* 一条都没有时：理由与禁用按钮排在同一行，理由在前（与「生成失败：…」同一个位置）。 */
+.gen-off{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.gen-link{color:var(--c-accent);text-decoration:none}
+.gen-link:hover{text-decoration:underline}
+/* 选择器页脚：清除在左、取消在右（清除是一次「回到自动」，与取消同属退出，但方向不同）。 */
+.gen-foot .gen-clear{margin-right:auto}

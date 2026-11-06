@@ -149,6 +149,25 @@ claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
 没有 PRD 的需求：评估照做（推断处标「PRD 未提供」），评审与走查的包会直接让你停下并把
 「缺少 PRD 链接」回报给用户——这两份材料的输入就是 PRD，没有它做出来的东西是编的。
 
+## 这与抽屉里那个「生成」不是同一条路
+
+MCP 那条路是**别的 agent** 干（你把包给它）；抽屉里那个「生成」是 Flowers 自己跑本机的一条
+命令。可选的生成器有五个，`src/core/uemaster/candidates.ts` 里是一张固定的表：
+
+| id | 显示名 | 命令 | 任务包怎么进去 |
+| --- | --- | --- | --- |
+| `claude` | Claude Code | `claude -p --permission-mode acceptEdits` | stdin |
+| `codex` | Codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | stdin |
+| `dsh` | DeepSeek Harness | `dsh headless {prompt}` | `{prompt}` 那个 argv 位 |
+| `ollama` | Ollama | `ollama run <模型名>` | stdin（先填模型名） |
+| `custom` | 自建 / 自定义 | 自己写 | 两种都行 |
+
+两条契约：模板里有 `{prompt}` 就把包作为 argv 的一个元素传，没有就写 stdin；退出 0 之后
+先看产物文件是否新鲜，文件没动而 stdout 里有 HTML 就由 Flowers 落盘，两者都没有才算失败。
+**装了 ≠ 能用**：PATH 只决定列不列出来，`login status` 甚至会撒谎（本机 codex 说已登录、
+`exec` 却 401），所以设置页有一行「生成器 / 测试」——真跑一次才算通过，那是唯一的真相。
+README 的「生成器：装了 ≠ 能用」一节是同一份口径。
+
 ## 失败长什么样
 
 所有失败都是 MCP 的**工具错误**（`isError: true` + 一句中文），不是进程崩溃，也不会被吞成成功：

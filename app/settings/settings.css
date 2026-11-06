@@ -38,3 +38,15 @@
    十行里「01」与「10」同宽，数字列不会一抖一抖。 */
 .sg .wf{margin:0;padding:0;list-style:none}
 .sg .wf .n{flex:0 0 2.5ch;font:400 var(--t-caption) var(--f-num);color:var(--c-text-4)}
+
+/* 生成器那一行（P2.7）。行本身就是 .i 的形状（标签 → 值），这里只补三处：
+   1. 命令是一行 shell，用等宽字并允许在任意处断行（长命令在 880 宽的卡片里会顶出去）；
+   2. 右边有 pill + 两个按钮，要一个不换行塌陷的 flex 组；
+   3. 测试结果单独一行（stderr 可能是长长一段），成功中性色、失败负向色。 */
+.gen-row .l{flex:1 1 auto}
+.gen-row .gen-cmd{font:400 var(--t-body-s) var(--f-mono);overflow-wrap:anywhere}
+.gen-actions{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.gen-detail{padding-top:0}
+.gen-msg{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-3);overflow-wrap:anywhere;white-space:pre-wrap}
+.gen-msg.bad{color:var(--c-negative)}
+.gen-edit{padding:12px 16px;border-top:1px solid var(--c-line);background:var(--c-surface-2)}
