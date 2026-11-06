@@ -8,7 +8,7 @@ import { Drawer } from './components/Drawer';
  * 需求看板 + 抽屉。
  *
  * 数据一律走读模型（server component 直连 `src/core/read`，不经过 HTTP）：
- * `getBoard()` 不给 `me`，让它自己去 cookie 取当前成员——顶栏的成员切换与卡片的
+ * `getBoard()` 不给 `me`，让它自己去 cookie 取当前成员——左轨底部的身份块与卡片的
  * 「需要你动」必须来自同一个 cookie、同一个解码函数，页面这里再传一次只会多一处可能分叉。
  *
  * `?open=<id>` 是抽屉的开合状态，所以它也必须走同一个读模型：抽屉里六段与动作条

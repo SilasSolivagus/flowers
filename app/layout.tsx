@@ -3,10 +3,12 @@ import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 
 import { currentMember, listMembers } from '../src/core/read/member';
-import { MemberSwitch } from './components/MemberSwitch';
+import { PageTitle } from './components/PageTitle';
 import { RAIL_COOKIE, railFromCookie } from './components/rail-pref';
+import { RailFooter } from './components/RailFooter';
 import { RailNav } from './components/RailNav';
 import { RailToggle } from './components/RailToggle';
+import { roleLabel } from './settings/roles';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -17,7 +19,13 @@ export const metadata: Metadata = {
 export default async function RootLayout({ children }: { children: ReactNode }) {
   // D2：身份就是一个 cookie，没有登录。名册与当前成员都从读模型来（一个来源），
   // 布局不再自己解码 cookie——解码规则只该写在 src/core/read/member.ts 里一份。
+  //
+  // 身份**只读**：界面没有任何一处写 `flowers_actor`（曾经的顶栏下拉框已删）。SSO 之前
+  // 它就是配置，名册里查得到谁就是谁；查不到（cookie 里是个离职的人、或者库里还没 seed）
+  // 时角色留空，不猜一个角色给屏上。
   const [members, actor] = await Promise.all([listMembers(), currentMember()]);
+  const self = members.find((member) => member.name === actor) ?? null;
+  const role = self === null ? '' : roleLabel(self.role);
 
   // 左轨的宽度也是 cookie，但解码只写在 rail-pref.ts 一份。放在 `<html>` 上而不是
   // `.shell` 上：CSS 的折叠档要从根元素切（`html[data-rail="collapsed"] .shell`），
@@ -40,11 +48,15 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             <div className="sub">123云盘 · 产品研发</div>
             <RailToggle initial={rail} />
             <RailNav />
+            {/* 占位：把「设置 + 身份」压到左轨底部（`.rail .sp{flex:1}`）。
+                导航在上面、配置与身份在下面，这是线稿的顺序。 */}
+            <span className="sp" aria-hidden="true" />
+            <RailFooter name={actor} role={role} />
           </nav>
           <div className="main">
+            {/* 顶栏只放当前页的标题（需求 / 版本 / 设置）。字由路径推出来，见 PageTitle。 */}
             <header className="topbar">
-              <span className="sp" />
-              <MemberSwitch current={actor} members={members.map((m) => m.name)} />
+              <PageTitle />
             </header>
             {children}
           </div>

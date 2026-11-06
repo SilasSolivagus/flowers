@@ -28,18 +28,34 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 /* 原 .brand b / .brand span —— markup 用 h1 + .sub。
    `.abbr`（收起态的首字母）平时不显示，只在左轨窄到 100px 以下时顶上来。 */
 .rail h1{margin:0;padding:0 16px;display:flex;align-items:center;gap:4px;font:600 var(--t-section) var(--f-sans);letter-spacing:.02em}
-.rail h1 .abbr,.rail > a .abbr{display:none}
+.rail h1 .abbr,.rail a .abbr,.rail .me .abbr{display:none}
 .rail .sub{margin-top:4px;padding:0 16px 12px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
-/* 折叠开关。长相与 .rail > a 同一套（同一档高度、同一档 hover、同一档焦点环），
+/* 折叠开关。长相与 .rail a 同一套（同一档高度、同一档 hover、同一档焦点环），
    因为它就是左轨里的一行控件；位置在品牌下面、导航上面。 */
 .railtoggle{display:flex;align-items:center;height:var(--h-control);margin:0 8px 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
 .railtoggle:hover{background:var(--c-surface-2)}
 .railtoggle:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 原 .nav / .nav button —— markup 用裸 <a> */
-.rail > a{display:flex;align-items:center;justify-content:space-between;height:var(--h-row);margin:0 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-body) var(--f-sans);color:var(--c-text-2);text-decoration:none}
-.rail > a:hover{background:var(--c-surface-2)}
-.rail > a[aria-current="true"]{background:var(--c-accent-weak);color:var(--c-accent);font-weight:600}
+.rail a{display:flex;align-items:center;justify-content:space-between;height:var(--h-row);margin:0 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-body) var(--f-sans);color:var(--c-text-2);text-decoration:none}
+.rail a:hover{background:var(--c-surface-2)}
+.rail a[aria-current="true"]{background:var(--c-accent-weak);color:var(--c-accent);font-weight:600}
 .rail .sp{flex:1}
+
+/* 左轨底部：设置（.railset）+ 身份块（.me）。两者都是 `.rail a` 的亲戚，
+   设置直接复用导航那条规则，只是多一个 `railset` 类方便将来单独调。 */
+/* 身份块。形状逐字取自线稿 ~/Flower/docs/ux/gate-console/views.css 的 `.me`：
+   `margin:0 8px; padding:12px 8px 0; border-top:1px solid var(--c-line)`。
+   那条 hairline 就是「设置」与身份之间的分隔线——身份块在上面、设置紧贴着它上方，
+   这正是线稿里「配置与身份是同一组」的那个分组。
+   这一块**没有任何控件**：身份是配置（见 app/components/RailFooter.tsx），
+   屏上只有姓名与角色两行，没有「当前成员」这种标签。 */
+.me{margin:0 8px;padding:12px 8px 0;border-top:1px solid var(--c-line)}
+.me b{display:block;font:600 var(--t-body) var(--f-sans);color:var(--c-text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 角色：比姓名小一档、比正文浅一档（线稿的「更安静的第二行」）。 */
+.me .r{margin-top:4px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 设置与身份之间只差一条 hairline，所以两者之间不留额外间距：
+   设置的行高（--h-row）自己就是间距。 */
 
 /* 收起态。判据是**宽度**，不是 cookie 的值：`html[data-rail="collapsed"]` 与手机上
    的默认（auto）都会把左轨压到 56px，这里只写一次就够。56px 的左轨在每个字上
@@ -48,27 +64,30 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
    可访问名字不靠这里的字——`<a>` 与 `<h1>` 上的 title/aria-label 带的是完整标签。 */
 @container (max-width:100px){
   .rail h1{padding:0;justify-content:center}
-  .rail h1 .lbl,.rail > a .lbl{display:none}
-  .rail h1 .abbr,.rail > a .abbr{display:inline}
+  .rail h1 .lbl,.rail a .lbl{display:none}
+  .rail h1 .abbr,.rail a .abbr{display:inline}
   .rail .sub{display:none}
-  .rail > a{justify-content:center;padding:0}
+  .rail a{justify-content:center;padding:0}
   .railtoggle{justify-content:center;padding:0}
+  /* 身份块（收起态）：姓名只剩首字、居中，角色行整行收起。
+     56px 的左轨里可用宽度是 40px（margin 8×2）——「商业线」三个字放不下，
+     半截角色名比没有更糟，所以它整行不出现；`.me .r` 仍在 DOM 里（将来接 SSO 时
+     改成可用信息也不用改结构），只是不占位。
+     全名用「视觉隐藏」而不是 display:none：display:none 会把可访问名字一起删掉，
+     读屏与悬停的 title 都要的是「吕品」，不是「吕」。 */
+  .rail .me{margin:0 8px;padding:10px 0 0;text-align:center}
+  .rail .me b{display:flex;justify-content:center}
+  .rail .me .abbr{display:inline}
+  .rail .me .lbl{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+  .rail .me .r{display:none}
 }
 
 
 .main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .topbar{height:var(--h-topbar);flex:0 0 var(--h-topbar);display:flex;align-items:center;gap:12px;padding:0 24px;background:var(--c-surface);border-bottom:1px solid var(--c-line)}
 .topbar h1{margin:0;font:600 var(--t-title-2) var(--f-sans)}
-.topbar .sp{margin-left:auto}
 .view{flex:1;min-height:0;overflow:auto;background:var(--c-bg)}
 .view.pad{padding:16px 24px 32px}
-
-/* 顶栏成员切换（新增，视图 CSS 里没有对应件；只用 tokens）。margin-left:auto 让它靠右 */
-.member{margin-left:auto;display:inline-flex;align-items:center;gap:8px;height:var(--h-control);padding:0 4px 0 10px;border:1px solid var(--c-line-strong);border-radius:var(--r-xs);background:var(--c-surface)}
-.member .lbl{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
-.member select{height:calc(var(--h-control) - 2px);border:0;background:transparent;color:var(--c-text-1);font:500 var(--t-body-s) var(--f-sans);padding:0 4px;cursor:pointer;outline:none}
-.member select:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px;border-radius:var(--r-xs)}
-.member .dot{width:6px;height:6px;border-radius:var(--r-pill);background:var(--c-accent)}
 
 /* ── 按钮 ──────────────────────────────────────────── */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:var(--h-control);padding:0 16px;border-radius:var(--r-xs);font:500 var(--t-body-s) var(--f-sans);border:1px solid var(--c-line-strong);background:var(--c-surface);white-space:nowrap;transition:background var(--d-fast) var(--e-standard)}
@@ -120,7 +139,7 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
       transition:background var(--d-fast) var(--e-standard),border-color var(--d-fast) var(--e-standard)}
 .card:hover{background:color-mix(in srgb, var(--c-text-1) 1.5%, var(--c-surface))}
 /* 新增：卡片本身是一个链接（抽屉的入口），所以要把 <a> 的默认蓝字下划线摘掉，
-   并给它一个只在键盘聚焦时出现的焦点环（鼠标点击不出现，与 .member select 一致）。 */
+   并给它一个只在键盘聚焦时出现的焦点环（鼠标点击不出现，与左轨的链接一致）。 */
 a.card{color:inherit;text-decoration:none}
 a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 标题将来来自 PRD 提交，可能是一个没有空格的 URL / 英文 slug。`.colbody` 是 overflow-y:auto
@@ -203,7 +222,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 新增：同一句话在 sheet 里再显示一遍（失败的表单不关，原因就在眼前）。
    sheet 的左右内边距是 20px，且 header 已经有下边框，所以去掉这条上边框。 */
 .sheet .dfail{border-top:0;padding:10px 20px}
-/* 新增：抽屉表单里的控件焦点环，与顶栏的 .member select 同一套（UA 默认的蓝色焦点环不属这套 tokens） */
+/* 新增：抽屉表单里的控件焦点环，与左轨链接同一套（UA 默认的蓝色焦点环不属这套 tokens） */
 .fld input:focus-visible,.fld select:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
 
 /* ── sheet ─────────────────────────────────────────── */
@@ -250,8 +269,8 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
  *    而看板可用宽度约 390 − 56 − 24 = 310px——**一列完整 + 下一列露一角**。
  *    那一角就是「这里能横着滑」唯一的提示，不需要任何一行说明文字。
  * 3. 抽屉整屏（100vw）：屏幕只有 390，520px 的抽屉会横着捅出去。
- * 4. 顶栏与看板的左右内边距从 24px 收到 12px：390 宽下 48px 的白边是奢侈品，
- *    而顶栏的成员切换必须留在屏内（`nothing clips`）。 */
+ * 4. 顶栏与看板的左右内边距从 24px 收到 12px：390 宽下 48px 的白边是奢侈品。
+ *    顶栏现在只有一行页面标题，没有别的控件要在 390 宽里排队。 */
 @media (max-width:767px){
   .shell{--rail-w:56px}
   html[data-rail="open"] .shell{--rail-w:184px}
