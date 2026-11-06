@@ -32,7 +32,7 @@
  * 两个模型、三次重复拿到的是**同一份**提示词：漂移才可比。第一段全灭时第二段跳过
  * 并写明原因——拿一条没通过校验的结论去拼复核提示词，只会测到我们自己的错。
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
@@ -185,6 +185,12 @@ type Cell = {
   replyChars: number;
   excerpt: string;
   ms: number;
+  /** 发了几次（>1 = 传输层抖动重试过）。 */
+  attempts: number;
+  /** 这一格最后用的 max_tokens。 */
+  maxTokens: number;
+  /** 思考吃光预算时抬过预算：从多少到多少、模型思考了多少字。 */
+  budgetBump: { from: number; to: number; reasoningChars: number } | null;
   usage: { prompt: number; completion: number } | null;
   /** 接口层的失败原文（超时、4xx…）。有它就没有 replyChars。 */
   error: string | null;
@@ -265,9 +271,12 @@ function scanFindings(container: Record<string, unknown>, at: string, out: Drift
     if (typeof verdict !== 'string') {
       out.push({ key: 'finding.verdict-not-string', label: '`verdict` 不是字符串', expect: '四选一枚举', snippet: snippetOf(verdict) });
     } else if (!VERDICT_VALUES.includes(verdict.trim().toLowerCase())) {
+      // 键里带**具体写法的第一个词**：`implemented/一致` 与 `partial/部分实现` 是两条
+      // 不同的漂移（前者是同一个判断的别名，后者是模型造了第五类），分类表要分得开。
+      const alias = verdict.trim().split(/[/|｜、,，;；\s（()）]+/)[0] ?? verdict.trim();
       out.push({
-        key: 'finding.verdict-alias',
-        label: `\`verdict\` 写了别名/整句：${JSON.stringify(verdict)}`,
+        key: `finding.verdict-alias:${alias}`,
+        label: `\`verdict\` 写了枚举之外的值：${JSON.stringify(verdict)}`,
         expect: 'implemented / missing / extra / differs 之一',
         snippet: snippetOf({ verdict, prd: item.prd }),
       });
@@ -290,9 +299,47 @@ function scanFindings(container: Record<string, unknown>, at: string, out: Drift
         expect: '`evidence: [{repo,path,note}]`',
         snippet: snippetOf(evidence),
       });
+      // evidence 整个是一**个**字符串（不是数组）：与数组里那些字符串同一套分类，
+      // 只是少了一层数组，所以这里的判断不能少——否则「repo:path 字符串」这条
+      // 最常出现的漂移会在报告里显示成「没触发过」。
+      if (typeof evidence === 'string') {
+        out.push({
+          key: /^[A-Za-z0-9_.-]+:/.test(evidence.trim()) ? 'evidence.string-with-repo-prefix' : 'evidence.string-bare-path',
+          label: /^[A-Za-z0-9_.-]+:/.test(evidence.trim())
+            ? '`evidence` 是一整条 `"repo:path"` 字符串（不是数组）'
+            : '`evidence` 是一整条裸路径字符串（不是数组）',
+          expect: '`evidence: [{repo, path, note}]`',
+          snippet: snippetOf(evidence),
+        });
+      }
+      // 一条字符串里用「、」拼了**多个** `repo:path`（实测 31/72 条）：扶正成对象之后
+      // 整段会被当成一个路径，于是报「证据路径不存在」——形状过了，事实没过。
+      if (typeof evidence === 'string') {
+        const joined = evidence.split(/[、,，;；]/).filter((part) => /^[A-Za-z0-9_.-]+:/.test(part.trim()));
+        if (joined.length > 1) {
+          out.push({
+            key: 'evidence.string-multiple-paths',
+            label: `\`evidence\` 一条字符串里用「、」拼了 ${String(joined.length)} 个 \`repo:path\``,
+            expect: '一个文件一条 evidence（扶正时按「、」拆开）',
+            snippet: snippetOf(evidence),
+          });
+        }
+      }
     } else {
       evidence.forEach((raw) => {
         if (typeof raw === 'string') {
+          // 一条字符串里用「、」拼了**多个** `repo:path`（实测 31/72 条）：扶正成对象之后，
+          // 整段会被当成一个路径，于是「证据不存在」。它比「少一层数组」更贵——形状对了，
+          // 事实却过不了 lsTree。
+          const joined = raw.split(/[、,，;；]/).filter((part) => /^[A-Za-z0-9_.-]+:/.test(part.trim()));
+          if (joined.length > 1) {
+            out.push({
+              key: 'evidence.string-multiple-paths',
+              label: `\`evidence\` 一条字符串里用「、」拼了 ${String(joined.length)} 个 \`repo:path\``,
+              expect: '一个文件一条 evidence（或扶正时按「、」拆开）',
+              snippet: snippetOf(raw),
+            });
+          }
           out.push({
             key: /^[A-Za-z0-9_.-]+:/.test(raw.trim()) ? 'evidence.string-with-repo-prefix' : 'evidence.string-bare-path',
             label: /^[A-Za-z0-9_.-]+:/.test(raw.trim())
@@ -530,6 +577,17 @@ function scanFlowText(text: string): Drift[] {
   if (shape.edges < 2) {
     out.push({ key: 'flow.too-few-edges', label: `只解析出 ${shape.edges} 条连线`, expect: '至少 2 条连线', snippet: snippetOf(mermaid).slice(0, 120) });
   }
+  // 一行里串了多段连线（`A --> B --> C`）：形状判据数得对（连线数没少），但 vendored
+  // 排版器只认「单主干 + 右分支 + 回线」，实测直接拒（`节点 F,G,H 不符合…适用形态`）。
+  const chained = mermaid.split('\n').find((line) => (line.match(/-->/g) ?? []).length >= 2);
+  if (chained !== undefined) {
+    out.push({
+      key: 'flow.chained-edges',
+      label: '一行里串了多段连线（`A --> B --> C`）',
+      expect: '一条连线一行；分叉从判断节点单独出发',
+      snippet: snippetOf(chained.trim()),
+    });
+  }
   const nonAsciiId = shape.nodes.find((node) => !/^[A-Za-z0-9_]+$/.test(node.id));
   if (nonAsciiId !== undefined) {
     out.push({ key: 'flow.non-ascii-id', label: `节点 id「${nonAsciiId.id}」不是字母数字`, expect: 'A、B、C…', snippet: snippetOf(nonAsciiId.id) });
@@ -620,8 +678,43 @@ async function deepRead(findings: Finding[]): Promise<Excerpt[]> {
 type CallResult = {
   reply: ProviderResult;
   ms: number;
+  /** 实际发了几次。>1 说明撞上了传输层抖动，不是模型的问题。 */
+  attempts: number;
+  /** 每一次的原文错误（重试过才有意义）。 */
+  errors: string[];
+  /** 这一格最后用的是哪个预算（没上调过就是会话计划里的那个）。 */
+  maxTokens: number;
+  /** 预算被「思考吃光」过：原预算是多少、模型思考了多少字。 */
+  budgetBump: { from: number; to: number; reasoningChars: number } | null;
 };
 
+/**
+ * 「思考吃光了预算」这一句是 `provider.ts` 自己在 content 为空、reasoning_content
+ * 非空时说的。它**不是**模型的形状问题——模型根本没来得及写答案。
+ *
+ * 处理方式：把预算抬到四倍再问一次，并把「抬过」这件事记在格子上。这样语料里既有
+ * 「4k 不够」这条事实（`budgetBump`），又能拿到那份回话的形状（形状样本不丢）。
+ * 上限 65536：两个可用模型实测都接受（见文档的「成本」一节）。
+ */
+const BUDGET_CEILING = 65_536;
+
+function thinkingOnly(error: string): number | null {
+  const match = /思考 (\d+) 字、答案 0 字/.exec(error);
+  return match === null ? null : Number.parseInt(match[1] ?? '0', 10);
+}
+
+/** 传输层抖动 vs 模型的回答：前者重发一次，后者重发只会拿到同一个形状。 */
+function transient(error: string): boolean {
+  return /请求失败|请求超时|terminated|other side closed|socket|ECONNRESET|HTTP 5\d\d|HTTP 429|空内容/.test(error);
+}
+
+/**
+ * 发一次调用，抖动重试一次。
+ *
+ * 为什么要有重试：并发下网关会偶发 `terminated（other side closed）`（实测一次
+ * evaluate/pages），把它记成「模型失败」是错的——那一格什么都证明不了，白占一个
+ * 样本。重试只对**传输层**开，形状类问题（JSON 不对）一次就是一次。
+ */
 async function callModel(
   cfg: ProviderConfig,
   model: string,
@@ -630,8 +723,27 @@ async function callModel(
   timeoutMs: number,
 ): Promise<CallResult> {
   const started = Date.now();
-  const reply = await complete({ ...cfg, model }, prompt, { maxTokens: BUDGET[phase], timeoutMs });
-  return { reply, ms: Date.now() - started };
+  const errors: string[] = [];
+  let maxTokens = BUDGET[phase];
+  let budgetBump: CallResult['budgetBump'] = null;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const reply = await complete({ ...cfg, model }, prompt, { maxTokens, timeoutMs });
+    if (reply.ok) return { reply, ms: Date.now() - started, attempts: attempt, errors, maxTokens, budgetBump };
+
+    errors.push(reply.error);
+    const reasoned = thinkingOnly(reply.error);
+    if (reasoned !== null && budgetBump === null) {
+      const bumped = Math.min(maxTokens * 4, BUDGET_CEILING);
+      budgetBump = { from: maxTokens, to: bumped, reasoningChars: reasoned };
+      process.stderr.write(`[budget] ${model} ${phase}：思考 ${String(reasoned)} 字吃光 ${String(maxTokens)}，抬到 ${String(bumped)}\n`);
+      maxTokens = bumped;
+      continue;
+    }
+    if (!transient(reply.error)) return { reply, ms: Date.now() - started, attempts: attempt, errors, maxTokens, budgetBump };
+    if (attempt >= 3) return { reply, ms: Date.now() - started, attempts: attempt, errors, maxTokens, budgetBump };
+    process.stderr.write(`[retry] ${model} ${phase}：${reply.error}\n`);
+  }
+  throw new Error('不可达');
 }
 
 /** 写一条原始回话。**先落盘再解析**：批次断了，语料还在。 */
@@ -668,7 +780,64 @@ function limiter(max: number): <T>(task: () => Promise<T>) => Promise<T> {
 
 type CellKey = { model: string; stage: Stage; requirement: number; rep: number };
 
+/**
+ * 只重出报告：`--report-only <语料目录>`。
+ *
+ * 为什么要有：报告是一份**渲染**，语料是事实。改了表格分组、想按新口径重排，
+ * 不该再花一轮调用。语料目录里只要有 report.json 就能重出 report.md。
+ */
+function rerender(dir: string): void {
+  const data = JSON.parse(readFileSync(path.join(dir, 'report.json'), 'utf8')) as Report;
+  const refreshed: Report = { ...data, ...derive(data.meta.plan, data.cells) };
+  writeFileSync(path.join(dir, 'report.json'), JSON.stringify(refreshed, null, 1), 'utf8');
+  writeFileSync(path.join(dir, 'report.md'), reportMarkdown(refreshed), 'utf8');
+  process.stdout.write(`${path.join(dir, 'report.md')}\n`);
+}
+
+/**
+ * 用**当前的扫描器**重算已有语料的 `drift`（`--rescan <语料目录>`）。
+ *
+ * 为什么要：扫描器本身会演进（这一批跑完才发现「一条字符串拼多个路径」「截断」
+ * 这两种形状要单列）。语料是事实、扫描器是透镜——换透镜不该再花一轮调用。
+ * 回话原文在 `raw/` 里，重扫只读本地文件。
+ */
+function rescan(dir: string): void {
+  const data = JSON.parse(readFileSync(path.join(dir, 'report.json'), 'utf8')) as Report;
+  for (const cell of data.cells) {
+    if (cell.skipped !== null || cell.replyChars === 0) continue;
+    const name = `${safeName(cell.model)}-${cell.stage}-${String(cell.requirement)}-${String(cell.rep)}-${cell.phase}`;
+    let text = '';
+    try {
+      const raw = JSON.parse(readFileSync(path.join(dir, 'raw', `${name}.json`), 'utf8')) as { reply?: { text?: string } };
+      text = raw.reply?.text ?? '';
+    } catch {
+      continue;
+    }
+    if (text === '') continue;
+    if (cell.phase === 'flow') {
+      cell.drift = scanFlowText(text);
+    } else {
+      cell.drift = scanJson(extractJson<unknown>(text), cell.phase === 'structure' ? 'structure' : cell.phase === 'pages' ? 'pages' : 'verify');
+    }
+    cell.sig = sigOf(cell.drift);
+  }
+  const refreshed: Report = { ...data, ...derive(data.meta.plan, data.cells) };
+  writeFileSync(path.join(dir, 'report.json'), JSON.stringify(refreshed, null, 1), 'utf8');
+  writeFileSync(path.join(dir, 'report.md'), reportMarkdown(refreshed), 'utf8');
+  process.stdout.write(`${path.join(dir, 'report.md')}\n`);
+}
+
 async function main(): Promise<void> {
+  const rescanned = argOf(process.argv.slice(2), 'rescan');
+  if (rescanned !== null) {
+    rescan(rescanned);
+    return;
+  }
+  const only = argOf(process.argv.slice(2), 'report-only');
+  if (only !== null) {
+    rerender(only);
+    return;
+  }
   const plan = parsePlan(process.argv.slice(2));
   const cfg = await resolveProviderConfig();
   if (cfg === null) {
@@ -820,9 +989,12 @@ async function callAndRead(
 ): Promise<void> {
   const cell = state.cell;
   const name = `${safeName(model)}-${stage}-${String(row.number)}-${String(rep)}-${phase}`;
-  const { reply, ms } = await callModel(cfg, model, prompt, phase, plan.timeoutMs);
-  writeRaw(dir, name, { model, stage, phase, requirement: row.number, rep, prompt, reply, ms, at: new Date().toISOString() });
+  const { reply, ms, attempts, errors, maxTokens, budgetBump } = await callModel(cfg, model, prompt, phase, plan.timeoutMs);
+  writeRaw(dir, name, { model, stage, phase, requirement: row.number, rep, prompt, reply, ms, attempts, errors, maxTokens, budgetBump, at: new Date().toISOString() });
   cell.ms = ms;
+  cell.attempts = attempts;
+  cell.maxTokens = maxTokens;
+  cell.budgetBump = budgetBump;
   cell.at = new Date().toISOString();
   if (!reply.ok) {
     cell.error = reply.error;
@@ -853,9 +1025,12 @@ async function callSecond(
   ref: { refNodes: FlowNode[]; refSvg: string; refDoc: Structure | null; trees: TreeIndex | undefined },
 ): Promise<void> {
   const name = `${safeName(model)}-${stage}-${String(row.number)}-${String(rep)}-${phase}`;
-  const { reply, ms } = await callModel(cfg, model, prompt, phase, plan.timeoutMs);
-  writeRaw(dir, name, { model, stage, phase, requirement: row.number, rep, prompt, reply, ms, at: new Date().toISOString() });
+  const { reply, ms, attempts, errors, maxTokens, budgetBump } = await callModel(cfg, model, prompt, phase, plan.timeoutMs);
+  writeRaw(dir, name, { model, stage, phase, requirement: row.number, rep, prompt, reply, ms, attempts, errors, maxTokens, budgetBump, at: new Date().toISOString() });
   cell.ms = ms;
+  cell.attempts = attempts;
+  cell.maxTokens = maxTokens;
+  cell.budgetBump = budgetBump;
   cell.at = new Date().toISOString();
   if (!reply.ok) {
     cell.error = reply.error;
@@ -939,6 +1114,9 @@ function blankCell(key: CellKey, phase: Phase, promptChars: number): Cell {
     replyChars: 0,
     excerpt: '',
     ms: 0,
+    attempts: 0,
+    maxTokens: 0,
+    budgetBump: null,
     usage: null,
     error: null,
     skipped: null,
@@ -1104,16 +1282,43 @@ type Report = {
     rejected: number;
     providerError: number;
     skipped: number;
+    /** 回话为空、且原因是「思考吃光预算」的格数（含抬预算后救回来的）。 */
+    thinkingStarved: number;
+    /** 抬过预算的格数。 */
+    budgetBumped: number;
     tokens: { prompt: number; completion: number };
     perCell: Array<{ stage: Stage; phase: Phase; model: string; requirement: number; ok: number; total: number; skipped: number }>;
   };
   why: Array<{ stage: Stage; phase: Phase; why: string; count: number; models: string[]; excerpt: string }>;
-  taxonomy: Array<{ phase: Phase; key: string; label: string; expect: string; count: number; models: string[]; excerpt: string }>;
+  taxonomy: Array<{ stage: Stage; phase: Phase; key: string; label: string; expect: string; count: number; models: string[]; excerpt: string }>;
   unobserved: string[];
   cells: Cell[];
 };
 
-function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[], elapsedMs: number): Report {
+/**
+ * 从格子重新算一遍派生块（计数 / why / 分类表 / 未触发清单）。
+ *
+ * 为什么派生而**不把算好的结果存起来复用**：报告是一份渲染，语料是事实。`--report-only`
+ * 拿到的 `report.json` 可能是更早一版脚本写的（少了新加的列），从 `cells` 重算就永远
+ * 不会出现「表头多了 stage、行里是 undefined」这种半旧半新的报告。
+ */
+function derive(plan: Plan, cells: Cell[]): Pick<Report, 'counts' | 'why' | 'taxonomy' | 'unobserved'> {
+  // **截断**是这一层最容易漏的一条：JS 的「括号没闭合」和「模型写坏了」在报错上长得
+  // 一模一样（`extractJson` 甚至会在外层坏掉时退到内层那个能解析的 `{`，于是报
+  // 「nodes：Required」）。判据放在这里而不在扫描器里：它看的是**调用事实**
+  // （completion 顶到 max_tokens），不是回话文本。
+  for (const cell of cells) {
+    if (cell.usage === null || cell.maxTokens <= 0) continue;
+    if (cell.usage.completion < cell.maxTokens) continue;
+    cell.drift = [...cell.drift, {
+      key: 'reply.truncated',
+      label: '回话被输出预算截断（completion 顶到 max_tokens）',
+      expect: '回话完整闭合；或把这一段的 max_tokens 调大',
+      snippet: `completion=${String(cell.usage.completion)} / max_tokens=${String(cell.maxTokens)}`,
+    }];
+    cell.sig = sigOf(cell.drift);
+  }
+
   const called = cells.filter((cell) => cell.skipped === null && (cell.replyChars > 0 || cell.error !== null));
   const ok = called.filter((cell) => cell.ok);
   const providerError = called.filter((cell) => cell.error !== null);
@@ -1166,7 +1371,7 @@ function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[]
   const taxonomyMap = new Map<string, Group & { label: string; expect: string }>();
   for (const cell of cells) {
     for (const drift of cell.drift) {
-      const key = `${cell.phase}\u0000${drift.key}`;
+      const key = `${cell.stage}\u0000${cell.phase}\u0000${drift.key}`;
       const seen = taxonomyMap.get(key);
       if (seen === undefined) {
         taxonomyMap.set(key, { count: 1, excerpt: drift.snippet, models: new Set([cell.model]), label: drift.label, expect: drift.expect });
@@ -1178,8 +1383,9 @@ function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[]
   }
   const taxonomy = [...taxonomyMap.entries()]
     .map(([key, group]) => {
-      const [phase, driftKey] = key.split('\u0000');
+      const [stage, phase, driftKey] = key.split('\u0000');
       return {
+        stage: stage as Stage,
         phase: phase as Phase,
         key: driftKey ?? '',
         label: group.label,
@@ -1189,8 +1395,29 @@ function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[]
         excerpt: group.excerpt,
       };
     })
-    .sort((a, b) => a.phase.localeCompare(b.phase) || b.count - a.count);
+    .sort((a, b) => a.stage.localeCompare(b.stage) || a.phase.localeCompare(b.phase) || b.count - a.count);
 
+  return {
+    counts: {
+      cells: cells.length,
+      called: called.length,
+      ok: ok.length,
+      rejected: called.length - ok.length - providerError.length,
+      providerError: providerError.length,
+      skipped: cells.filter((cell) => cell.skipped !== null).length,
+      thinkingStarved: cells.filter((cell) => cell.budgetBump !== null || /思考/.test(cell.error ?? '')).length,
+      budgetBumped: cells.filter((cell) => cell.budgetBump !== null).length,
+      tokens,
+      perCell,
+    },
+    why,
+    taxonomy,
+    // 键里可能带值（`finding.verdict-alias:partial/部分实现`），所以按前缀比。
+    unobserved: KNOWN_DRIFTS.filter((known) => !taxonomy.some((row) => row.key === known || row.key.startsWith(`${known}:`))),
+  };
+}
+
+function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[], elapsedMs: number): Report {
   return {
     meta: {
       dir,
@@ -1202,19 +1429,7 @@ function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[]
       plan: { ...plan, outRoot: plan.outRoot },
       budget: BUDGET,
     },
-    counts: {
-      cells: cells.length,
-      called: called.length,
-      ok: ok.length,
-      rejected: called.length - ok.length - providerError.length,
-      providerError: providerError.length,
-      skipped: cells.filter((cell) => cell.skipped !== null).length,
-      tokens,
-      perCell,
-    },
-    why,
-    taxonomy,
-    unobserved: KNOWN_DRIFTS.filter((known) => !taxonomy.some((row) => row.key === known)).map((known) => known),
+    ...derive(plan, cells),
     cells,
   };
 }
@@ -1228,11 +1443,19 @@ function buildReport(plan: Plan, cfg: ProviderConfig, dir: string, cells: Cell[]
 const KNOWN_DRIFTS: string[] = [
   'evidence.string-with-repo-prefix',
   'evidence.object-other-keys',
+  'evidence.string-multiple-paths',
   'node.anno-flat',
+  'node.anno-object-rows',
   'node.frame-alias',
+  'node.kind-alias',
+  'node.page-no-html',
   'finding.searched-not-array',
   'finding.verdict-alias',
+  'finding.missing-no-scope',
   'root.array',
+  'reply.truncated',
+  'flow.chained-edges',
+  'flow.subgraph',
 ];
 
 const EXPECT_OF: Record<string, string> = {
@@ -1240,14 +1463,25 @@ const EXPECT_OF: Record<string, string> = {
   'root.array': '`{flows, findings}` / `{findings, nodes}`',
   'root.extra-keys': '只有约定的键',
   'root.findings-under-results': '根对象里叫 `findings`',
+  'root.findings-empty': '至少 1 条结论',
   'finding.verdict-alias': '四选一枚举',
   'finding.searched-not-array': '`searched: ["…"]`',
+  'finding.missing-no-scope': 'missing 要给 `searched` 或指一个「本该在哪」的文件',
   'evidence.string-with-repo-prefix': '`{repo, path, note}`',
+  'evidence.string-multiple-paths': '一个文件一条 evidence',
   'evidence.object-other-keys': '`{repo, path, note}`',
+  'evidence.note-not-string': '`note` 一句话',
   'node.anno-flat': '`[["小标题","正文"]]`',
+  'node.anno-object-rows': '`[["小标题","正文"]]`',
   'node.frame-alias': '`phone` / `wide`',
+  'node.kind-alias': '`page` / `system` / `decision`',
+  'node.page-no-html': 'kind=page 必须给一屏 HTML',
+  'node.html-prose': 'HTML 片段，不是描述',
   'flow.fenced': '第一行 `flowchart TD`',
   'flow.no-header': '第一行 `flowchart TD`',
+  'flow.subgraph': '不用 subgraph',
+  'flow.chained-edges': '一条连线一行',
+  'reply.truncated': '回话完整闭合（或调大这一段的 max_tokens）',
 };
 
 function reportMarkdown(report: Report): string {
@@ -1260,6 +1494,7 @@ function reportMarkdown(report: Report): string {
   lines.push(`- 预算：${Object.entries(meta.budget).map(([phase, tokens]) => `${phase} ${tokens}`).join(' / ')}`);
   lines.push(`- 用时：${(meta.elapsedMs / 1000 / 60).toFixed(1)} 分钟（${meta.startedAt} → ${meta.finishedAt}）`);
   lines.push(`- 调用：${counts.called} 次（成功收下 ${counts.ok}、被拒 ${counts.rejected}、接口层失败 ${counts.providerError}、跳过 ${counts.skipped}）`);
+  lines.push(`- 预算：思考吃光预算 ${counts.thinkingStarved} 格，其中 ${counts.budgetBumped} 格抬到四倍后才拿到回话`);
   lines.push(`- token：prompt ${counts.tokens.prompt} / completion ${counts.tokens.completion}`);
   lines.push('');
 
@@ -1283,12 +1518,12 @@ function reportMarkdown(report: Report): string {
   if (report.why.length === 0) lines.push('（没有失败）', '');
 
   lines.push('## 形状漂移分类表', '');
-  lines.push('| 段 | 现象 | 模型原文片段 | 出现次数 | 我们的期望 |', '| --- | --- | --- | --- | --- |');
+  lines.push('| 阶段 | 段 | 现象 | 模型原文片段 | 出现次数 | 我们的期望 |', '| --- | --- | --- | --- | --- | --- |');
   for (const row of report.taxonomy) {
     const snippet = row.excerpt.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-    lines.push(`| ${row.phase} | ${row.label.replace(/\|/g, '\\|')} | \`${snippet}\` | ${row.count} | ${row.expect.replace(/\|/g, '\\|')} |`);
+    lines.push(`| ${row.stage} | ${row.phase} | ${row.label.replace(/\|/g, '\\|')} | \`${snippet}\` | ${row.count} | ${row.expect.replace(/\|/g, '\\|')} |`);
   }
-  if (report.taxonomy.length === 0) lines.push('| — | 这一批没有观察到形状漂移 | — | 0 | — |');
+  if (report.taxonomy.length === 0) lines.push('| — | — | 这一批没有观察到形状漂移 | — | 0 | — |');
   lines.push('');
 
   lines.push('## 这一批没触发到的已知漂移', '');
