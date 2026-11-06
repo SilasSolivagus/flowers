@@ -1,6 +1,4 @@
 .superpowers/
 node_modules/
-drizzle/
 .next/
 tsconfig.tsbuildinfo
-next-env.d.ts.bak
