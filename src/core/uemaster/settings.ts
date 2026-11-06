@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
+import type { ProviderConfig } from './provider.js';
 import {
   CANDIDATES, commandReady, defaultOptionId, dropdownOptions, idForCommand, viewOf,
   type CandidateView, type GeneratorTest, type GeneratorView,
@@ -136,4 +137,72 @@ export async function generatorView(db: Queryable): Promise<GeneratorView> {
     return { state: 'ready', source: resolution.source, command: resolution.command, ...common };
   }
   return { state: resolution.kind, source: null, command: null, ...common };
+}
+
+// ─── P2.9：LLM 直连的三条键 ─────────────────────────────────────────────────
+
+/**
+ * 直连 chat 接口（`provider.ts`）的三条键。
+ *
+ * 为什么这三条也住在这里，而不是让 `provider.ts` 自己去写 SQL：`app_settings`
+ * 的读写口只有这一处（本文件开头那句「唯一读写口」是硬规矩），多开一个口子就
+ * 会有两套「空串算什么」的解读。键名照旧是服务层常量，库不解释它们。
+ *
+ * 三条**同进同退**：只有 baseUrl 没有 key、或只有 key 没有 model，都不是一个能发
+ * 请求的配置；`providerSettings()` 因此在缺一条时给 null，而不是给半份。
+ */
+export const PROVIDER_BASE_URL_KEY = 'provider.baseUrl';
+export const PROVIDER_API_KEY_KEY = 'provider.apiKey';
+export const PROVIDER_MODEL_KEY = 'provider.model';
+
+/** 三个字段的长度上限：它们都会进 HTTP 头或请求体，不该长到失控。 */
+const MAX_BASE_URL = 500;
+const MAX_API_KEY = 400;
+const MAX_MODEL = 200;
+
+/** 单格：去空白；空串与没设同义（与 `generator.command` 一个口径）。 */
+function cell(value: string | undefined | null): string | null {
+  const text = (value ?? '').trim();
+  return text === '' ? null : text;
+}
+
+/**
+ * 库里存着的直连接口配置；三条齐全才算数，缺一条返回 null。
+ *
+ * **有 key 也只在服务端读它**——本函数的返回值会进 `Authorization` 头，绝不进
+ * 响应体、日志或事件（见 `provider.ts` 的脱敏）。
+ */
+export async function providerSettings(db: Queryable): Promise<ProviderConfig | null> {
+  const [baseUrl, apiKey, model] = await Promise.all([
+    readKey(db, PROVIDER_BASE_URL_KEY),
+    readKey(db, PROVIDER_API_KEY_KEY),
+    readKey(db, PROVIDER_MODEL_KEY),
+  ]);
+  const resolved = { baseUrl: cell(baseUrl), apiKey: cell(apiKey), model: cell(model) };
+  if (resolved.baseUrl === null || resolved.apiKey === null || resolved.model === null) return null;
+  return { baseUrl: resolved.baseUrl, apiKey: resolved.apiKey, model: resolved.model };
+}
+
+/**
+ * 写这三条键。传字符串就写，传空串等于**清掉这一格**（读的时候就是没设），
+ * 不传的字段保持原样——设置页以后只有一行「改」，不必每次把三条一起送来。
+ *
+ * 长度超限在这里就拦（`AppError`，与命令那条一个风格）：超过上限的 key 一定不是
+ * 一个能用的 key，等到发请求时才失败更难查。
+ */
+export async function saveProviderSettings(
+  db: Queryable,
+  input: { baseUrl?: string; apiKey?: string; model?: string },
+): Promise<void> {
+  const writes: Array<[string, string | undefined, number, string]> = [
+    [PROVIDER_BASE_URL_KEY, input.baseUrl, MAX_BASE_URL, '接口地址'],
+    [PROVIDER_API_KEY_KEY, input.apiKey, MAX_API_KEY, 'API Key'],
+    [PROVIDER_MODEL_KEY, input.model, MAX_MODEL, '模型名'],
+  ];
+  for (const [key, raw, max, label] of writes) {
+    if (raw === undefined) continue;
+    const value = raw.trim();
+    if (value.length > max) throw new AppError('invalid_provider', `${label}不能超过 ${max} 个字符`);
+    await writeKey(db, key, value);
+  }
 }
