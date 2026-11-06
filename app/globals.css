@@ -15,17 +15,46 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 ::selection{background:var(--c-accent-weak)}
 
 /* ── 外壳：左轨 + 主区 ─────────────────────────────── */
-.shell{display:grid;grid-template-columns:184px minmax(0,1fr);height:100vh;overflow:hidden}
+/* 左轨两档宽度：展开 184px（今天的样子），收起 56px（只剩首字 + 开关）。
+   宽度走一个变量、被 `.shell` 一个地方消费：`<html data-rail>` 上挂的是**用户的
+   选择**（open / collapsed / auto，见 app/components/rail-pref.ts），auto 在手机上
+   仍要收窄，所以手机断点只改这个变量、不重写 `.shell`——栅格规则始终只有一份。 */
+.shell{--rail-w:184px;display:grid;grid-template-columns:var(--rail-w) minmax(0,1fr);height:100vh;overflow:hidden}
+html[data-rail="collapsed"] .shell{--rail-w:56px}
 
-.rail{background:var(--c-surface);border-right:1px solid var(--c-line);display:flex;flex-direction:column;padding:16px 0 12px}
-/* 原 .brand b / .brand span —— markup 用 h1 + .sub */
-.rail h1{margin:0;padding:0 16px;font:600 var(--t-section) var(--f-sans);letter-spacing:.02em}
-.rail .sub{margin-top:4px;padding:0 16px 20px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+/* container-type 让下面的 `@container (max-width:100px)` 按左轨**实际宽度**切
+   展开/收起两套排布：cookie 说 'auto' 时，桌面宽 184、手机宽 56，同一份规则两边都对。 */
+.rail{background:var(--c-surface);border-right:1px solid var(--c-line);display:flex;flex-direction:column;padding:16px 0 12px;container-type:inline-size}
+/* 原 .brand b / .brand span —— markup 用 h1 + .sub。
+   `.abbr`（收起态的首字母）平时不显示，只在左轨窄到 100px 以下时顶上来。 */
+.rail h1{margin:0;padding:0 16px;display:flex;align-items:center;gap:4px;font:600 var(--t-section) var(--f-sans);letter-spacing:.02em}
+.rail h1 .abbr,.rail > a .abbr{display:none}
+.rail .sub{margin-top:4px;padding:0 16px 12px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+/* 折叠开关。长相与 .rail > a 同一套（同一档高度、同一档 hover、同一档焦点环），
+   因为它就是左轨里的一行控件；位置在品牌下面、导航上面。 */
+.railtoggle{display:flex;align-items:center;height:var(--h-control);margin:0 8px 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.railtoggle:hover{background:var(--c-surface-2)}
+.railtoggle:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 原 .nav / .nav button —— markup 用裸 <a> */
 .rail > a{display:flex;align-items:center;justify-content:space-between;height:var(--h-row);margin:0 8px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-body) var(--f-sans);color:var(--c-text-2);text-decoration:none}
 .rail > a:hover{background:var(--c-surface-2)}
 .rail > a[aria-current="true"]{background:var(--c-accent-weak);color:var(--c-accent);font-weight:600}
 .rail .sp{flex:1}
+
+/* 收起态。判据是**宽度**，不是 cookie 的值：`html[data-rail="collapsed"]` 与手机上
+   的默认（auto）都会把左轨压到 56px，这里只写一次就够。56px 的左轨在每个字上
+   都只有 40px 可用（margin 8×2），所以：品牌只剩首字母、副标题整行藏起来、
+   三档导航只剩首字并居中；`aria-current` 的底色与主色不变，当前页还是认得出。
+   可访问名字不靠这里的字——`<a>` 与 `<h1>` 上的 title/aria-label 带的是完整标签。 */
+@container (max-width:100px){
+  .rail h1{padding:0;justify-content:center}
+  .rail h1 .lbl,.rail > a .lbl{display:none}
+  .rail h1 .abbr,.rail > a .abbr{display:inline}
+  .rail .sub{display:none}
+  .rail > a{justify-content:center;padding:0}
+  .railtoggle{justify-content:center;padding:0}
+}
+
 
 .main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .topbar{height:var(--h-topbar);flex:0 0 var(--h-topbar);display:flex;align-items:center;gap:12px;padding:0 24px;background:var(--c-surface);border-bottom:1px solid var(--c-line)}
@@ -51,25 +80,30 @@ button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:poin
 .btn[disabled]{opacity:.45;cursor:not-allowed}
 
 /* ── 看板 ──────────────────────────────────────────── */
-.board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto}
+/* `.board` 是横向滚动容器（10 列 × 220px = 2272px，1280 视口放不下，也不该放下）。
+   `overscroll-behavior-x:contain` 是给触控板的：滚到最左/最右之后继续横推，
+   浏览器不该把它当成前进/后退手势——否则「看板滑到头」会变成「页面退到上一页」。 */
+.board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto;overscroll-behavior-x:contain}
 /* 线稿的分组带（分析 / 开发 / 归档）。本应用的状态机是 10 个状态、读模型没有分组字段，
    看板不渲染这一行；类留在原处是因为它是 views.css 原样移植的一段，删掉就看不出省略了什么。
    列宽必须与 .gcols 逐字相同：今天没人渲染它，但哪天真的画了分组带，11 列叠在 10 列网格上
    就是一个从头到尾错位的 1:9 栅格——那种错位在代码里看不出来，只在截图上。 */
-.gband{display:grid;grid-template-columns:repeat(10,minmax(96px,1fr));gap:8px;padding:0 0 6px}
+.gband{display:grid;grid-template-columns:repeat(10,220px);gap:8px;padding:0 0 6px}
 .gb{font:600 11px/16px var(--f-sans);letter-spacing:.08em;color:var(--c-text-4);padding-left:2px}
 
-/* 列网格。两处与线稿不同，都是「10 列」这个事实逼出来的：
-   ① 列数 11 → 10（线稿有 11 个状态，spec 是 10 个）；
-   ② 最小列宽 132px → 96px。132px × 10 + 8px × 9 = 1392px，比 1280 视口减去左轨 184px 与看板
-      左右 padding 48px 之后的 1048px 多 344px：照搬 132px 就必然横向滚动，而硬性要求是
-      1280 宽下 10 列全部可见。
-      96px 是**可读下限**，不是排版尺寸：1280 下每列 97.6px、1440 下 113px，都大于 96，所以
-      1fr 依然全额分配——渲染宽度与「等分成 10 份」逐像素相同（等宽列 + 8px 沟 + 圆角井）。
-      只有可用宽度掉到 96px × 10 以下（约 1228px 视口）时 minmax 才不再收窄，改由 .board 的
-      overflow-x:auto 横向滚动。设这个下限之前是 minmax(0,…)：列可以被无限压薄，1024 下每列
-      72px、内容宽约 34px，一行只剩 3 个汉字——那不是窄，那是读不了。 */
-.gcols{display:grid;grid-template-columns:repeat(10,minmax(96px,1fr));gap:8px;flex:1;min-height:0}
+/* 列网格：10 列 × 220px **固定**宽，超出就横向滚。
+ *
+ * 这是对「1280 下 10 列全部可见」的一次推翻（R 裁决：产品负责人否决了那个目标）。
+ * 96px 的「可读下限」时代每列 97.6px、卡片内容宽约 60px：标题要三行、`等谁` 要折三行、
+ * 编号与天数要粘成「PAN-120 天」——一列里能读的东西比列头还少。板子的正确行为是
+ * 横向滚，所以列宽不再跟视口谈判：220px 是「一张卡放得下一行标题 + 一行等谁 + 一行
+ * 编号/天数」的量出来的宽度（卡片内容宽 ≈ 182px）。
+ *
+ * `width:max-content` 让网格的盒子就等于 10 条轨道的总和（2272px）：不给的话，
+ * `.gcols` 作为 flex 项会被拉成视口宽、列溢出到盒子外面，`.board` 的 scrollWidth
+ * 就会算成「视口宽」而不是内容宽，滚动到底会差一截。
+ * `flex:1;min-height:0` 不动：列仍是满高（列内 `.colbody` 自己纵向滚）。 */
+.gcols{display:grid;grid-template-columns:repeat(10,220px);gap:8px;flex:1;min-height:0;width:max-content}
 
 .col{display:flex;flex-direction:column;min-width:0;min-height:0;
      border:0.5px solid var(--c-line);border-radius:12px;
@@ -93,13 +127,22 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    （另一轴被算成 auto），所以不折断的长词会把**整列**撑出一条横向滚动条——列宽不再变，但
    卡片被横着推走。overflow-wrap:anywhere 让长串就地折行，与 .card .w 同一道兜底。 */
 .card .t{font:400 var(--t-body-s) var(--f-sans);line-height:17px;color:var(--c-text-1);overflow-wrap:anywhere}
-.card .m{display:flex;align-items:center;flex-wrap:wrap;gap:0 6px;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
+/* 编号 + 停留天数：单行，天数右对齐。
+   97.6px 列宽时代这里靠 `flex-wrap:wrap` 兜「PAN-12」与「0 天」粘连（两张卡的名字会读成
+   「PAN-120 天」）。列宽回到 220px（卡片内容宽 ≈ 182px）后两者加起来不到 80px，
+   折行不再可能发生，于是回到线稿的单行：编号贴左、天数贴右，中间空着。
+   `white-space:nowrap` 是这一行的定义（它本来就该是一行），不是省略号兜底。 */
+.card .m{display:flex;align-items:center;justify-content:space-between;gap:0 6px;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
 .card .m .k{flex:0 0 auto;font-family:var(--f-mono)}
-.card .m .d{margin-left:auto;flex:0 0 auto;font-family:var(--f-num)}
+.card .m .d{flex:0 0 auto;font-family:var(--f-num)}
 /* 「等谁」是这块看板唯一的信息（同一列里等的东西各不相同），所以它必须能读全。
    线稿给的是单行省略号，那是在 132px 列宽下的写法；1280 宽 10 列时卡片内容宽约 60px，
    单行会把「提测日已过 11-04，等提测」压成「提测日已…」——等于把这一行删掉。
-   改成可折行（不加行数上限）：文字全在，卡片变高，列井本来就按内容撑高。 */
+   220px 列宽（内容宽 ≈ 182px）下常见的那几种「等谁」都是一行装得下的（实测见报告），
+   所以这里保留折行能力、只当兜底：真的出现一条长到 182px 装不下的（比如两个长名字
+   加一个日期），折行总比省略号强——它一个字都不丢。
+   `overflow-wrap:anywhere` 是第二道兜底：`.colbody` 的 overflow 在另一轴被算成 auto，
+   不折断的长词会把整列撑出一条横向滚动条。 */
 .card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);white-space:normal;overflow-wrap:anywhere}
 .card .w.neg{color:var(--c-negative)}
 
@@ -195,3 +238,29 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .barx.tst{background:var(--c-positive)}
 .barx.neg{background:var(--c-negative)}
 .barx.pool{background:var(--c-line-strong)}
+
+/* ── 手机（<768px，与 tokens.css 的 --bp-phone 同一个数） ──────────── */
+/* 断点里只写数值：媒体查询不能读 CSS 变量，而 tokens.css 已经把 768 记在 --bp-phone 上。
+ *
+ * 这一档的四件事，全部是「一屏放不下」的直接后果：
+ * 1. 左轨默认 56px（`--rail-w` 改一个值，栅格规则不重写）。用户亲手展开过
+ *    （cookie = open）时仍按 184px 给他——选择优先于断点。不管哪一档，开关都在
+ *    左轨顶部，收起了也点得回来。
+ * 2. 列宽 `min(78vw,220px)`：390 宽下是 220px（78vw = 304，取小的那个），
+ *    而看板可用宽度约 390 − 56 − 24 = 310px——**一列完整 + 下一列露一角**。
+ *    那一角就是「这里能横着滑」唯一的提示，不需要任何一行说明文字。
+ * 3. 抽屉整屏（100vw）：屏幕只有 390，520px 的抽屉会横着捅出去。
+ * 4. 顶栏与看板的左右内边距从 24px 收到 12px：390 宽下 48px 的白边是奢侈品，
+ *    而顶栏的成员切换必须留在屏内（`nothing clips`）。 */
+@media (max-width:767px){
+  .shell{--rail-w:56px}
+  html[data-rail="open"] .shell{--rail-w:184px}
+  .topbar{padding:0 12px;gap:8px}
+  .view.pad{padding:16px 12px 32px}
+  .board{padding:10px 12px 16px}
+  .gcols{grid-template-columns:repeat(10,min(78vw,220px))}
+  .gband{grid-template-columns:repeat(10,min(78vw,220px))}
+  .drawer{width:100vw;max-width:100vw}
+  /* 动作表单（sheet）里的 480px 定宽在 390 宽下同样会捅出去：抽屉里的每个动作都从这里开。 */
+  .sheet .box{width:min(480px,calc(100vw - 32px))}
+}

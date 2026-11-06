@@ -1,4 +1,5 @@
 import type { BoardColumn } from '../../src/core/read/board';
+import { BoardScroller } from './BoardScroller';
 import { Card } from './Card';
 
 /**
@@ -15,10 +16,14 @@ import { Card } from './Card';
  * 列头也只有这两样：`<b>` 状态名 + `.pill2` 计数。没有副标题、没有提示行——
  * 同一列里的卡片等的东西并不相同（「等 赵越 评审」和「等 吕正豪 评审」同列），
  * 任何一行写死在这一列上的说明都会说谎。
+ *
+ * `.board` 是 `BoardScroller`（客户端组件）：横向滚动容器在它身上，而只有客户端
+ * 才能挂一个 `{passive:false}` 的 wheel 监听器（鼠标纵向滚轮 → 板子横向滚）。
+ * 这里的 markup 与任务无关的那部分一字未动。
  */
 export function Board({ columns }: { columns: BoardColumn[] }) {
   return (
-    <div className="board">
+    <BoardScroller>
       <div className="gcols">
         {columns.map((column) => (
           <div className="col" key={column.state}>
@@ -34,7 +39,7 @@ export function Board({ columns }: { columns: BoardColumn[] }) {
           </div>
         ))}
       </div>
-    </div>
+    </BoardScroller>
   );
 }
 
