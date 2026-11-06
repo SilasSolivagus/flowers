@@ -32,6 +32,19 @@ export type BoardCard = {
   /** 停在当前状态几个上海日历天。 */
   days: number;
   /**
+   * 最新一份走查材料是哪一天（已折成 MM-DD），没有就是 null。
+   *
+   * 这是 `live` 那张卡唯一缺的一块数据：判断走查做没做过，靠的是
+   * `uemaster_artifacts` 里有没有 `stage='inspect'` 的行。卡片上要显示的是
+   * 「已走查 · 11-06」里那个日期，而**不能**由组件自己去查——一张卡一次查询就是
+   * 一次 N+1，而且看板与抽屉会对同一件事给出两个答案。所以它跟着那条大 SQL 一起
+   * 出来（同一个子查询、同一次排序口径，与 `listArtifacts` 一致：取最新一行）。
+   *
+   * 放的是**格式化后的**标签而不是原始时间戳：页面不再自己算日期（这条规矩
+   * 在这一层已经用了三处：`waiting`、`days`、`atLabel`）。
+   */
+  inspectAtLabel: string | null;
+  /**
    * 这条需求现在要不要你动手 = 「等谁」那一行现在是不是挂在**你**身上。
    *
    * 名字只有一个来源：`waitingFor` 的 `{text, on, who}`，`mine` 就是
@@ -122,6 +135,15 @@ type Row = {
   commit_test_at: string | null;
   commit_due_at: string | null;
   reviewer: string | null;
+  /**
+   * 最新一份走查材料的写入时刻（`stage='inspect'` 的 `created_at`），没有就是 null。
+   *
+   * 一个相关子查询而不是第二次查询：看板是一次 SQL 取全部需求（见 `getBoard`），
+   * 每张卡再问一次「走查做没有」就是 10 列 × N 张卡的往返。子查询的排序口径与
+   * `listArtifacts` 逐字一致（`created_at desc, id desc`）：抽屉说「最新那一份」
+   * 与看板说「已走查 · 哪一天」必须是同一份，否则重做之后两处会各说各的日期。
+   */
+  inspect_at: string | null;
 };
 
 /**
@@ -141,7 +163,7 @@ type Row = {
  */
 type Waiting = { text: string; on: WaitingOn; who: string | null };
 
-function waitingFor(row: Row, today: number): Waiting {
+function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Waiting {
   switch (row.state) {
     case 'inbox':
       // 补必填是提出人的事（提出人是字段，不是账号）。但字段里可以是一个**不在花名册里**的
@@ -188,8 +210,14 @@ function waitingFor(row: Row, today: number): Waiting {
         : { text: `${day} 自动上线`, on: 'clock', who: null };
     }
     case 'live':
-      // 「可发起走查」不是有人在等，是「你可以动」：走查不改状态（spec §3 末行），也不框。
-      return { text: '可发起走查', on: 'none', who: null };
+      // 走查不改状态（spec §3 末行），也不框任何人，所以 on 一直是 'none'——
+      // 但**说什么**是有事实的：材料交回之前是「待走查」，之后是「已走查 · 那天的日期」。
+      //
+      // 旧写法是一句固定的「可发起走查」：它说的是「你可以动」，不是「这件事做没做」，
+      // 于是同一列里做过与没做过的卡长得一模一样，那句话读到最后等于什么都没说。
+      return inspectAtLabel === null
+        ? { text: '待走查', on: 'none', who: null }
+        : { text: `已走查 · ${inspectAtLabel}`, on: 'none', who: null };
     case 'rejected':
     case 'shelved':
       // 恢复 / 无可做：都可选，都不框。
@@ -257,7 +285,12 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
               join members m2 on m2.id = ra.reviewer_member_id
              where ra.requirement_id = r.id and ra.verdict = 'handed'
              order by ra.id
-             limit 1) as reviewer
+             limit 1) as reviewer,
+           (select ua.created_at
+              from uemaster_artifacts ua
+             where ua.requirement_id = r.id and ua.stage = 'inspect'
+             order by ua.created_at desc, ua.id desc
+             limit 1) as inspect_at
       from requirements r
       left join members m on m.id = r.owner_member_id
       left join releases rel on rel.id = r.release_id
@@ -283,7 +316,8 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
         `看板没有「${row.state}」这一列：读模型的列清单与状态机不同步`,
       );
     }
-    const waiting = waitingFor(row, today);
+    const inspectAtLabel = formatMonthDay(row.inspect_at);
+    const waiting = waitingFor(row, today, inspectAtLabel);
     cards.push({
       id: row.id,
       number: Number(row.number),
@@ -298,6 +332,7 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
         dueAt: row.commit_due_at,
       }, today),
       days: daysSinceShanghai(row.state_entered_at, today),
+      inspectAtLabel,
       // 「现在需要你动手」= 这张卡等的那个人就是你。名字只从 waiting.who 来，
       // 所以主色框与「等谁」那一行说的是同一件事（旧写法 owner||reviewer 会让
       // 「等 吕正豪 评审」的卡被框给负责人）。

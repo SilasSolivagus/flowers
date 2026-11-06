@@ -274,6 +274,91 @@ describe('getBoard', () => {
   });
 });
 
+/** 建一条推到「已上线」的需求：走真实服务到测试中，再把状态列改成 live（与上面同一条口径）。 */
+async function seedLive() {
+  const seeded = await seedOneTesting();
+  await db.execute(sql`update requirements set state = 'live' where id = ${seeded.id}`);
+  return seeded;
+}
+
+/**
+ * 走查是**一个状态**，不是一句提示。
+ *
+ * P2 收口时看板上 `live` 的卡写着「可发起走查」——那句话说的是「你可以动」，不是
+ * 「这件事做没做」，于是同一列里做过与没做过的卡长得一模一样。改成两态之后，
+ * 判断依据是 `uemaster_artifacts` 里有没有 `stage='inspect'` 的行，而那个事实由
+ * `getBoard` 那条大 SQL 一次带出来（`inspectAtLabel`），组件不查库。
+ */
+describe('已上线：走查做没做过', () => {
+  it('没有走查材料：待走查，且仍然不欠任何人动作', async () => {
+    const { id } = await seedLive();
+    const card = await cardOf('live', id, '房超');
+    expect(card.waiting).toBe('待走查');
+    expect(card.waitingOn).toBe('none');
+    expect(card.inspectAtLabel).toBeNull();
+    // 走查是可选的，不是「你的卡」
+    expect(card.mine).toBe(false);
+  });
+
+  it('交回走查材料之后：已走查 · MM-DD，日期就是那份材料的日期', async () => {
+    const { id } = await seedLive();
+    await writeArtifact('/uemaster/PAN-9/inspect.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'inspect', url: '/uemaster/PAN-9/inspect.html',
+    });
+    // 把写入时刻钉死一个已知的 UTC 零点（上海同一天 08:00），标签就与运行时间无关。
+    await db.execute(sql`update uemaster_artifacts set created_at = '2026-01-02T00:00:00Z'`);
+
+    const card = await cardOf('live', id, '吕品');
+    expect(card.inspectAtLabel).toBe('01-02');
+    expect(card.waiting).toBe('已走查 · 01-02');
+    expect(card.waitingOn).toBe('none');
+    expect(card.mine).toBe(false);
+  });
+
+  it('走查材料重做过：取最新那一份（与抽屉的 listArtifacts 同一个口径）', async () => {
+    const { id } = await seedLive();
+    await writeArtifact('/uemaster/PAN-9/inspect.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'inspect', url: '/uemaster/PAN-9/inspect.html',
+    });
+    await writeArtifact('/uemaster/PAN-9/inspect-v2.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'inspect', url: '/uemaster/PAN-9/inspect-v2.html',
+    });
+    await db.execute(sql`
+      update uemaster_artifacts set created_at = '2026-01-02T00:00:00Z'
+       where url = '/uemaster/PAN-9/inspect.html'`);
+    await db.execute(sql`
+      update uemaster_artifacts set created_at = '2026-03-04T00:00:00Z'
+       where url = '/uemaster/PAN-9/inspect-v2.html'`);
+
+    const card = await cardOf('live', id, '吕品');
+    expect(card.waiting).toBe('已走查 · 03-04');
+    expect(card.inspectAtLabel).toBe('03-04');
+  });
+
+  it('别的需求的走查材料不算在我头上', async () => {
+    const mine = await seedLive();
+    const other = await seedLive();
+    await writeArtifact('/uemaster/PAN-9/inspect.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: other.id, stage: 'inspect', url: '/uemaster/PAN-9/inspect.html',
+    });
+    expect((await cardOf('live', mine.id, '吕品')).waiting).toBe('待走查');
+    expect((await cardOf('live', other.id, '吕品')).waiting).toMatch(/^已走查 · /);
+  });
+
+  it('评审材料不算走查：只认 stage=inspect', async () => {
+    const { id } = await seedLive();
+    await writeArtifact('/uemaster/PAN-9/review.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: id, stage: 'review', url: '/uemaster/PAN-9/review.html',
+    });
+    expect((await cardOf('live', id, '吕品')).waiting).toBe('待走查');
+  });
+});
+
 /**
  * `mine` 的负向用例。
  *
