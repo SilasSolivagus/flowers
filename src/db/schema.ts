@@ -190,6 +190,45 @@ export const appSettings = pgTable('app_settings', {
 });
 
 /**
+ * MCP 的 HTTP 端点用来换身份的 token（P4.1）。
+ *
+ * 为什么必须有一张表，而不是「一个环境变量里的密钥」：owner 选的是「整套状态机都
+ * 交给 agent」——agent 能排期、能打回。而每一次这样的动作都会在 `events.actor` 上
+ * 写下一行「谁承诺了哪一天」。一个匿名的共享密钥会让那一行失去意义，所以 token 必须
+ * 绑到 `members` 上：**请求 → token → 成员 → actor**，服务层的签名一个字都不用改。
+ *
+ * 三条硬规矩：
+ * - **只存 sha256**（`token_hash`），原文只在生成的那一秒出现在响应里。库被读走时，
+ *  里面的东西换不成一个能用的 token。为什么不是 bcrypt/argon2：token 是 32 字节随机
+ *  值，不是人选的口令——没有字典可查、没有彩虹表，sha256 的「太快」在这里不是缺点，
+ *   而每次请求都要验一次，慢哈希会把每个 tools/call 拖上几十毫秒。
+ * - **撤销是软删除**（`revoked_at`，不改行、不删行）：时间线上那句「这个 agent 交的材料」
+ *   要能追到它当时用的是哪个 token。「删掉」会让这条线索断在一个不存在的主键上。
+ * - `scopes` 是**单值**，不是数组：read ⊂ write ⊂ admin 是包含关系，一次给两级
+ *   等于给高的那一级。列名取复数是因为它取值来自那三个词的集合（与服务层
+ *   `Scope` 类型同一份词表），不是因为它存了多个。
+ *
+ * 唯一索引落在 `token_hash` 上：查 token 是每个请求的第一件事，它必须是一次索引命中，
+ * 而不是全表扫。
+ */
+export const mcpTokens = pgTable('mcp_tokens', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tokenHash: text('token_hash').notNull(),
+  memberId: uuid('member_id').notNull().references(() => members.id),
+  label: text('label').notNull(),
+  scopes: text('scopes').notNull(),          // read | write | admin
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+}, (t) => ({
+  scopeCheck: check(
+    'mcp_tokens_scopes_check',
+    sql`${t.scopes} in ('read', 'write', 'admin')`,
+  ),
+  hashUnique: uniqueIndex('mcp_tokens_hash_unique').on(t.tokenHash),
+  byMember: index('mcp_tokens_member').on(t.memberId),
+}));
+
+/**
  * PRD 快照（P3.2）。
  *
  * 为什么要存正文而不是只存链接：PRD 是会改的，而走查/评审要回答的是「**这一版**

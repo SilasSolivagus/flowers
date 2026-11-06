@@ -1,6 +1,8 @@
 import Link from 'next/link';
+import { headers } from 'next/headers';
 
 import { db } from '../../src/db/client';
+import { listTokens } from '../../mcp/tokens';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
@@ -11,7 +13,9 @@ import {
 import { resolveProvider } from '../../src/core/uemaster/provider';
 import { generatorView } from '../../src/core/uemaster/settings';
 import { GeneratorRow } from './GeneratorRow';
+import { McpRow, type McpTokenRow } from './McpRow';
 import { MemberKeyRow } from './MemberKeyRow';
+import { endpointFromHeaders } from './mcp-endpoint';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
 
@@ -57,6 +61,21 @@ const TABS: ReadonlyArray<{ id: TabId; href: string; label: string }> = [
 const WORKFLOW: ReadonlyArray<{ state: State; label: string }> =
   BOARD_STATES.map((state) => ({ state, label: STATE_LABEL[state] }));
 
+/**
+ * 一个时刻落在**上海**的哪一天（`YYYY-MM-DD`）。
+ *
+ * token 列表要的是「哪天生的」，而这一页没有理由让读者的时区参与决定——服务器在
+ * 别的时区跑时，同一行会显示成前一天。日期格式化只在这一处，客户端组件拿到的就是
+ * 成品字符串（`McpRow` 不再算时区）。
+ */
+function shanghaiDay(at: Date): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(at);
+  const pick = (type: string): string => parts.find((part) => part.type === type)?.value ?? '';
+  return `${pick('year')}-${pick('month')}-${pick('day')}`;
+}
+
 /** 名册里没有这个人时，他那三行的「原值」：全空（是「没填过」，不是错误）。 */
 const EMPTY_PARTS: MemberProviderParts = { baseUrl: null, apiKey: null, model: null };
 
@@ -80,12 +99,26 @@ export default async function SettingsPage({
   //
   // P2.12：两者都问**当前成员**——他配了自己的 key，模型接口这条路就是他的那一份；
   // 「我的模型 key」那一行还要他自己那三行的原值（表单预填，三格不齐也要）。
-  const [generator, parts, resolved] = await Promise.all([
+  //
+  // P4.1：顺手把「接你的 agent」那一格要的两样也读出来——端点从**这次请求**的头
+  // 推出来（`mcp-endpoint.ts`），token 列表从 `mcp_tokens` 来（含已撤销的）。
+  const [generator, parts, resolved, tokens, requestHeaders] = await Promise.all([
     generatorView(db, actor),
     self === null ? Promise.resolve(EMPTY_PARTS) : memberProviderParts(db, self.id),
     resolveProvider(actor),
+    listTokens(db),
+    headers(),
   ]);
   const memberKey = memberKeyView(parts, resolved);
+  const endpoint = endpointFromHeaders(new Headers(requestHeaders));
+  const tokenRows: McpTokenRow[] = tokens.map((token) => ({
+    id: token.id,
+    label: token.label,
+    member: token.member,
+    scope: token.scope,
+    createdDay: shanghaiDay(token.createdAt),
+    revokedDay: token.revokedAt === null ? null : shanghaiDay(token.revokedAt),
+  }));
 
   return (
     <main className="view">
@@ -103,7 +136,15 @@ export default async function SettingsPage({
           ))}
         </nav>
         {active === 'me'
-          ? <MePanel actor={actor} members={members} memberKey={memberKey} />
+          ? (
+            <MePanel
+              actor={actor}
+              members={members}
+              memberKey={memberKey}
+              endpoint={endpoint}
+              tokens={tokenRows}
+            />
+          )
           : <ProjectPanel members={members} generator={generator} />}
       </div>
     </main>
@@ -126,8 +167,14 @@ export default async function SettingsPage({
  * 「站内 / 企微」不是只读展示，是假数据。
  */
 function MePanel({
-  actor, members, memberKey,
-}: { actor: string; members: Member[]; memberKey: MemberKeyView }) {
+  actor, members, memberKey, endpoint, tokens,
+}: {
+  actor: string;
+  members: Member[];
+  memberKey: MemberKeyView;
+  endpoint: string;
+  tokens: McpTokenRow[];
+}) {
   // 名册里找不到这个人（cookie 里是个离职的人、或者库里还没 seed）：角色行如实说
   // 「未在名册」，不猜、也不给他安一个默认角色。
   const self = members.find((member) => member.name === actor) ?? null;
@@ -138,6 +185,11 @@ function MePanel({
           唯一可写的东西。P2.12 的 owner 原话是「配 key 的时候给测试一下」——所以这一行
           自带测试，测的就是屏上这一份。 */}
       <MemberKeyRow view={memberKey} />
+
+      {/* 「接你的 agent」紧跟着模型 key：一个是「我拿什么干活」，一个是「别人怎么把活
+          交给我」。两者都只在「我」这一栏出现，都属于「这台部署 + 这个人」的配置，
+          而不是项目本身的配置（生成器在项目栏）。 */}
+      <McpRow endpoint={endpoint} tokens={tokens} />
 
       <section className="sg">
         <div className="h">身份</div>

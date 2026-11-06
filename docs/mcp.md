@@ -1,192 +1,233 @@
-# MCP server · 让你的 agent 出 UEmaster 材料
+# MCP · 把 Flowers 接给你的 agent
 
-Flowers 自己**不调模型**：评估 / 评审 / 走查这三处要的材料，由你手上的 agent
-（Claude Code / Codex）用 [UEmaster](https://github.com/SilasSolivagus/UEmaster) 生成。
-这个仓库里 `mcp/server.ts` 就是那座桥——一个只讲 stdio 的 MCP server，把三件事交给 agent：
-拿任务包、把产物交回来、看一条需求的现状。
+Flowers 有一个 **MCP 端点**：`/mcp`。任何人拿到**一条 URL + 一个 token**，就能让自己的
+agent（Claude Code / Cursor / Codex / 任何 MCP 客户端）直接操作这个部署里的需求——
+**不需要克隆仓库，不需要数据库密码**，客户端只认 HTTP。
 
 ```
-你的 agent ──stdio──▶ mcp/server.ts ──▶ src/core/uemaster（任务包 / 落库 / 事件）
-                                            └─▶ Postgres（uemaster_artifacts、events）
+你的 agent ──HTTPS──▶ https://<host>/mcp ──▶ src/core（状态机、事件、产物）
+                              │
+                              └─ token → members → actor（「谁承诺了哪一天」）
 ```
 
-## 接上
+暴露的是**整套状态机**（P4.1 的选项 C）：agent 能提需求、提交评审、签字、排期、打回、
+拒绝、搁置、恢复。这是 owner 明确选的——代价是每个动作都会在时间线上写下「谁干的」，
+所以 **token 必须绑到一个人**，没有匿名的动作（见「token 模型」）。
 
-前置：`npm install`、`npm run db:up && npm run db:migrate`、库里有数据（`npm run seed`）。
+> 旧版本是只讲 stdio 的（`mcp/server.ts`，本机拉起一个子进程）。那条路还在，见
+> 「stdio（本机那条路）」。P4.1 起 HTTP 是主路。
 
-**server 从哪个目录启动都行**：交付链接是站内路径（`/uemaster/PAN-9/evaluate.html`），
-`attach` 拿它去验文件时，基准是**本仓库的** `data/uemaster/`——这个基准从
-`src/core/uemaster/store.ts` 自己的位置推出来（往上三层就是仓库根），不读 `process.cwd()`。
-所以 agent 客户端把 server 起在自己的项目目录里也不会莫名其妙报「产物文件不存在」。
-cwd 只影响一件事：用相对路径写 `mcp/server.ts` 时，得能从这个 cwd 找到这个脚本。
+## 接上：三步
 
-### Claude Code
+**1. 生成 token。** 打开 `/settings?tab=me` → 「接你的 agent」→「生成 token」：起个名字
+（`claude-code`）、选权限（只读 / 读写）。token 原文**只显示这一次**，关掉就再也看不到——
+库里存的是 sha256。
+
+**2. 把那一行粘进客户端。** 设置页上三行都带着真 token，复制即用：
 
 ```bash
-# 在仓库根目录跑一次；作用域 project 会写进 .mcp.json
-claude mcp add flowers \
-  -e FLOWERS_MCP_ACTOR=claude-code \
-  -- npx tsx mcp/server.ts
+# Claude Code（写在 ~/.claude.json / .mcp.json 里，作用域按 -s 定）
+claude mcp add --transport http flowers https://<host>/mcp \
+  --header "Authorization: Bearer <token>"
 ```
-
-或者手写 `.mcp.json`（提交到仓库也不会带出密钥，这里没有密钥）：
 
 ```json
-{
-  "mcpServers": {
-    "flowers": {
-      "command": "npx",
-      "args": ["tsx", "mcp/server.ts"],
-      "env": { "FLOWERS_MCP_ACTOR": "claude-code" }
-    }
-  }
-}
+// Cursor：~/.cursor/mcp.json
+{"mcpServers":{"flowers":{"url":"https://<host>/mcp","headers":{"Authorization":"Bearer <token>"}}}}
 ```
-
-`claude mcp list` 里看到 `flowers` 就是接上了；在会话里用 `/mcp` 能看到三个工具。
-
-客户端不在仓库根启动时，把脚本写成绝对路径就行——**校验不看 cwd，只有找脚本看路**：
 
 ```bash
-claude mcp add flowers \
-  -e FLOWERS_MCP_ACTOR=claude-code \
-  -- npx tsx /Users/silas/flowers/mcp/server.ts
+# Codex：~/.codex/config.toml 里会多一段 mcp_servers.flowers
+codex mcp add flowers --url https://<host>/mcp --bearer-token-env-var FLOWERS_MCP_TOKEN
 ```
 
-### Codex
+`--bearer-token-env-var` 是**变量名**，不是 token 本身：把 token 放进环境变量
+（`export FLOWERS_MCP_TOKEN=flw_…`），配置文件里就不留密文。Claude Code 与 Cursor 也各
+允许用环境变量展开，具体看各自文档；这一页只负责给出「能直接跑」的那一行。
+
+**3. 验证。**
 
 ```bash
-codex mcp add flowers \
-  --env FLOWERS_MCP_ACTOR=codex \
-  -- npx tsx mcp/server.ts
+curl -s https://<host>/mcp \
+  -H "Authorization: Bearer $FLOWERS_MCP_TOKEN" \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-等价于 `~/.codex/config.toml` 里这段（手写也行）：
+返回 14 个工具就是通了。没有 token 会拿到 **401 + 一句中文**：
 
-```toml
-[mcp_servers.flowers]
-command = "npx"
-args = ["tsx", "mcp/server.ts"]
-env = { FLOWERS_MCP_ACTOR = "codex" }
+```json
+{"error":"缺少 token：请求头要带 Authorization: Bearer <token>"}
 ```
 
-确认：`codex mcp list` 里出现 `flowers`（带 `FLOWERS_MCP_ACTOR`，值会打码）。
+## 传输：为什么是 Streamable HTTP
 
-### 手动起一次
-
-```bash
-npm run mcp:build     # = tsc -p tsconfig.mcp.json → dist/
-npm run mcp           # = node dist/mcp/server.js，等 stdin 上的 JSON-RPC
-npx tsx scripts/mcp-smoke.ts <需求 id>   # 用 SDK 的 client 连上去跑一遍三个工具
-```
-
-`npm run mcp` **不经过 `tsx`**：那是 devDependency，`npm ci --omit=dev` 之后根本不存在，
-生产里 `npm run mcp` 会直接坏在「找不到 tsx」上。改成先编译再跑之后，生产只要求
-`node_modules`（`@modelcontextprotocol/sdk`、`pg`、`drizzle-orm`、`zod` 都是 dependencies）
-与一次 `npm run mcp:build`——**生产部署的顺序是先 build、后 mcp**。
-
-为什么编译这条路成立：领域层用的全是 `./x.js` 这种带扩展名的相对导入，编译后它们在
-`dist/` 里就是真实文件（`rootDir` 是仓库根，于是 `dist/mcp/server.js` 引用的
-`../src/core/...` 落在 `dist/src/core/...`）；Node 直接跑就行。**Node 的「原生 type
-stripping」做不到这一点**：它不做扩展名改写、不做目录解析，`import './packs.js'` 会去找
-一个不存在的 `.js`。客户端的配置因此也可以写成 `node /绝对路径/dist/mcp/server.js`——
-上面那两份 `npx tsx …` 的配置只在开发态（装了 devDependencies）成立。
-
-`npm run mcp` 只有在仓库根才找得到 `dist/`（也可以给绝对路径），但**它起来之后
-cwd 就不再影响任何判断**：验产物看的是模块位置，不是它站在哪。
-
-smoke 脚本另有一个作用：它**从任务包正文里抠出交付路径**再写文件，等于在验证
-「包写清楚了 agent 该往哪写」。
-
-## 三个工具
-
-| 工具 | 参数 | 做什么 | 会不会写库 |
-| --- | --- | --- | --- |
-| `uemaster_plan` | `requirementId`, `stage` | 读需求 → 返回该阶段的任务包（中文、可直接执行：画什么、写到哪个文件、怎么交回）。附带需求身份（`PAN-n`、uuid、状态、类型） | **不写**。不改状态、不写事件 |
-| `uemaster_attach` | `requirementId`, `stage`, `url` | 把产物链接交回来。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing` | 写：一行 `uemaster_artifacts` + 一条 `uemaster.attached` 事件。`stage=evaluate` 且需求还在**收集**时，同一个事务里再把它推进到**待设计**（多一条 `requirement.evaluated`；没有类型则 `missing_type`，整条 attach 回滚） |
-| `requirement_show` | `requirementId` | 现状：状态、类型、提出人、负责人、PRD、已有产物、还缺哪几个 stage、当前状态下合法的动作 | 不写 |
-
-`stage` 只有三个值：`evaluate`（评估）/ `review`（评审）/ `inspect`（走查）。
-`requirementId` 是 uuid（不是 `PAN-9`）。
-
-`uemaster_plan` 的返回是两段文本：第一段是需求身份的 JSON，第二段是任务包正文——
-正文原样交给你，不塞进 JSON 字符串里。三个工具的参数 schema 与客户端看到的
-JSON Schema 是同一份（`mcp/tools.ts` 导出），不会出现「客户端说能调、服务端拒了」。
-
-## actor：这条材料记在谁头上
-
-`FLOWERS_MCP_ACTOR` 决定 `events.actor` 与 `uemaster_artifacts.created_by`。
-缺省 `agent`（空串也算没配）。抽屉的「记录」段因此会显示：
-
-```
-claude-code  提交评估材料 · /uemaster/PAN-9/evaluate.html
-```
-
-想区分是谁的 agent 干的，就一个客户端一个值：`claude-code` / `codex` / `ci`。
-不要填真人姓名——那会让时间线看起来是某个人点的。
-
-## 五步闭环
-
-1. `requirement_show` 看这条需求要什么、还缺哪个 stage。
-2. `uemaster_plan` 拿任务包（里面写着需求、PRD、装哪两个 skill、产出形状、写到哪、怎么交回）。
-3. agent 照包做：装 UEmaster 的 `flow-canvas` / `flow-walkthrough`，生成**单个自足的 HTML**。
-4. 文件落到包指定的路径 `data/uemaster/PAN-<n>/<stage>.html`。
-5. `uemaster_attach` 交回 `/uemaster/PAN-<n>/<stage>.html` —— 抽屉「参考」段立刻出现这一行，点得开。
-
-   **评估材料就是那道门的通行证**：需求还在「收集」里时交回 `stage=evaluate`，它会在同一个
-   事务里被推进到「待设计」——用户不再需要在动作条上点一个按钮（那个按钮已经去掉了）。
-   已经在「待设计」或更后面的需求补一份新评估，只换材料，不会被打回。
-
-文件本身不由 Next 的静态根服务：`data/uemaster/` 不在 `public/` 里，读它的是动态路由
-`app/uemaster/[...path]/route.ts`，每个响应都带
-`Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:`
-与 `X-Content-Type-Options: nosniff`。原因是产物是**同源的第三方内容**：从静态根直接服务，
-它里面的 `<script>` 会带着本站 cookie 跑，一份交回来的 HTML 就能改本站。`sandbox`（没有
-`allow-same-origin`）把它关进不透明源：脚本照样执行——`flow-walkthrough` 那种「点左边节点
-切右边页面」的交互在站内是活的（R-P2-9）——但它读不到 `document.cookie`（抛 `SecurityError`）、
-用不了 storage、同源 `fetch`/XHR 在 CSP 那一层被拒。能改的只有它自己那份页面的样子。
-
-没有 PRD 的需求：评估照做（推断处标「PRD 未提供」），评审与走查的包会直接让你停下并把
-「缺少 PRD 链接」回报给用户——这两份材料的输入就是 PRD，没有它做出来的东西是编的。
-
-## 这与抽屉里那个「生成」不是同一条路
-
-MCP 那条路是**别的 agent** 干（你把包给它）；抽屉里那个「生成」是 Flowers 自己跑本机的一条
-命令。可选的生成器有五个，`src/core/uemaster/candidates.ts` 里是一张固定的表：
-
-| id | 显示名 | 命令 | 任务包怎么进去 |
-| --- | --- | --- | --- |
-| `claude` | Claude Code | `claude -p --permission-mode acceptEdits` | stdin |
-| `codex` | Codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | stdin |
-| `dsh` | DeepSeek Harness | `dsh headless {prompt}` | `{prompt}` 那个 argv 位 |
-| `ollama` | Ollama | `ollama run <模型名>` | stdin（先填模型名） |
-| `custom` | 自建 / 自定义 | 自己写 | 两种都行 |
-
-两条契约：模板里有 `{prompt}` 就把包作为 argv 的一个元素传，没有就写 stdin；退出 0 之后
-先看产物文件是否新鲜，文件没动而 stdout 里有 HTML 就由 Flowers 落盘，两者都没有才算失败。
-**装了 ≠ 能用**：PATH 只决定列不列出来，`login status` 甚至会撒谎（本机 codex 说已登录、
-`exec` 却 401），所以设置页有一行「生成器 / 测试」——真跑一次才算通过，那是唯一的真相。
-README 的「生成器：装了 ≠ 能用」一节是同一份口径。
-
-## 失败长什么样
-
-所有失败都是 MCP 的**工具错误**（`isError: true` + 一句中文），不是进程崩溃，也不会被吞成成功：
-
-| 情况 | 文案（`isError: true`） |
+| 方案 | 为什么不选 |
 | --- | --- |
-| 需求 id 打错 / 不存在 | `需求不存在` |
-| `stage` 不是三个值之一 | `阶段只能是 evaluate、review、inspect 之一` |
-| `requirementId` 不是 uuid / 没传 | `需求 ID 格式不正确` |
-| 站内路径没文件 | `产物文件不存在：data/uemaster/PAN-9/evaluate.html —— 先把文件写到…` |
-| 链接不是 http(s) 也不是站内路径 | `产物链接必须是以 http:// 或 https:// 开头的完整链接，或以 /uemaster/ 开头的站内路径` |
+| **stdio** | 客户端得在本机起一个进程，还要这个仓库、Node、`DATABASE_URL`。这条路要的是「粘一条 URL」。 |
+| **HTTP+SSE（旧）** | 每条连接挂一个长会话，断线就断会话；客户端在网络里一抖（隧道、休眠、换网）就重来。 |
+| **Streamable HTTP（选了它）** | 现在这一代的官方传输：`POST` 走 JSON-RPC，`GET` 才开流。`tools/call` 是一次独立请求，中间过 nginx / 隧道都不影响。 |
 
-参数形状的错（上个表前三条里 schema 能判的部分）由 MCP 层在调用工具**之前**拦下，
-文案里会多一层 SDK 自己的前缀（`MCP error -32602: Input validation error: …`），中文还在后面；
-领域层的错（需求不存在、文件缺失、链接非法）是干净的一句中文。两者都不会中断连接——
-报过错之后同一个会话可以继续调。
+实现是 `@modelcontextprotocol/sdk` 的 `WebStandardStreamableHTTPServerTransport`
+（Next 16 的 route handler 就是 Web `Request`/`Response`，不需要 Node 适配层），
+入口在 `app/mcp/route.ts`，逻辑在 `mcp/http.ts`。
 
-真正的意外（连不上库、磁盘故障、代码 bug）不在这里翻译：原始堆栈打到 **stderr**
-（客户端会把它当服务端日志显示），工具侧同样以 `isError` 结束。这样「库挂了」与
-「参数填错了」不会长得一模一样。
+**无状态**（`sessionIdGenerator: undefined`）：没有 `Mcp-Session-Id`，每个请求都重新解析
+一次 token。于是
 
-注意 **stdout 是协议通道**：这个 server 的任何诊断都走 stderr，不要在里面 `console.log`。
+- token 撤销之后**下一个请求立刻 401**，不存在「这个会话是十分钟前建立的」那种窗口；
+- 进程里没有会话表，dev / 多 worker / 重启都不会把谁的会话搞丢；
+- 代价是服务端不能主动推送（`notifications/*`、进度）。这套工具全是请求-响应，用不到。
+
+`GET`（想挂钩 SSE 流）与 `DELETE`（想删会话）回 **405**：无状态模式下没有会话可删，
+也没有东西可推。这是规范允许的答复，SDK 的客户端看到 405 就退回「只用 POST」。
+
+## token 模型
+
+表 `mcp_tokens`（迁移 `0009_mcp_tokens.sql`）：
+
+| 列 | 说明 |
+| --- | --- |
+| `id` | uuid |
+| `token_hash` | **sha256 十六进制，只存这个**。原文（`flw_` + 32 字节随机）只在生成时出现一次 |
+| `member_id` | FK → `members`。**这就是身份**：请求 → token → 成员 → `actor` |
+| `label` | 生成时必填的名字（`claude-code` / `cursor` / `ci`） |
+| `scopes` | `read` \| `write` \| `admin`（包含关系：read ⊂ write ⊂ admin） |
+| `created_at` / `revoked_at` | 撤销是**软删除**：写 `revoked_at`，不删行 |
+
+为什么 sha256 而不是 bcrypt/argon2：token 是 32 字节的随机值，没有字典可查，也没有
+彩虹表；而每次 `tools/call` 都要验一次，慢哈希买不到安全，只买到延迟。
+
+为什么绑成员而不是「一个共享密钥」：整套状态机交给 agent 之后，**每次动作都会写一句
+承诺**（`requirement.scheduled` 的 payload 里有提测日与承诺完成日，`events.actor` 是那个
+人的名字）。共享密钥会让这一行失去意义。所以：
+
+```ts
+// mcp/tools.ts —— actor 永远来自 token，不是工具参数
+SERVICES.schedule(db, identity.member, { requirementId, releaseId, commitTestAt, commitDueAt });
+```
+
+评审签字这条尤其明显：`reviewPass` 会校验「签字人是不是这条需求派单上的评审人」
+（`src/core/requirements/review.ts` 的 `assertReviewer`）。用吕品的 token 去签赵越的单，
+拿到的是 `签字人不是这条需求派单到的评审人`——**这跟界面上点同一个按钮的结果一模一样**，
+因为两边调的是同一个服务。
+
+`admin` 今天**没有任何工具要求**：权限这一级留着是为了「以后有管理类工具时不必改词表」，
+现在给 token admin 只是「这个人可以写」。没有管理工具就不要编一个出来。
+
+### 撤销
+
+设置页那一行的「撤销」写 `revoked_at`。之后这个 token 的所有请求 401，但**那一行不删**：
+它写过的事件还指着它，owner 要能回答「上个月那个自动排期是谁干的」。
+
+## 工具表
+
+十四个。`read` 是只读，`write` 会推进状态并写 `events.actor`。
+
+| 工具 | 权限 | 从哪些状态合法 | 做什么 / 要什么 |
+| --- | --- | --- | --- |
+| `requirement_list` | read | 任何状态 | 看板一行摘要（编号、标题、状态、负责人、等谁、停几天）。可过滤 `state` / `owner` / `mine` |
+| `requirement_show` | read | 任何状态 | 现状 + 已有产物 + 还缺哪个 stage + **当前状态下合法的动作** |
+| `requirement_prd` | read | 任何状态 | PRD markdown。默认用最近一次快照；`refresh=true` 现读源文档（那一步会落一版快照 + 一条事件） |
+| `uemaster_plan` | read | 任何状态 | 该阶段的 UEmaster 任务包（中文、可直接执行）。纯读 |
+| `requirement_create` | write | —（新建） | 提需求，落在「收集」。要 `title` / `type`（commercial\|feature）/ `requester`，可选 `ownerMemberId` |
+| `uemaster_attach` | write | 任何状态 | 交回产物链接。站内路径 `data/uemaster/` 下必须真有文件 |
+| `requirement_submit_review` | write | 收集、待设计 | 进「待评审」并按类型派单。**必须给正式 PRD 链接** |
+| `requirement_review_pass` | write | 待评审 | 签字通过 → 待排期。**token 那个人必须是派单上的评审人** |
+| `requirement_review_reject` | write | 待评审 | 打回 → 待设计。原因必填 |
+| `requirement_schedule` | write | 待排期 | 排进版本 → 待开发。要 `releaseId` + 提测日 + 承诺完成日（YYYY-MM-DD），后者不能早于提测日、不能晚于版本发版日 |
+| `requirement_bounce` | write | 测试中 | 打回开发中。原因必填 + 重填承诺完成日（不能早于今天） |
+| `requirement_reject` | write | 收集 | 拒绝（终态）。原因必填。只有「收集」能拒绝——评估过的需求要毙就写评审意见 |
+| `requirement_shelve` | write | 除终态外全部 | 搁置。原因必填。还挂着的评审派单会一起作废 |
+| `requirement_restore` | write | 已搁置 | 放回「收集」，重新走一遍流程 |
+
+「从哪些状态合法」这一列**不是手写的散文**：
+
+- 每个工具在 `mcp/tools.ts` 声明它对应 `detail.ts` 的哪个 `DetailAction`；
+- 状态清单从 `LEGAL_FROM` 取，描述里的中文由 `STATE_LABEL` 拼出来，所以工具描述与
+  这张表不可能各说各的；
+- `tests/mcp-legal-from.test.ts` 把十个状态**都造一遍真需求**，逐状态比对
+  `getRequirementDetail().actions`（就是 `actionsFor`）与 MCP 声明的集合，**双向相等**。
+  页面动作条改了而 MCP 没跟，这条测试立刻红——那正是「agent 看到一个点了必然被拒的
+  按钮」的开始。
+
+`evaluate` **没有工具**：它不是「点一下就能完成」的动作（材料要生成，入口在抽屉「参考」
+段的「生成」），`actionsFor` 从不返回它，API 上也就不该有。
+
+### 失败长什么样
+
+两种形状，客户端两种都能处理：
+
+**HTTP 层（没有身份 / 方法不对）** —— 状态码 + 一句中文：
+
+| 情况 | 状态码 | 正文 |
+| --- | --- | --- |
+| 没带 `Authorization` | 401 | `缺少 token：请求头要带 Authorization: Bearer <token>` |
+| token 不存在 / 已撤销 / 形状不对 | 401 | `token 无效或已撤销` |
+| `GET` / `DELETE`（无状态模式下没有流 / 会话） | 405 | `这个端点只接受 POST…` |
+
+401 之前**一次数据库查询都没有**（形状不对的 token 在查库前就被拒），也就没有任何领域
+服务被调用——没身份的请求不会在时间线上留下半条记录。
+
+**MCP 层（身份是真的，但这件事不行）** —— `isError: true` + 服务层那句中文原文：
+
+| 情况 | 文案 |
+| --- | --- |
+| 当前状态不允许这一步 | `不能从「收集」直接到「待开发」` / `这条需求当前在「待评审」，不能执行这一步` |
+| 需求 id 不存在 | `需求不存在` / `找不到这条需求` |
+| 签字人不对 | `签字人不是这条需求派单到的评审人` |
+| 缺 PRD | `提交评审必须填正式 PRD 链接` |
+| 日期越界 | `承诺完成日不能早于提测日` / `承诺完成日不能晚于版本发版日` / `承诺完成日不能早于今天` |
+| 权限不够 | `这个 token 的权限是「读」，调用 requirement_schedule 需要「写」权限` |
+
+工具**不预判**状态：`requirement_schedule` 对一条「收集」的需求照样会调到 `schedule`，
+由它自己抛 `AppError`。这样 API 与界面只有一份规则，不可能是两份。
+
+真正的意外（连不上库、代码 bug）不翻译成上面这些：原始堆栈打到 **stderr**，工具侧同样
+以 `isError` 结束。「库挂了」与「参数填错了」不该长得一模一样。
+
+## stdio（本机那条路）
+
+`npm run mcp` 起 `dist/mcp/server.js`，讲 stdio，工具定义与 HTTP **完全同一份**
+（`mcp/build.ts` 挂的是 `mcp/tools.ts` 的 `TOOLS`）。区别只有身份：
+
+- stdio **没有 token**：`actor` 来自 `FLOWERS_MCP_ACTOR`（缺省 `agent`），权限视为 `write`。
+  能起这个进程的人本来就有仓库和 `DATABASE_URL`，再给他一把 token 是仪式不是边界。
+- HTTP 是**每个请求一份 token**：那条路面向「不在这台机器上」的客户端。
+
+```bash
+npm run mcp:build     # tsc -p tsconfig.mcp.json → dist/
+npm run mcp           # node dist/mcp/server.js，等 stdin 上的 JSON-RPC
+npx tsx scripts/mcp-smoke.ts            # 用 SDK 的 client 连上去把工具跑一遍
+```
+
+```bash
+claude mcp add flowers -e FLOWERS_MCP_ACTOR=claude-code -- npx tsx mcp/server.ts
+```
+
+`npm run mcp` 不经过 `tsx`（那是 devDependency）：生产里先 `npm run mcp:build`，再用
+`node /绝对路径/dist/mcp/server.js`。
+
+## dsh 今天接不上
+
+**DeepSeek Harness（dsh）现在不能作为 MCP 客户端连这个端点。** 原因不是这个端点缺什么，
+而是 dsh 没有 MCP 客户端：
+
+- dsh 的扩展模型是 `dsh plugin add <npm pkg>`——插件是跑在 dsh 进程里的 JS 包；
+- 它没有「连接外部 MCP server」这一层（没有 MCP-client 插件，也没有配置项能填一条
+  `url` + `Authorization` 头）；
+- 所以 `/mcp` 对 dsh 来说只是一个它不会去敲的 HTTP 地址。
+
+在 dsh 长出 MCP client 之前，dsh 里能做的只有「把这条 URL 和 token 交给一个
+**能连 MCP 的**客户端」。不要为了让它「看起来支持」而在 dsh 里塞一个手写的 HTTP 调用
+——那是第二套协议实现，会与这里的工具表分叉。
+
+## 部署
+
+- **走 HTTPS**：token 是 bearer，明文发出去等于公开。`/settings` 里显示的 URL 按
+  `x-forwarded-proto` / `host` 推出来（本机是 `http://localhost:3000/mcp`），反向代理
+  记得传这两个头。
+- **token 不进仓库、不进截图、不进日志**：一份 token 一个人，用完撤销。
+- `npm run db:migrate` 会建 `mcp_tokens`；没有它，`/mcp` 在鉴权这一步就会报「relation
+  does not exist」。

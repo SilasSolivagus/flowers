@@ -64,6 +64,13 @@
       "when": 1793990799593,
       "tag": "0008_review_findings_phase",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793998234809,
+      "tag": "0009_mcp_tokens",
+      "breakpoints": true
     }
   ]
 }

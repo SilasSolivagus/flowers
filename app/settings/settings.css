@@ -64,3 +64,21 @@
 /* key 那一格用等宽字会让圆点看起来像代码；密码框统一用正文字体。 */
 .mk-f input[type="password"]{font:400 var(--t-body-s) var(--f-sans)}
 .mk-acts{display:flex;gap:8px;justify-content:flex-end}
+
+/* 「接你的 agent」那一格（P4.1）：端点、粘贴行、token 列表。
+   骨架与「我的模型 key」同一套（.gen-row / .gen-detail / .mk-f / .mk-acts），
+   所以这里只补四样东西：端点值不出屏、粘贴行是等宽可折断、token 原文可选得中、
+   副标题（权限 · 成员 · 日期）小一号。铁律照旧：颜色一律 var(--c-*)。 */
+.mcp-end{max-width:min(52ch,42vw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:ltr}
+/* 粘贴行整行都是**一条命令**，右对齐会把它读成「值」而不是「照着粘的东西」：
+   左对齐 + 等宽 + 允许折断（一行 JSON 有 150 多个字符）。 */
+/* 选择器要比 `.sg .i .l` / `.sg .i .v`（0,3,0）更具体，否则那两条会把这一行
+   又拉回「标签左、值右对齐」——而粘贴行是一条命令，右对齐会把它读成值。 */
+.sg .i.mcp-line .l{flex:0 0 88px}
+.sg .i.mcp-line .v{flex:1 1 auto;margin-left:0;text-align:left;display:flex;align-items:flex-start;gap:8px}
+.mcp-pair{display:flex;align-items:flex-start;gap:8px;min-width:0;width:100%}
+.mcp-pair code{flex:1 1 auto;min-width:0;font:400 var(--t-caption) var(--f-mono);color:var(--c-text-1);overflow-wrap:anywhere;user-select:all}
+.mcp-sub{display:block;margin-top:2px;font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
+/* 表单与原文块都是**一组行**，不是一行：`.sg .i` 是 flex，这里要盖成 grid。 */
+.sg .i.mcp-form{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px;padding-top:0;padding-bottom:12px}
+.sg .i.mcp-token{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding-top:0;padding-bottom:12px}
