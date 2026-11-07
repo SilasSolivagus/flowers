@@ -6,6 +6,7 @@ import { previousRelease } from '../../src/core/releases/manage';
 import { Gantt } from '../components/Gantt';
 import { ReleaseForm } from '../components/ReleaseForm';
 import './releases.css';
+import { Shell } from '../components/Shell';
 
 /**
  * 版本页（spec §9 第 2 条）：时间窗 + 甘特 + 进度（时间口径）。
@@ -84,7 +85,8 @@ export default async function ReleasesPage({
   }));
 
   return (
-    <main className="view pad vpage">
+    <Shell>
+      <main className="view pad vpage">
       <div className="vbar">
         <h2>版本</h2>
         <div className="vsw">
@@ -174,6 +176,7 @@ export default async function ReleasesPage({
           }}
         />
       )}
-    </main>
+      </main>
+    </Shell>
   );
 }

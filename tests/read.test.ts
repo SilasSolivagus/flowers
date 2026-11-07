@@ -14,7 +14,7 @@ import { getRequirementDetail } from '../src/core/read/detail.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { cleanArtifacts, writeArtifact } from './helpers/files.js';
 import { listReleases } from '../src/core/read/version.js';
-import { actorFromCookie, DEFAULT_MEMBER, listMembers } from '../src/core/read/member.js';
+import { actorFromCookie, listMembers } from '../src/core/read/member.js';
 
 /**
  * 读模型的用例：全部对着真库跑。
@@ -88,19 +88,26 @@ async function seedOneTesting(opts: {
   const windowStart = shiftDay(due, -7);
   const testAt = shiftDay(due, -2);
   const releaseId = await makeRelease(`R-${due}`, windowStart, due);
-  const r = await createRequirement(db, '吕品', {
+  /**
+   * P4-04：**以负责人的身份**走完全程。
+   *
+   * 以前这里由「吕品」替别人建需求、替别人排期——那正是权限层上线后不允许的事（PM
+   * 只能改自己负责的需求）。规则 1「录入即负责人」让这个助手更短：谁建谁负责，
+   * 后面的每一步都由同一个人做。
+   */
+  const owner = opts.owner ?? '房超';
+  const r = await createRequirement(db, owner, {
     title: opts.title ?? 'S3 协议支持',
     type: opts.type ?? 'feature',
     requester: '孙建宏',
-    ownerMemberId: memberId(opts.owner ?? '房超'),
   });
-  await evaluate(db, '吕品', { requirementId: r.id });
-  await submitReview(db, '吕品', {
+  await evaluate(db, owner, { requirementId: r.id });
+  await submitReview(db, owner, {
     requirementId: r.id,
     prdUrl: 'https://docs.example.com/prd/s3',
   });
   await reviewPass(db, '吕正豪', { requirementId: r.id });
-  await schedule(db, '吕品', {
+  await schedule(db, owner, {
     requirementId: r.id, releaseId, commitTestAt: testAt, commitDueAt: due,
   });
   await db.execute(sql`update requirements set state = 'test' where id = ${r.id}`);
@@ -109,7 +116,9 @@ async function seedOneTesting(opts: {
 
 /** 建一条停在 inbox 的需求（除了标题 / 提出人什么都没填，也永远没有版本）。 */
 async function seedInbox(requester = '房超', owner?: string) {
-  const r = await createRequirement(db, '吕品', {
+  // 由超管建：要造「没有负责人」的卡，只有超管能显式传 null（见 create.ts 的
+  // resolveOwner）；有负责人时由超管指定也不受条线限制。
+  const r = await createRequirement(db, '房超', {
     title: 'PC 剪贴板读取 URL',
     type: 'commercial',
     requester,
@@ -122,16 +131,15 @@ async function seedInbox(requester = '房超', owner?: string) {
 async function seedReady(owner: string) {
   const windowStart = shiftDay(TODAY, 7);
   const releaseId = await makeRelease(`R-${windowStart}`, windowStart, shiftDay(TODAY, 14));
-  const r = await createRequirement(db, '吕品', {
+  const r = await createRequirement(db, owner, {
     title: 'PC 端支持打开分享页',
     type: 'feature',
     requester: '孙建宏',
-    ownerMemberId: memberId(owner),
   });
-  await evaluate(db, '吕品', { requirementId: r.id });
-  await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
+  await evaluate(db, owner, { requirementId: r.id });
+  await submitReview(db, owner, { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
   await reviewPass(db, '吕正豪', { requirementId: r.id });
-  await schedule(db, '吕品', {
+  await schedule(db, owner, {
     requirementId: r.id,
     releaseId,
     commitTestAt: shiftDay(TODAY, 9),
@@ -142,14 +150,14 @@ async function seedReady(owner: string) {
 
 /** 建一条推到 review 的需求，返回 id 与 type 决定的评审人姓名。 */
 async function seedInReview(type: 'commercial' | 'feature') {
-  const r = await createRequirement(db, '吕品', {
+  // 以负责人王妍的身份建与提交：PM 只能改自己负责的需求（P4-04）。
+  const r = await createRequirement(db, '王妍', {
     title: type === 'commercial' ? '直链分享限速（二期）' : '导出任务队列改造',
     type,
     requester: '王妍',
-    ownerMemberId: memberId('王妍'),
   });
-  await evaluate(db, '吕品', { requirementId: r.id });
-  await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
+  await evaluate(db, '王妍', { requirementId: r.id });
+  await submitReview(db, '王妍', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
   return r.id;
 }
 
@@ -164,21 +172,32 @@ async function cardOf(state: string, id: string, me: string) {
 }
 
 describe('成员', () => {
-  it('listMembers 返回五个人，两条评审线都在', async () => {
+  it('listMembers 返回七个人，两条评审线与一个超管都在', async () => {
     const rows = await listMembers();
-    expect(rows.map((m) => m.name).sort()).toEqual(['吕品', '吕正豪', '房超', '王妍', '赵越'].sort());
+    expect(rows.map((m) => m.name).sort()).toEqual(
+      ['吕品', '吕正豪', '房超', '李嘉', '王妍', '罗丹', '赵越'].sort(),
+    );
     expect(rows.every((m) => m.id.length > 0)).toBe(true);
     expect(rows.map((m) => m.role)).toContain('commercial_reviewer');
     expect(rows.map((m) => m.role)).toContain('feature_reviewer');
+    expect(rows.map((m) => m.role)).toContain('product_owner');
+    // PM 也有条线（P4-04）：条线是人的属性，不只是评审人的
+    expect(rows.filter((m) => m.role === 'pm').every((m) => m.line !== null)).toBe(true);
   });
 
-  it('cookie 缺省与坏值都退回默认成员', () => {
-    expect(DEFAULT_MEMBER).toBe('吕品');
-    expect(actorFromCookie(undefined)).toBe(DEFAULT_MEMBER);
-    expect(actorFromCookie('')).toBe(DEFAULT_MEMBER);
-    // 客户端写 cookie 时 encodeURIComponent 过，读回来必须解码
+  /**
+   * P4-04：旧的 `flowers_actor` cookie **不再**是身份。
+   *
+   * 这条用例原来钉的是「缺省退回写死的吕品」——那正是 owner 撞到的 bug（他是房超，
+   * 应用每次都说他是吕品）。现在它钉相反的事：解析器对缺值与坏值一律给 null，
+   * 「我是谁」由 `currentMember()` 按会话 → 环境变量 → 第一个超管 的顺序回答。
+   * 真值顺序的用例在 `tests/auth.test.ts`。
+   */
+  it('旧 cookie 解析器：缺值与空白是 null，好值照旧解码', () => {
+    expect(actorFromCookie(undefined)).toBeNull();
+    expect(actorFromCookie('')).toBeNull();
     expect(actorFromCookie(encodeURIComponent('房超'))).toBe('房超');
-    // 坏值不抛错：顶栏不该因为一个人手改的 cookie 白屏
+    // 坏值不抛错：一个手改过的 cookie 只该等于「没身份」，不该让整页 500
     expect(actorFromCookie('%E4%B8')).toBe('%E4%B8');
   });
 });
@@ -265,7 +284,8 @@ describe('getBoard', () => {
 
   it('终态的列等的是「—」，不假装有人在等', async () => {
     const r = await seedInbox('房超', '房超');
-    await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
+    // P4-04：搁置也要过权限——房超是负责人（也是超管），吕品是 PM、不负责这条。
+    await shelveRequirement(db, '房超', { requirementId: r.id, reason: '本期不做' });
     const card = await cardOf('shelved', r.id, '房超');
     expect(card.waiting).toBe('—');
     expect(card.waitingOn).toBe('none');
@@ -396,7 +416,8 @@ describe('mine = 现在欠你一个动作（不是「跟你有关」）', () => 
   it('待排期 / 待设计框的是负责人，收集框的是提出人', async () => {
     const { id: designId } = await (async () => {
       const r = await seedInbox('孙建宏', '房超');
-      await evaluate(db, '吕品', { requirementId: r.id });
+      // 负责人是房超，所以评估也得由房超做（PM 不能改别人的需求）。
+      await evaluate(db, '房超', { requirementId: r.id });
       return r;
     })();
     expect((await cardOf('design', designId, '房超')).mine).toBe(true);
@@ -505,7 +526,7 @@ describe('getRequirementDetail', () => {
     const ready = await seedReady('房超');
     expect((await getRequirementDetail(ready))!.actions).toEqual(['shelve']);
 
-    await shelveRequirement(db, '吕品', { requirementId: inbox.id, reason: '本期不做' });
+    await shelveRequirement(db, '房超', { requirementId: inbox.id, reason: '本期不做' });
     const shelved = (await getRequirementDetail(inbox.id))!;
     expect(shelved.actions).toEqual(['restore']);
     expect(shelved.stateLabel).toBe('已搁置');

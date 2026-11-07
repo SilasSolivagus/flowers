@@ -4,6 +4,7 @@ import { assertTransition, type State } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import { assertCan } from '../auth/guard.js';
 import { lockRequirement, moveTo } from './lock.js';
 
 const MISSING_REASON_REJECT = '拒绝必须写原因';
@@ -61,6 +62,15 @@ export async function rejectRequirement(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
+    /**
+     * 规则 3（P4-04）：「拒绝」是**负责人**的动作，条线负责人与超管也能做（`can` 的
+     * `edit` 就回答了这三档）。用 `edit` 而不是新开一个 `reject` 能力，是因为它们
+     * 问的是同一件事——「这条需求归不归你管」。收到通知的那一侧不在写路径上：
+     * 通知是从 `events` 派生的（见 `core/read/notify.ts`），写一条事件就够了。
+     */
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
     if (row.state !== 'inbox') throw new AppError('illegal_transition', ONLY_INBOX_REJECT);
 
     // 这条迁移没有 guard（拒绝不需要 PRD / 类型），所以不传 ctx。
@@ -97,6 +107,10 @@ export async function shelveRequirement(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
+    // 同上（规则 3）：负责人 / 条线负责人 / 超管都能搁置，三档都由 `edit` 回答。
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
 
     if (!isShelvable(row.state)) throw new AppError('illegal_transition', TERMINAL_SHELVE);
 
@@ -141,6 +155,9 @@ export async function restoreRequirement(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
     assertTransition(row.state, 'inbox');
 
     // skip_reason 描述的是**这一轮**提交流程（报表按它统计「跳过评估」的捷径），

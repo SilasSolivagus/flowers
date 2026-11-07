@@ -238,9 +238,12 @@ describe('evaluate', () => {
   it('类型不在枚举内（含原型链上的名字）报 invalid_type，且不写派单', async () => {
     // 直接插库绕开 zod：库里可能留着历史脏 type。'toString' 会命中原型上的函数，
     // 裸查表的实现会把它当成角色继续往下走。
+    // P4-04：脏数据行也要有一个负责人——否则拦下它的是权限（forbidden），
+    // 而不是这条用例要证明的 invalid_type。
     const ins = await db.execute<{ id: string }>(sql`
-      insert into requirements (number, title, type, state, requester)
-      values (99, '历史脏数据', 'toString', 'design', '孙建宏') returning id`);
+      insert into requirements (number, title, type, state, requester, owner_member_id)
+      values (99, '历史脏数据', 'toString', 'design', '孙建宏',
+              (select id from members where name = '吕品')) returning id`);
     const id = ins.rows[0]!.id;
 
     expect(await caught(submitReview(db, '吕品', { requirementId: id, prdUrl: 'https://x' })))
@@ -968,7 +971,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const id = await inTest();
     const before = await eventCountOf(id);
 
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: id, reason: '自测没过', newCommitDueAt,
     } as never))).toMatchObject({
       code: 'missing_new_due', message: '打回必须重填承诺完成日',
@@ -982,7 +985,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const id = await inTest();
     const before = await eventCountOf(id);
 
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: id, reason, newCommitDueAt: '2026-12-10',
     } as never))).toMatchObject({ code: 'missing_reason', message: '打回必须写原因' });
 
@@ -994,7 +997,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     // 声明的优先级：先看新承诺完成日，再看待填原因（与 brief 的检查顺序一致）。
     // 两个都缺时只报第一条错误，不聚合——控制器只展示一个 message。
     const id = await inTest();
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: id, reason: '  ', newCommitDueAt: '',
     }))).toMatchObject({ code: 'missing_new_due', message: '打回必须重填承诺完成日' });
   });
@@ -1002,7 +1005,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   it('校验全部在开事务之前：需求不存在也先报缺失字段', async () => {
     // 「校验先于查行」与 evaluate / submitReview / reviewReject / schedule 一致，
     // 也让这条规则可以被单独钉住：不存在的 id + 空白原因 → missing_reason，而不是 not_found。
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: '00000000-0000-0000-0000-000000000000',
       reason: ' ', newCommitDueAt: '2026-12-10',
     }))).toMatchObject({ code: 'missing_reason', message: '打回必须写原因' });
@@ -1014,7 +1017,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const before = await eventCountOf(id);
 
     // 前后各留空白：落库与事件里都应该是 trim 后的值。
-    const out = await bounce(db, '王妍', {
+    const out = await bounce(db, '吕品', {
       requirementId: id, reason: '  自测没过  ', newCommitDueAt: '2026-12-10',
     }, NOW);
     expect(out.state).toBe('dev');
@@ -1031,7 +1034,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
 
     expect(await eventCountOf(id)).toBe(before + 1);
     expect(await bouncedEventOf(id)).toMatchObject({
-      actor: '王妍',
+      actor: '吕品',
       payload: { from: 'test', to: 'dev', reason: '自测没过', newCommitDueAt: '2026-12-10' },
     });
   });
@@ -1043,7 +1046,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const before = await eventCountOf(id);
 
     for (const bad of ['不是日期', '2026-13-45']) {
-      expect(await caught(bounce(db, '王妍', {
+      expect(await caught(bounce(db, '吕品', {
         requirementId: id, reason: '自测没过', newCommitDueAt: bad,
       }))).toMatchObject({ code: 'bad_new_due', message: '打回必须填有效的承诺完成日' });
     }
@@ -1070,14 +1073,14 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
       const before = await eventCountOf(id);
 
       // '2027-03-10' 是北京的昨天，按 UTC 却还是「今天」：按时刻比会放过它。
-      expect(await caught(bounce(db, '王妍', {
+      expect(await caught(bounce(db, '吕品', {
         requirementId: id, reason: '自测没过', newCommitDueAt: '2027-03-10',
       }, now))).toMatchObject({ code: 'bad_new_due', message: '承诺完成日不能早于今天' });
       expect(await stateOfRow(id)).toBe('test');
       expect(await eventCountOf(id)).toBe(before);
 
       // 今天当天合法：承诺「今天就上线」是真实的（虽然乐观），它不能被自己的日期挡在门外。
-      const out = await bounce(db, '王妍', {
+      const out = await bounce(db, '吕品', {
         requirementId: id, reason: '自测没过', newCommitDueAt: '2027-03-11',
       }, now);
       expect(out.state).toBe('dev');
@@ -1089,7 +1092,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     // 生产调用方就是三个参数。用 2099 而不是 2026-12-10 之类的日期：这条用例一旦
     // 自己带一个到期日，就会跟着日历腐烂，而它要证明的只是「不传 now 也能跑」。
     const id = await inTest();
-    const out = await bounce(db, '王妍', {
+    const out = await bounce(db, '吕品', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2099-12-31',
     });
     expect(out.state).toBe('dev');
@@ -1101,7 +1104,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     await db.execute(sql`update requirements set state = ${from} where id = ${r.id}`);
     const before = await eventCountOf(r.id);
 
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: r.id, reason: '自测没过', newCommitDueAt: '2026-12-10',
     }, NOW))).toMatchObject({
       code: 'illegal_transition', message: `不能从「${STATE_LABEL[from]}」直接到「开发中」`,
@@ -1122,7 +1125,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
     const { id } = await makeReadyAt('2026-12-01', '2026-12-01', '2026-12-04');
     const before = await eventCountOf(id);
 
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
     }, NOW))).toMatchObject({
       code: 'illegal_transition', message: '这条需求当前在「待开发」，不能执行这一步',
@@ -1135,20 +1138,20 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   });
 
   it('需求不存在时给中文 not_found', async () => {
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: '00000000-0000-0000-0000-000000000000',
       reason: '自测没过', newCommitDueAt: '2026-12-10',
     }, NOW))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
   });
 
   it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
-    expect(await caught(bounce(db, '王妍', body))).toMatchObject({
+    expect(await caught(bounce(db, '吕品', body))).toMatchObject({
       code: 'invalid', message: '参数不合法',
     });
   });
 
   it.each(['abc', 123, '', null])('需求 ID 不是 uuid 就给中文消息：%j', async (id) => {
-    expect(await caught(bounce(db, '王妍', {
+    expect(await caught(bounce(db, '吕品', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-10',
     } as never))).toMatchObject({ code: 'invalid', message: '需求 ID 格式不正确' });
   });
@@ -1165,7 +1168,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
 
     // 注入的 now（NOW = 12-03）与下面第一个 tick 的时刻一致：tick 的 now 与 bounce 的
     // now 对「今天」的口径必须相同，否则「12-20 是未来」这件事两边会各说一套。
-    await bounce(db, '王妍', {
+    await bounce(db, '吕品', {
       requirementId: id, reason: '自测没过', newCommitDueAt: '2026-12-20',
     }, NOW);
     const bounced = await datesOf(id);

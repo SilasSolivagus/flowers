@@ -19,13 +19,62 @@ import {
 export const eventsSeqSeq = pgSequence('events_seq_seq');
 export const requirementsNumberSeq = pgSequence('requirements_number_seq');
 
+/**
+ * 花名册（P4-04 起它同时是账号表）。
+ *
+ * 四列是这一轮加的，各自的理由：
+ *
+ * - `line`：**人也属于条线**，不只是评审人。`feature` / `commercial` / null。PM 有
+ *   条线（王妍在商业线、吕品在功能线……），条线负责人的 `line` 与他的角色必须对应。
+ *   它参与两件事：负责人转交时「只能在自己这条线内转」（见 `core/auth/roles.ts` 的
+ *   `can`），以及界面按线筛人。**权限判断不看这一列**——「谁是这条线的负责人」由
+ *   `role` 决定（`feature_reviewer` / `commercial_reviewer`），那是唯一的映射来源；
+ *   两列同时存在时，role 是权威，line 是展示与招聘（转交/建人）用的。
+ * - `password_hash`：null = 这个账号还没有口令（老数据、或刚建还没设密码）。null
+ *   一律按「登录失败」处理，绝不当成「空密码可以登」。格式见
+ *   `src/core/auth/password.ts`（scrypt + 每人一个盐，参数写进串里，改参数不炸老行）。
+ * - `password_updated_at`：改口令的时刻。它只有一个用途——审计（谁什么时候重置过）。
+ * - `notify_prefs`：JSON 文本。null 与 `{"inherit":true}` 同义 = 按角色默认。显式
+ *   写 `{"inherit":false,"changed":false}` 才是「我不要这类通知」。为什么是文本而不是
+ *   几张布尔列：口味是会长的（这一轮只有「全部变动 / 拒绝搁置」两类），而每加一格
+ *   就改一次表结构；解释权在 `src/core/read/notify.ts`，改口径不用改表（与
+ *   `app_settings.value` 同一条理由）。
+ * - `deactivated_at`：**停用，不硬删**。`requirements.owner_member_id`、
+ *   `review_assignments.reviewer_member_id`、`mcp_tokens.member_id` 三处外键都指着
+ *   这一行，硬删要么被拦住，要么把「谁在哪天承诺了什么」一起删掉——那正是这个系统
+ *   存在的意义。停用后：登录被拒（与密码错同一句话）、不再收通知、不出现在负责人
+ *   下拉里；历史行仍然指向他。
+ */
 export const members = pgTable('members', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
-  // 'pm' | 'commercial_reviewer' | 'feature_reviewer'
+  // 'product_owner' | 'feature_reviewer' | 'commercial_reviewer' | 'pm'
   role: text('role').notNull(),
+  // 'feature' | 'commercial' | null
+  line: text('line'),
+  passwordHash: text('password_hash'),
+  passwordUpdatedAt: timestamp('password_updated_at', { withTimezone: true }),
+  /** JSON 文本，见文件头。null = 默认。 */
+  notifyPrefs: text('notify_prefs'),
+  deactivatedAt: timestamp('deactivated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  /**
+   * 角色的 CHECK：四个值是服务层 `ROLES` 的同一份词表。它挡住绕过服务层的写入
+   * （脚本直连、手改），与 `uemaster_jobs.status` 那条同一条口径——服务层给中文，
+   * 库这一层守底线。
+   */
+  roleCheck: check(
+    'members_role_check',
+    sql`${t.role} in ('product_owner', 'feature_reviewer', 'commercial_reviewer', 'pm')`,
+  ),
+  lineCheck: check(
+    'members_line_check',
+    sql`${t.line} in ('feature', 'commercial')`,
+  ),
+  /** 名字是登录名：同名的两个人无法区分，登录会取决于 `order by id limit 1`。 */
+  nameUnique: uniqueIndex('members_name_unique').on(t.name),
+}));
 
 /**
  * 版本（发版窗口）。

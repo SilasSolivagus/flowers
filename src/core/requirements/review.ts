@@ -4,19 +4,22 @@ import { AppError } from '../errors.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
-import { lockRequirement, moveTo, type Tx } from './lock.js';
+import { memberByName } from '../auth/members.js';
+import { can, reviewerRoleOf } from '../auth/roles.js';
+import { lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
 
 /**
- * 需求类型 → 评审人角色（members.role 的取值就是这两个字符串）。模块私有：
- * 唯一消费者是本文件的 assignReviewer。用例里刻意写死评审人姓名（'赵越' / '吕正豪'），
- * 不从这里反查——否则实现改错映射时，测试会跟着错，等于自己给自己盖章。
+ * 签字人不是派单上的那个人（R29）。
+ *
+ * P4-04 起这条判定**不再**是本文件的私有规则：`type → 条线负责人角色` 的映射搬到了
+ * `src/core/auth/roles.ts`（`reviewerRoleOf`），`can(actor, facts, 'review')` 是唯一的
+ * 判断题。这个常量只剩一句中文——错误码仍然是 `not_reviewer` 而不是 `forbidden`：
+ * 它更精确（「去找该签的人」vs「你没有权限」），而且 P1 的用例逐字钉着它。
+ *
+ * 用例里仍然写死评审人姓名（'赵越' / '吕正豪'），不从实现反查——否则实现改错映射时，
+ * 测试会跟着错，等于自己给自己盖章。
  */
 const NOT_REVIEWER = '签字人不是这条需求派单到的评审人';
-
-const REVIEWER_ROLE = {
-  commercial: 'commercial_reviewer',
-  feature: 'feature_reviewer',
-} as const;
 
 /**
  * 派单：按需求类型挑一个角色匹配的评审人，写一条 verdict='handed' 的派单行。
@@ -33,10 +36,8 @@ const REVIEWER_ROLE = {
 export async function assignReviewer(tx: Tx, requirementId: string, type: string) {
   // hasOwn 而不是裸查表：type 来自数据库的 text 列，'toString' / 'constructor'
   // 会命中原型上的函数（truthy）并当成角色绑进 SQL，绕过 !role 这道判断。
-  const role = Object.hasOwn(REVIEWER_ROLE, type)
-    ? REVIEWER_ROLE[type as keyof typeof REVIEWER_ROLE]
-    : undefined;
-  if (!role) throw new AppError('invalid_type', '需求类型不认识');
+  const role = reviewerRoleOf(type);
+  if (role === null) throw new AppError('invalid_type', '需求类型不认识');
 
   const found = await tx.execute<{ id: string }>(sql`
     select id from members where role = ${role} order by created_at, id limit 1`);
@@ -70,16 +71,25 @@ export async function assignReviewer(tx: Tx, requirementId: string, type: string
  * （拿任意名字试，凭错误码差异枚举出花名册），而用户能做的动作是一样的——找对的人来签。
  * 顺序在 assertTrigger 之后：先回答「这一步能不能做」，再回答「你能不能做」。
  */
-async function assertReviewer(tx: Tx, requirementId: string, actor: string): Promise<void> {
-  const found = await tx.execute<{ reviewer_member_id: string; actor_id: string | null }>(sql`
-    select ra.reviewer_member_id,
-           (select m.id from members m where m.name = ${actor}) as actor_id
+async function assertReviewer(
+  tx: Tx, requirementId: string, actor: string, locked: Locked,
+): Promise<void> {
+  const found = await tx.execute<{ reviewer_member_id: string }>(sql`
+    select ra.reviewer_member_id
       from review_assignments ra
      where ra.requirement_id = ${requirementId} and ra.verdict = 'handed'
      order by ra.id
      limit 1`);
-  const row = found.rows[0];
-  if (!row || row.actor_id === null || row.actor_id !== row.reviewer_member_id) {
+  const member = await memberByName(tx, actor);
+  const facts = {
+    type: locked.type ?? '',
+    ownerMemberId: locked.owner_member_id,
+    state: locked.state,
+    // 没有 handed 派单时传 null：can() 把「还没有派单」当成「不挑人」，于是这条线上的
+    // 负责人仍然能签（否则一条派单丢失的需求会永远没人能签）。
+    reviewerMemberId: found.rows[0]?.reviewer_member_id ?? null,
+  };
+  if (member === null || member.deactivatedAt !== null || !can(member, facts, 'review')) {
     throw new AppError('not_reviewer', NOT_REVIEWER);
   }
 }
@@ -97,7 +107,7 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
     // 只按配对判断是不够的：inbox → design 是合法的一对（那是评估的路子），
     // 所以光看配对，对一条还在 inbox 的需求点「通过」会骑着它走到别处。
     assertTrigger(row.state, 'queue', 'review_pass');
-    await assertReviewer(tx, requirementId, actor);
+    await assertReviewer(tx, requirementId, actor, row);
 
     await moveTo(tx, requirementId, 'queue');
     await tx.execute(sql`
@@ -130,7 +140,7 @@ export async function reviewReject(db: Db, actor: string, raw: unknown) {
     // 同上：inbox → design 是合法配对，所以一条 inbox 的需求直接点打回会「成功」，
     // 等于白送一次评估。钉住 trigger，措辞也因此变成「当前在「收集」，不能执行这一步」。
     assertTrigger(row.state, 'design', 'review_reject');
-    await assertReviewer(tx, requirementId, actor);
+    await assertReviewer(tx, requirementId, actor, row);
 
     await moveTo(tx, requirementId, 'design');
     await tx.execute(sql`

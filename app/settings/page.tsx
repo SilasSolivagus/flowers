@@ -18,6 +18,7 @@ import { MemberKeyRow } from './MemberKeyRow';
 import { endpointFromHeaders } from './mcp-endpoint';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
+import { Shell } from '../components/Shell';
 
 /**
  * 设置页：`/settings` 一个路由，两个 tab。
@@ -121,7 +122,8 @@ export default async function SettingsPage({
   }));
 
   return (
-    <main className="view">
+    <Shell>
+      <main className="view">
       <div className="setwrap">
         <nav className="stabs" aria-label="设置分栏">
           {TABS.map((item) => (
@@ -147,7 +149,8 @@ export default async function SettingsPage({
           )
           : <ProjectPanel members={members} generator={generator} />}
       </div>
-    </main>
+      </main>
+    </Shell>
   );
 }
 

@@ -85,6 +85,13 @@
       "when": 1794016881081,
       "tag": "0011_notification_reads",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794017895076,
+      "tag": "0012_auth",
+      "breakpoints": true
     }
   ]
 }

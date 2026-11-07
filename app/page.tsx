@@ -7,6 +7,7 @@ import { generatorView } from '../src/core/uemaster/settings';
 import { Board } from './components/Board';
 import { Drawer } from './components/Drawer';
 import { RequirementForm } from './components/RequirementForm';
+import { Shell } from './components/Shell';
 
 /**
  * 需求看板 + 抽屉。
@@ -70,7 +71,8 @@ export default async function BoardPage({
     : [];
 
   return (
-    <main className="view">
+    <Shell>
+      <main className="view">
       <Board columns={columns} />
       {/* key 是需求 id：从 A 的抽屉直接跳到 B 的抽屉（URL 导航）时，整块重新挂载，
           上一个动作留下的失败消息与表单值不会跟着漂到另一条需求上。 */}
@@ -104,6 +106,7 @@ export default async function BoardPage({
           }}
         />
       )}
-    </main>
+      </main>
+    </Shell>
   );
 }

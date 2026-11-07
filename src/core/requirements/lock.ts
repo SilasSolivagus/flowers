@@ -14,7 +14,17 @@ export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
  * 不提供 selectExtra 之类的参数：列名是拼接进 SQL 的字符串字面量，谁传谁就绕过了
  * 参数化；而目前没有任何调用方需要第四个列。
  */
-export type Locked = { state: State; type: string | null; prd_url: string | null };
+export type Locked = {
+  state: State;
+  type: string | null;
+  prd_url: string | null;
+  /**
+   * 负责人（P4-04）。加这一列不是为了状态机，是为了**权限判断**：`can()` 要回答
+   * 「这条需求是不是你的」，而它只能读库里的那张 fact，不能听调用方的口头断言。
+   * 既然已经 `for update` 锁了这一行，顺手取回来比再查一次便宜、也不会读到半旧的行。
+   */
+  owner_member_id: string | null;
+};
 
 /**
  * 锁住一条需求并取回判态所需的三列。
@@ -27,7 +37,7 @@ export type Locked = { state: State; type: string | null; prd_url: string | null
  */
 export async function lockRequirement(tx: Tx, requirementId: string): Promise<Locked> {
   const cur = await tx.execute<Locked>(
-    sql`select state, type, prd_url from requirements where id = ${requirementId} for update`);
+    sql`select state, type, prd_url, owner_member_id from requirements where id = ${requirementId} for update`);
   const row = cur.rows[0];
   if (!row) throw new AppError('not_found', '找不到这条需求');
   return row;

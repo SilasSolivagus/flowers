@@ -1,7 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import type { Db } from '../../db/client.js';
-import { currentMember, type Member } from './member.js';
+import { currentMemberRow, type Member } from './member.js';
 
 /**
  * 站内通知（「找过我的」）读模型。
@@ -22,8 +22,27 @@ import { currentMember, type Member } from './member.js';
  * | requirement.bounced（打回开发中） | 负责人 | `r.owner_member_id` |
  *
  * 其余事件类型（scheduled / review_passed / auto_dev / auto_live / updated / deleted /
- * rejected / shelved / restored / uemaster.attached / prd.fetched / release.*）**没有
- * 站内观众**，不产生通知——不为了「有东西看」往 feed 里塞行。
+ * restored / uemaster.attached / prd.fetched / release.*）**没有「按关系」的站内观众**，
+ * 不产生通知——不为了「有东西看」往 feed 里塞行。
+ *
+ * ── P4-04：条线 / 超管的扇出（规则「超管收到每一条变更，条线负责人收本线全部变更」）
+ *
+ * | 观众 | 收什么 | 条件 |
+ * |---|---|---|
+ * | 超管（`product_owner`） | 全部需求事件 | 只排除他自己做的事（`e.actor <> 我`） |
+ * | 条线负责人（`*_reviewer`） | 本线（`r.type` = 他那一线）全部事件 | 同上 |
+ * | 任何人 | 拒绝 / 搁置 | 与上一档同一条扇出规则；这一档由 `rejected` 这个开关单独控制 |
+ *
+ * 三条细节：
+ *
+ * 1. **排除本人动作**。通知的用途是「别人动了你关心的东西」；自己点的按钮自己知道。
+ *    不做这件事的后果是，超管每改一条需求都会收到一条「你可能该看看」——一个永远
+ *    亮着的红点，等于没有红点。
+ * 2. **PM 不在扇出里**。PM 的观众身份仍然是「提出人 / 负责人 / 被派单的评审人」
+ *    （上面那张老表），条线不给他任何额外的可见性。条线是组织归属，不是权限
+ *    （见 `core/auth/roles.ts` 的注释）。
+ * 3. **关掉就是关掉**（`notify_prefs`）。一个关了通知的超管**什么都收不到**，而不是
+ *    「只收重要的」：这条规则的唯一用途是「我不看」，替人判断哪条重要是另一种不听话。
  *
  * 两条容易走错的细节，写在这里免得下一个人再推一遍：
  *
@@ -115,10 +134,57 @@ function lineOf(type: string, payload: Payload, number: number, title: string): 
       const due = text(payload, 'newCommitDueAt');
       return due ? `${key}被打回开发中，新承诺 ${due}` : `${key}被打回开发中`;
     }
+    case 'requirement.rejected': {
+      const reason = text(payload, 'reason');
+      return reason ? `${key}被拒绝：${clip(reason)}` : `${key}被拒绝`;
+    }
+    case 'requirement.shelved': {
+      const reason = text(payload, 'reason');
+      return reason ? `${key}被搁置：${clip(reason)}` : `${key}被搁置`;
+    }
+    case 'requirement.owner_assigned': {
+      const to = text(payload, 'to');
+      return to ? `${key}负责人改成 ${to}` : `${key}换了负责人`;
+    }
     default:
       return `${key}有新的流转`;
   }
 }
+
+/**
+ * 通知口味。null / 坏 JSON / 缺字段一律「按默认」（全开）——一个读不懂的设置不该
+ * 让通知静默消失；反过来，显式写 `false` 才是真的关。
+ *
+ * 两个开关：
+ * - `changed`：这一类里的「全部变动」（进入收集/待设计/待评审、打回、换负责人……）；
+ * - `rejected`：拒绝 / 搁置。单独一个开关，因为规则 3 里它是一件**另外**的事
+ *   （「被叫停」比「又动了一步」更值得看一眼）。
+ */
+export type NotifyPrefs = { inherit: boolean; changed: boolean; rejected: boolean };
+
+export const DEFAULT_PREFS: NotifyPrefs = { inherit: true, changed: true, rejected: true };
+
+export function prefsOf(raw: string | null | undefined): NotifyPrefs {
+  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_PREFS;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return DEFAULT_PREFS;
+    const record = value as Record<string, unknown>;
+    // `inherit: true` 就是「按角色默认」，显式写在里面也不该覆盖具体开关——
+    // 它表达的是「别管我」，而不是「全开」。所以只有 inherit === false 时才读具体项。
+    if (record.inherit !== false) return DEFAULT_PREFS;
+    return {
+      inherit: false,
+      changed: record.changed !== false,
+      rejected: record.rejected !== false,
+    };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
+/** 拒绝 / 搁置这两类。扇出用它们把 `rejected` 开关单独拎出来。 */
+const REJECTED_TYPES = sql`('requirement.rejected', 'requirement.shelved')`;
 
 /**
  * 「这条事件点到这位成员」的谓词。通知列表与未读数**必须**共用它：两处各写一份，
@@ -126,9 +192,31 @@ function lineOf(type: string, payload: Payload, number: number, title: string): 
  *
  * 用成员 id 而不是姓名做键；提出人那一项才按姓名比（那是自由文本字段）。PM 判断也
  * 在这里做（`me.role = 'pm'`），所以调用方不需要另传角色。
+ *
+ * 扇出的两档（超管 / 条线负责人）按**角色与线**在 JS 里算好之后拼进 SQL：`member`
+ * 已经是一个具体的行，管理员就是管理员，功能线负责人就是功能线——把它们写成
+ * `... and me.role = 'product_owner'` 这样的谓词只会让同一条规则在库里再判一次，
+ * 而库里的 role 与调用方手里的 role 是同一行。
  */
 function addressed(member: Member): SQL {
-  return sql`(
+  const prefs = prefsOf(member.notifyPrefs);
+  const admin = member.role === 'product_owner';
+  const leadLine = member.role === 'feature_reviewer'
+    ? 'feature'
+    : (member.role === 'commercial_reviewer' ? 'commercial' : null);
+  const fancied = admin || leadLine !== null;
+
+  const fanout: SQL[] = [];
+  if (fancied && prefs.changed) {
+    fanout.push(sql`(e.type not in ${REJECTED_TYPES} and e.actor <> ${member.name}${
+      leadLine === null ? sql`` : sql` and r.type = ${leadLine}`})`);
+  }
+  if (fancied && prefs.rejected) {
+    fanout.push(sql`(e.type in ${REJECTED_TYPES} and e.actor <> ${member.name}${
+      leadLine === null ? sql`` : sql` and r.type = ${leadLine}`})`);
+  }
+
+  const base = sql`(
       (e.type = 'requirement.review_requested'
         and (select ra.reviewer_member_id
                from review_assignments ra
@@ -145,6 +233,9 @@ function addressed(member: Member): SQL {
                        where me.id = ${member.id}
                          and (me.name = r.requester or me.role = 'pm')))
     )`;
+
+  if (fanout.length === 0) return base;
+  return sql`(${base} or ${sql.join(fanout, sql` or `)})`;
 }
 
 type NoticeRow = {
@@ -280,16 +371,19 @@ export async function markRead(db: Db, member: Member, upToSeq: number): Promise
 }
 
 /**
- * 当前身份对应的成员行（cookie → 姓名 → members）。
+ * 当前身份对应的成员行。P4-04 起这件事只有一处实现（`src/core/read/member.ts`），
+ * 这里 re-export 一次：通知要按 id 存水位线，而「我是谁」的解析顺序（会话 → 环境变量
+ * → 第一个超管）必须与页面、服务层用同一条，否则铃铛会替另一个人亮红点。
  *
- * 读侧到处只有姓名（P1 的 actor 是自由文本），但通知要按 id 存水位线。重名时取
- * `memberIdByName` 的同一口径（order by id limit 1）——两条入口对「我是谁」必须
- * 给同一个答案。名册里查无此人（cookie 里是离职的人 / 空库）返回 null：通知是
- * 附加物，不该让整页 500。
+ * 没有任何成员时 `currentMemberRow` 会抛 `no_member`；通知是附加物，所以这里吞掉它
+ * 返回 null——一个空名册不该让整页 500（登录页会显示同一句中文）。
  */
-export async function currentMemberRow(): Promise<Member | null> {
-  const name = await currentMember();
-  const res = await db.execute<Member>(sql`
-    select id, name, role from members where name = ${name} order by id limit 1`);
-  return res.rows[0] ?? null;
+export async function currentMemberRowOrNull(): Promise<Member | null> {
+  try {
+    return await currentMemberRow();
+  } catch {
+    return null;
+  }
 }
+
+export { currentMemberRow };

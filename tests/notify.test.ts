@@ -8,6 +8,7 @@ import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { bounce } from '../src/core/requirements/bounce.js';
 import { shelveRequirement } from '../src/core/requirements/terminal.js';
+import { updateRequirement } from '../src/core/requirements/manage.js';
 import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
@@ -27,7 +28,7 @@ import {
  * 逐条腐烂，而代码一行没错。
  */
 
-let people: Array<{ id: string; name: string; role: string }> = [];
+let people: Array<{ id: string; name: string; role: string; line: string | null }> = [];
 
 beforeEach(async () => {
   await resetDb();
@@ -38,7 +39,7 @@ afterAll(async () => {
   await pool.end();
 });
 
-function member(name: string): { id: string; name: string; role: string } {
+function member(name: string): { id: string; name: string; role: string; line: string | null } {
   const found = people.find((p) => p.name === name);
   if (!found) throw new Error(`种子里没有成员 ${name}`);
   return found;
@@ -75,15 +76,16 @@ function has(notices: Notice[], requirementId: string): boolean {
  * 跨两步的需求要在两个不同的「今天」被推两次。这里两次都用今天，因为排期把
  * 开工日与提测日都放在了过去/今天，两条边都已到点。
  */
-async function toTestState(ownerMemberId: string, title = 'S3 协议支持') {
-  const created = await createRequirement(db, PM, {
-    title, type: 'feature', requester: PM, ownerMemberId,
+async function toTestState(owner: string, title = 'S3 协议支持') {
+  // P4-04：以负责人身份建与推进（PM 只能改自己负责的需求；建人即负责，见 create.ts）。
+  const created = await createRequirement(db, owner, {
+    title, type: 'feature', requester: PM,
   });
-  await evaluate(db, PM, { requirementId: created.id });
-  await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x' });
+  await evaluate(db, owner, { requirementId: created.id });
+  await submitReview(db, owner, { requirementId: created.id, prdUrl: 'https://x' });
   await reviewPass(db, FEATURE_REVIEWER, { requirementId: created.id });
   const releaseId = await makeRelease('R-测试', PAST, FUTURE);
-  await schedule(db, PM, {
+  await schedule(db, owner, {
     requirementId: created.id, releaseId, commitTestAt: TODAY, commitDueAt: FUTURE,
   });
   await tick(db, startOfShanghaiDay(TODAY));
@@ -109,10 +111,10 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('进入待设计：只有负责人收到（评估人、提出人都不收到）', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, PM, {
-      title: '权益套餐结构', type: 'commercial', requester: PM, ownerMemberId: owner.id,
+    const created = await createRequirement(db, owner.name, {
+      title: '权益套餐结构', type: 'commercial', requester: PM,
     });
-    await evaluate(db, PM, { requirementId: created.id });
+    await evaluate(db, owner.name, { requirementId: created.id });
 
     const forOwner = await notificationsFor(db, owner);
     expect(typesOf(forOwner)).toContain('requirement.evaluated');
@@ -125,11 +127,11 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('进入待评审：只有派单的评审人收到（负责人、PM 都不收到）', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, PM, {
-      title: '导出任务队列', type: 'feature', requester: PM, ownerMemberId: owner.id,
+    const created = await createRequirement(db, owner.name, {
+      title: '导出任务队列', type: 'feature', requester: PM,
     });
-    await evaluate(db, PM, { requirementId: created.id });
-    await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x' });
+    await evaluate(db, owner.name, { requirementId: created.id });
+    await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
 
     const forReviewer = await notificationsFor(db, member(FEATURE_REVIEWER));
     expect(typesOf(forReviewer)).toContain('requirement.review_requested');
@@ -144,11 +146,11 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('评审打回：负责人收到，且行里带原因', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, PM, {
-      title: '导出任务队列', type: 'feature', requester: PM, ownerMemberId: owner.id,
+    const created = await createRequirement(db, owner.name, {
+      title: '导出任务队列', type: 'feature', requester: PM,
     });
-    await evaluate(db, PM, { requirementId: created.id });
-    await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x' });
+    await evaluate(db, owner.name, { requirementId: created.id });
+    await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
     await reviewReject(db, FEATURE_REVIEWER, {
       requirementId: created.id, reason: '缺少回滚方案',
     });
@@ -166,22 +168,28 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('进入测试中：只有负责人收到（评审人不收到）', async () => {
     const owner = member('王妍');
-    const created = await toTestState(owner.id);
+    const created = await toTestState(owner.name);
 
     const forOwner = await notificationsFor(db, owner);
     expect(typesOf(forOwner)).toContain('requirement.auto_test');
     expect(forOwner.find((item) => item.type === 'requirement.auto_test')!.line)
       .toContain('进入测试中');
 
-    // 评审人收到的是 review_requested，不是 auto_test
-    const forReviewer = await notificationsFor(db, member(FEATURE_REVIEWER));
-    expect(typesOf(forReviewer)).not.toContain('requirement.auto_test');
+    /**
+     * 评审人**现在也会收到** auto_test：他是功能线的负责人，扇出让他收本线全部变更
+     * （P4-04）。旧断言（「评审人收不到」）随扇出作废；仍然要守的是「另一条线的
+     * 负责人收不到」——那才是这条用例原本要证明的东西。
+     */
+    expect(typesOf(await notificationsFor(db, member(FEATURE_REVIEWER))))
+      .toContain('requirement.auto_test');
+    expect(typesOf(await notificationsFor(db, member(COMMERCIAL_REVIEWER))))
+      .not.toContain('requirement.auto_test');
   });
 
   it('打回开发中：负责人收到，行里带新承诺日', async () => {
     const owner = member('王妍');
-    const created = await toTestState(owner.id);
-    await bounce(db, PM, {
+    const created = await toTestState(owner.name);
+    await bounce(db, owner.name, {
       requirementId: created.id, newCommitDueAt: FUTURE, reason: '接口没对齐',
     }, new Date());
 
@@ -191,21 +199,24 @@ describe('派生规则：谁收到哪条事件', () => {
     expect(notice!.line).toContain('打回开发中');
     expect(notice!.line).toContain(FUTURE);
 
+    // 同上一组：本线负责人收得到，另一条线收不到。
     expect(typesOf(await notificationsFor(db, member(FEATURE_REVIEWER))))
+      .toContain('requirement.bounced');
+    expect(typesOf(await notificationsFor(db, member(COMMERCIAL_REVIEWER))))
       .not.toContain('requirement.bounced');
   });
 
   it('打回后重新提交：两轮 review_requested 都归同一个派单评审人', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, PM, {
-      title: '两轮评审', type: 'feature', requester: PM, ownerMemberId: owner.id,
+    const created = await createRequirement(db, owner.name, {
+      title: '两轮评审', type: 'feature', requester: PM,
     });
-    await evaluate(db, PM, { requirementId: created.id });
-    await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x' });
+    await evaluate(db, owner.name, { requirementId: created.id });
+    await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
     await reviewReject(db, FEATURE_REVIEWER, {
       requirementId: created.id, reason: '补一下边界',
     });
-    await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x?v=2' });
+    await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x?v=2' });
 
     // 第二轮提交会再派一次单（新的一行、decided_at 为 null）。两轮的通知都该归
     // 功能线评审人：第一轮由「decided_at >= 事件时刻」那一行认领，第二轮由未收口的
@@ -217,31 +228,42 @@ describe('派生规则：谁收到哪条事件', () => {
       .not.toContain('requirement.review_requested');
   });
 
-  it('没有站内观众的事件类型一条都不产生', async () => {
+  /**
+   * 「没有站内观众」这件事在 P4-04 之后**只对 PM 成立**。
+   *
+   * 扇出规则是「超管收每一条变更，条线负责人收本线每一条变更」，所以 review_passed /
+   * scheduled / updated 这些**有**观众了——只是观众是超管与那条线的负责人，不是
+   * 与这条需求无关的 PM。这条用例因此改成两侧都断：无关 PM 一条都没有，超管有。
+   */
+  it('与这条需求无关的 PM 一条都不产生（扇出只给超管与本线负责人）', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, PM, {
-      title: '直链分享限速', type: 'feature', requester: PM, ownerMemberId: owner.id,
+    const created = await createRequirement(db, owner.name, {
+      title: '直链分享限速', type: 'feature', requester: PM,
     });
-    await evaluate(db, PM, { requirementId: created.id });
-    await submitReview(db, PM, { requirementId: created.id, prdUrl: 'https://x' });
+    await evaluate(db, owner.name, { requirementId: created.id });
+    await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
     // review_passed：spec §8 里没有站内那一行
     await reviewPass(db, FEATURE_REVIEWER, { requirementId: created.id });
     // scheduled：也没有
     const releaseId = await makeRelease('R-空', PAST, FUTURE);
-    await schedule(db, PM, {
+    await schedule(db, owner.name, {
       requirementId: created.id, releaseId, commitTestAt: TODAY, commitDueAt: FUTURE,
     });
-    // shelved：也没有
-    await shelveRequirement(db, PM, { requirementId: created.id, reason: '先不做' });
+    // shelved：P4-04 起**有**观众（规则 3：条线负责人与超管要收到「被叫停」）
+    await shelveRequirement(db, owner.name, { requirementId: created.id, reason: '先不做' });
+    // updated：描述改了一笔，也是「变更」
+    await updateRequirement(db, owner.name, { requirementId: created.id, title: '直链分享限速（二期）' });
 
     const quiet = [
       'requirement.review_passed', 'requirement.scheduled',
       'requirement.shelved', 'requirement.updated',
     ];
-    for (const name of people.map((p) => p.name)) {
-      const seen = typesOf(await notificationsFor(db, member(name)));
-      for (const type of quiet) expect(seen).not.toContain(type);
-    }
+    // 李嘉是功能线的 PM，但这条需求既不是他提的、也不归他：一条都不该有。
+    const bystander = typesOf(await notificationsFor(db, member('李嘉')));
+    for (const type of quiet) expect(bystander).not.toContain(type);
+    // 超管（房超）相反：全部都在（扇出）。
+    const forAdmin = typesOf(await notificationsFor(db, member('房超')));
+    for (const type of quiet) expect(forAdmin).toContain(type);
   });
 
   it('已删除的需求整条消失（通知行不该指向一个打不开的抽屉）', async () => {
@@ -257,23 +279,24 @@ describe('派生规则：谁收到哪条事件', () => {
 });
 
 describe('提出人：自由文本 → 成员', () => {
-  it('重名：名册里两个同名成员都收到', async () => {
-    const dup = await db.execute<{ id: string }>(sql`
-      insert into members (name, role) values
-        ('外部客户','feature_reviewer'), ('外部客户','commercial_reviewer')
-      returning id`);
-    const ids = dup.rows.map((row) => row.id);
-    expect(ids).toHaveLength(2);
+  /**
+   * P4-04 把「重名」从一条要处理的边界改成了**不可能**：登录名必须唯一（`members_name_unique`）。
+   * 名字是登录名，两个「王妍」会让登录、通知、派单全都取决于 `order by id limit 1`。
+   *
+   * 所以这条用例改成钉那个唯一索引本身——它是「提出人按姓名匹配」这条规则的前置条件。
+   * 姓名匹配仍然成立：提出人写的是名册上的名字，那个人收到。
+   */
+  it('登录名唯一：第二个同名成员建不出来', async () => {
+    await expect(db.execute(sql`
+      insert into members (name, role) values ('王妍','pm')`)).rejects.toThrow(/duplicate key/);
 
     const created = await createRequirement(db, PM, {
-      title: '外部提的需求', type: 'feature', requester: '外部客户',
+      title: '外部提的需求', type: 'feature', requester: '王妍',
     });
 
-    for (const id of ids) {
-      const seen = await notificationsFor(db, { id, name: '外部客户', role: 'feature_reviewer' });
-      expect(has(seen, created.id)).toBe(true);
-    }
-    // 不是 PM、名字也不匹配的人依然收不到
+    // 姓名匹配照旧成立：提出人写的是名册上的名字，那个人收到。
+    expect(has(await notificationsFor(db, member('王妍')), created.id)).toBe(true);
+    // 另一条线的负责人依然收不到（这条需求是功能类）。
     expect(has(await notificationsFor(db, member(COMMERCIAL_REVIEWER)), created.id)).toBe(false);
   });
 
@@ -285,9 +308,13 @@ describe('提出人：自由文本 → 成员', () => {
     for (const name of ['吕品', '房超', '王妍']) {
       expect(has(await notificationsFor(db, member(name)), created.id)).toBe(true);
     }
-    // 功能线评审人（非 PM）收不到：这一条只能靠姓名匹配，而那个名字不在名册里
-    expect(has(await notificationsFor(db, member(FEATURE_REVIEWER)), created.id)).toBe(false);
-    expect(await latestNoticeSeq(db, member(FEATURE_REVIEWER))).toBeNull();
+    /**
+     * 功能线评审人**现在会收到**：他是功能线的负责人，扇出规则让他收本线全部变更
+     * （P4-04）。旧断言（「非 PM 收不到」）随 P4-04 作废——但另一条线的负责人仍然
+     * 收不到，那才是这条用例真正要守的东西。
+     */
+    expect(has(await notificationsFor(db, member(FEATURE_REVIEWER)), created.id)).toBe(true);
+    expect(has(await notificationsFor(db, member(COMMERCIAL_REVIEWER)), created.id)).toBe(false);
   });
 });
 

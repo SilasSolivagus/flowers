@@ -3,6 +3,7 @@ import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { assertCan, requirementFacts } from '../auth/guard.js';
 import { DESCRIPTIVE_FIELDS, SHORT_LABEL } from './fields.js';
 
 /**
@@ -157,6 +158,16 @@ export async function updateRequirement(
     const row = found.rows[0];
     if (!row) throw new AppError('not_found', NOT_FOUND);
 
+    /**
+     * 权限（P4-04）：改描述是 `edit`——负责人、本线条线负责人、超管。
+     *
+     * 为什么在锁行之后、算 diff 之前：锁住了才读得到「这一行的负责人是谁」，而且
+     * 这一步之后同一个事务里的写入不会被别人插队。`not_found` 排在权限之前：一条
+     * 不存在的需求对**任何人**都是 404，不该先回答「你有没有权限」——那会让
+     * 「这条需求存不存在」变成一次权限探测。
+     */
+    await assertCan(tx, actor, await requirementFacts(tx, id), 'edit');
+
     const changes = (Object.keys(wanted) as EditableField[])
       .map((field) => {
         const from = storedOf(row, field);
@@ -214,6 +225,9 @@ export async function deleteRequirement(
   const id = parseRequirementId(input);
 
   return db.transaction(async (tx) => {
+    // 权限先判（`edit`：负责人 / 本线条线负责人 / 超管）。
+    await assertCan(tx, actor, await requirementFacts(tx, id), 'edit');
+
     const deleted = await tx.execute<{ number: number; title: string }>(sql`
       update requirements set deleted_at = now()
        where id = ${id} and deleted_at is null

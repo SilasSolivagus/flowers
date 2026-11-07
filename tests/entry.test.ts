@@ -53,11 +53,12 @@ function memberId(name: string): string {
 
 /** 一条「六问都写全」的需求，供改描述 / 新鲜度那几组用例用。 */
 async function makeDescribed(title = '分享页搜索') {
+  // P4-04：建人即负责，所以负责人就是吕品；后面的改描述 / 删除也必须由他做
+  // （PM 只能改自己负责的需求）。
   return createRequirement(db, '吕品', {
     title,
     type: 'feature',
     requester: '王妍',
-    ownerMemberId: memberId('吕品'),
     context: '运营在后台找分享链接',
     problem: '现在只能按编号找',
     outcome: '按标题能搜到',
@@ -229,7 +230,7 @@ describe('产物新鲜度', () => {
 describe('updateRequirement', () => {
   it('只写变了的字段，事件里记下改了哪几问', async () => {
     const req = await makeDescribed();
-    const result = await updateRequirement(db, '王妍', {
+    const result = await updateRequirement(db, '吕品', {
       requirementId: req.id,
       title: '分享页搜索',
       context: '运营在后台找分享链接',
@@ -253,7 +254,7 @@ describe('updateRequirement', () => {
 
   it('没有变化就没有事件（打开表单、原样保存不该污染时间轴）', async () => {
     const req = await makeDescribed();
-    const result = await updateRequirement(db, '王妍', {
+    const result = await updateRequirement(db, '吕品', {
       requirementId: req.id,
       title: ' 分享页搜索 ',
       context: '运营在后台找分享链接',
@@ -267,7 +268,7 @@ describe('updateRequirement', () => {
   it('type / requester / state 一律报 not_editable（不静默丢弃）', async () => {
     const req = await makeDescribed();
     for (const [key, label] of [['type', '类型'], ['requester', '提出人'], ['state', '状态']] as const) {
-      const err = await error(updateRequirement(db, '王妍', {
+      const err = await error(updateRequirement(db, '吕品', {
         requirementId: req.id, title: '改个标题', [key]: key === 'type' ? 'commercial' : 'x',
       }));
       expect(err.code).toBe('not_editable');
@@ -282,34 +283,34 @@ describe('updateRequirement', () => {
 
   it('标题不能改成空', async () => {
     const req = await makeDescribed();
-    const err = await error(updateRequirement(db, '王妍', { requirementId: req.id, title: '   ' }));
+    const err = await error(updateRequirement(db, '吕品', { requirementId: req.id, title: '   ' }));
     expect(err.code).toBe('invalid');
     expect(err.message).toBe('标题不能为空');
   });
 
   it('软删除之后：读模型看不见、也改不动', async () => {
     const req = await makeDescribed();
-    await deleteRequirement(db, '王妍', { requirementId: req.id });
+    await deleteRequirement(db, '吕品', { requirementId: req.id });
 
     expect(await getRequirementDetail(req.id)).toBeNull();
     const board = await getBoard('吕品');
     expect(board.flatMap((c) => c.cards).map((c) => c.id)).not.toContain(req.id);
 
-    const err = await error(updateRequirement(db, '王妍', { requirementId: req.id, title: '复活' }));
+    const err = await error(updateRequirement(db, '吕品', { requirementId: req.id, title: '复活' }));
     expect(err.code).toBe('not_found');
     expect(err.message).toBe('需求不存在');
   });
 
   it('重复删除报 not_found（第二次已经没有东西可删）', async () => {
     const req = await makeDescribed();
-    await deleteRequirement(db, '王妍', { requirementId: req.id });
-    const err = await error(deleteRequirement(db, '王妍', { requirementId: req.id }));
+    await deleteRequirement(db, '吕品', { requirementId: req.id });
+    const err = await error(deleteRequirement(db, '吕品', { requirementId: req.id }));
     expect(err.code).toBe('not_found');
   });
 
   it('软删除的需求不再被生成：attach 说「需求不存在」', async () => {
     const req = await makeDescribed();
-    await deleteRequirement(db, '王妍', { requirementId: req.id });
+    await deleteRequirement(db, '吕品', { requirementId: req.id });
     const err = await error(attachArtifact(db, '吕品', {
       requirementId: req.id, stage: 'evaluate', url: 'https://m.example.com/e.html',
     }));
@@ -513,7 +514,7 @@ describe('进度卡', () => {
     });
     expect(jobs[0]!.number).toBe(req.number);
 
-    await deleteRequirement(db, '王妍', { requirementId: req.id });
+    await deleteRequirement(db, '吕品', { requirementId: req.id });
     expect(await listRunningJobs()).toHaveLength(0);
   });
 

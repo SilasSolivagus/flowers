@@ -4,6 +4,7 @@ import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import { assertCan } from '../auth/guard.js';
 import { lockRequirement, moveTo } from './lock.js';
 import { assignReviewer } from './review.js';
 
@@ -32,6 +33,10 @@ export async function submitReview(db: Db, actor: string, raw: unknown) {
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
+    // 权限先于状态门与 prd 门（见 evaluate.ts 的同一段注释）。
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
     // prd 门的判定依据是**这次要写进 prd_url 的那个链接**（上面已校验非空），
     // 不是库里那一列——首次提交时库里还是 null。两处都是同一件事：没链接不让进评审。
     assertTrigger(row.state, 'review', 'submit_review', { hasPrd: !!url });

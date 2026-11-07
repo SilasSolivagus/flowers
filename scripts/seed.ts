@@ -39,13 +39,16 @@ import { shanghaiDayOf, startOfShanghaiDay, tick } from '../src/core/clock/tick.
 import { assertSafeToReset, resetDb } from '../src/db/reset.js';
 import { getBoard } from '../src/core/read/board.js';
 import { listReleases } from '../src/core/read/version.js';
-import { DEFAULT_MEMBER } from '../src/core/read/member.js';
+import { generatePassword, setPassword } from '../src/core/auth/password.js';
 import { seedPeople } from '../tests/helpers/db.js';
 
 // ─── 小工具 ──────────────────────────────────────────────────────────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** 演示里「当前成员」的默认身份：吕品（超管之外最常用的一条线）。 */
 const PM = '吕品';
+/** 超管。种子里的「无人认领」那条卡由他建（只有超管能显式留空负责人）。 */
+const ADMIN = '房超';
 
 /** 中文按两列宽补空格，否则状态那一列会被 CJK 推歪（与 demo.ts 同一套算法）。 */
 function displayWidth(text: string): number {
@@ -114,31 +117,34 @@ const RELEASE_2 = monthName(day(31));      // 下月版本：开工日还没到
 
 const failures: string[] = [];
 
-type Person = { id: string; name: string; role: string };
+type Person = { id: string; name: string; role: string; line: string | null };
 let people: Person[] = [];
 
-function memberId(name: string): string {
-  const found = people.find((p) => p.name === name);
-  if (!found) throw new Error(`种子里没有成员 ${name}`);
-  return found.id;
-}
+/** 一条需求 + 它的负责人（种子后面所有动作都要以负责人身份做）。 */
+type Created = { id: string; number: number; owner: string };
 
-type Created = { id: string; number: number };
-
-/** 建一条需求（一律 inbox）。owner 为 null 表示还没指定负责人。 */
+/**
+ * 建一条需求（一律 inbox）。
+ *
+ * P4-04 起种子的建法跟着规则 1 走：**谁建谁负责**，所以「以负责人自己的身份建」。
+ * 想造一条没有负责人的卡（演示里的「待接单」）只有一条路——超管显式传 `null`。
+ * 这不是种子的取巧，是产品里唯一能产生「无主需求」的路径。
+ */
 async function create(
   title: string, type: 'commercial' | 'feature', requester: string, owner: string | null,
 ): Promise<Created> {
-  const r = await createRequirement(db, PM, {
-    title, type, requester, ownerMemberId: owner ? memberId(owner) : null,
+  const actor = owner ?? ADMIN;
+  const r = await createRequirement(db, actor, {
+    title, type, requester,
+    ...(owner === null ? { ownerMemberId: null } : {}),
   });
-  return { id: r.id, number: r.number };
+  return { id: r.id, number: r.number, owner: actor };
 }
 
-/** 走评估 → 提交评审（→ 待评审）。 */
+/** 走评估 → 提交评审（→ 待评审）。每一步都以**负责人**身份做（PM 只能改自己的）。 */
 async function toReview(target: Created): Promise<void> {
-  await evaluate(db, PM, { requirementId: target.id });
-  await submitReview(db, PM, {
+  await evaluate(db, target.owner, { requirementId: target.id });
+  await submitReview(db, target.owner, {
     requirementId: target.id,
     prdUrl: `https://docs.123pan.example/prd/PAN-${target.number}`,
   });
@@ -153,7 +159,7 @@ async function toQueue(target: Created, reviewer: string): Promise<void> {
 async function scheduleInto(
   target: Created, releaseId: string, commitTestAt: string, commitDueAt: string,
 ): Promise<void> {
-  await schedule(db, PM, {
+  await schedule(db, target.owner, {
     requirementId: target.id, releaseId, commitTestAt, commitDueAt,
   });
 }
@@ -194,7 +200,26 @@ async function main() {
   head('准备');
 
   people = await seedPeople();
-  log(`成员 ${people.length} 人：${people.map((p) => `${p.name}/${p.role}`).join('、')}`);
+  log(`成员 ${people.length} 人：${people.map((p) => `${p.name}/${p.role}${p.line ? `/${p.line}` : ''}`).join('、')}`);
+
+  /**
+   * 初始口令（P4-04）：**只在这里打印一次**，库里只有 scrypt 串。
+   *
+   * 为什么种子负责发口令：登录已经不可能「凭名字就进」，第一次打开页面的人必须有一个
+   * 能用的口令。生成随机的、每人一个，比所有人共用一个 `123456` 好得多——后者一旦
+   * 泄露，泄露的是整个部署；而且它会被当成「默认密码」，永远没人改。
+   *
+   * 这一屏要被人抄走（或者至少贴进密码管理器），所以排版按「名字 + 口令」一行一个，
+   * 字符表里没有 `0O1lI`（见 password.ts 的 ALPHABET）。
+   */
+  head('初始口令（只显示这一次，库里只有 scrypt 串）');
+  for (const person of people) {
+    const password = generatePassword();
+    await setPassword(db, person.id, password);
+    log(`${padTo(person.name, 8)}${padTo(person.role, 20)}${password}`);
+  }
+  log('');
+  log('把这七行抄下来。丢了只能在设置页让超管重置（或重跑种子）。');
 
   // P1 没有 releases 服务（版本只有建表和排期时的一次读取），所以这两行只能落 SQL。
   const releaseRows = await db.execute<{ id: string; name: string }>(sql`
@@ -291,7 +316,7 @@ async function main() {
 
   head('看板（getBoard 真实读模型）');
 
-  const board = await getBoard(DEFAULT_MEMBER);
+  const board = await getBoard(PM);
   let total = 0;
   let mine = 0;
   let late = 0;
@@ -306,7 +331,7 @@ async function main() {
     }
   }
   log('');
-  log(`共 ${total} 条，其中当前成员（${DEFAULT_MEMBER}）现在需要动手 ${mine} 条，逾期 ${late} 条`);
+  log(`共 ${total} 条，其中当前成员（${PM}）现在需要动手 ${mine} 条，逾期 ${late} 条`);
 
   head('版本（listReleases 真实读模型）');
   for (const release of await listReleases()) {
@@ -350,7 +375,7 @@ async function main() {
       failures.push(`收集列等的是人，waitingOn 应该是 person，实际 ${inboxCard.waitingOn}`);
     }
     if (board.some((c) => c.cards.some((x) => x.id === inboxCard.id && x.mine))) {
-      failures.push(`收集列那条（外部提出人）不该是「需要你动手」的卡（${DEFAULT_MEMBER} 身份下）`);
+      failures.push(`收集列那条（外部提出人）不该是「需要你动手」的卡（${PM} 身份下）`);
     }
   }
   if (late !== 1) failures.push(`逾期卡片是 ${late} 条，期望 1（开发中那条提测日已过）`);

@@ -31,7 +31,21 @@ const ROLE_LABEL: Record<string, string> = {
   pm: 'PM',
   commercial_reviewer: '商业线',
   feature_reviewer: '功能线',
+  // P4-04 加的那一个。四个字，是因为「超管」在同一条左轨里要能一眼看出它是那个
+  // 「能改任何东西」的人，而正文里的完整叫法是「产品总负责人」（见 roles.ts）。
+  product_owner: '超管',
 };
+
+/** 条线 → 中文名。`line` 是人的属性（PM 也有条线），不是权限。 */
+export const LINE_LABEL: Record<string, string> = {
+  feature: '功能线',
+  commercial: '商业线',
+};
+
+export function lineLabel(line: string | null | undefined): string {
+  if (line === null || line === undefined) return '';
+  return Object.hasOwn(LINE_LABEL, line) ? (LINE_LABEL[line] ?? line) : line;
+}
 
 /**
  * 需求类型 → 覆盖它的评审角色（与 src/core/requirements/review.ts 的 REVIEWER_ROLE 同口径）。

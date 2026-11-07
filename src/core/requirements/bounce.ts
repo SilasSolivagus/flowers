@@ -5,6 +5,7 @@ import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { shanghaiDayOf } from '../clock/tick.js';
+import { assertCan } from '../auth/guard.js';
 import { lockRequirement, moveTo } from './lock.js';
 
 const MISSING_NEW_DUE = '打回必须重填承诺完成日';
@@ -78,6 +79,10 @@ export async function bounce(
 
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
+    // 权限先于状态门（见 evaluate.ts 的同一段注释）。
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
     // 只按配对判断不够：ready → dev 也是合法配对（那是时钟的路子），光看配对
     // 会让「打回」替时钟推掉第一步、把 window_start 那段窗口静默跳过。
     assertTrigger(row.state, 'dev', 'bounce');

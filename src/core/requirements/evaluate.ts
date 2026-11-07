@@ -2,6 +2,7 @@ import type { Db } from '../../db/client.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
+import { assertCan } from '../auth/guard.js';
 import { lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
 
 /**
@@ -51,5 +52,15 @@ export async function evaluate(db: Db, actor: string, raw: unknown) {
   const input = requirePlainObject(raw);
   const requirementId = parseRequirementId(input);
 
-  return db.transaction(async (tx) => evaluateInTx(tx, actor, requirementId));
+  return db.transaction(async (tx) => {
+    // 权限先于状态门（P4-04）：先回答「这条需求是不是你能改的」，再回答「现在能不能
+    // 评估」。反过来的话，一句「当前在「待评审」，不能执行这一步」就等于告诉一个
+    // 旁观者这条需求现在停在哪个状态——状态本身不是秘密，但顺序决定了错误消息在
+    // 权限之外还泄露多少东西。锁行之后判，读到的就是这一事务将要改的那一行。
+    const row = await lockRequirement(tx, requirementId);
+    await assertCan(tx, actor, {
+      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+    }, 'edit');
+    return evaluateInTx(tx, actor, requirementId, row);
+  });
 }

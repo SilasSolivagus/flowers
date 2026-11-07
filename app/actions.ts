@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 import { db } from '../src/db/client';
 import { AppError } from '../src/core/errors';
 import type { DetailAction } from '../src/core/read/detail';
@@ -22,6 +23,11 @@ import {
 } from '../src/core/uemaster/member-provider';
 import { probeProvider, resolveProviderConfig } from '../src/core/uemaster/provider';
 import { createRequirement } from '../src/core/requirements/create';
+import { reassignOwner } from '../src/core/requirements/assign';
+import {
+  createMember, deactivateMember, resetPassword, saveNotifyPrefs, updateMember,
+} from '../src/core/members/manage';
+import { logout } from '../src/core/auth/login';
 import {
   deleteRequirement, updateRequirement,
 } from '../src/core/requirements/manage';
@@ -623,4 +629,122 @@ export async function markAllReadAction(): Promise<NotifyView> {
   const latest = await latestNoticeSeq(db, member);
   if (latest !== null) await markRead(db, member, latest);
   return notifyView(db, member);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * P4-04：身份与成员的写入口
+ *
+ * 这四个（加上登录页里的 `loginAction`）是「谁能改谁」在**界面这一层**的全部入口。
+ * 它们一律只做三件事：从 FormData 取字段、把 actor 交给服务层、把 AppError 翻成一句
+ * 中文——规则一条都不在这里。特别是「谁能转交负责人」：`can('reassignOwner')` 只在
+ * `src/core/auth/roles.ts` 里判一次，这里不复制它的分支。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** 登出：清 cookie（`proxy.ts` 那一层下次就会把人送回登录页）。 */
+export async function logoutAction(): Promise<void> {
+  await logout();
+  redirect('/login');
+}
+
+/**
+ * 转交负责人（抽屉里的那一行「负责人」）。
+ *
+ * 与「改描述」分成两个动作是刻意的：改描述只碰标题与六问，归属是另一件事——它要
+ * 通知到人（`requirement.owner_assigned` 事件），而且只有条线负责人/超管能做。
+ */
+export async function reassignOwnerAction(formData: FormData): Promise<ActionResult> {
+  return run((actor) => reassignOwner(db, actor, {
+    requirementId: field(formData, 'id'),
+    ownerMemberId: field(formData, 'ownerMemberId'),
+  }));
+}
+
+/** 建人（设置 · 成员）。返回初始口令一次——之后再也拿不到。 */
+export async function createMemberAction(formData: FormData): Promise<
+  { ok: true; id: string; password: string } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    const created = await createMember(db, actor, {
+      name: field(formData, 'name'),
+      role: field(formData, 'role'),
+      line: field(formData, 'line') === '' ? null : field(formData, 'line'),
+      password: field(formData, 'password') === '' ? null : field(formData, 'password'),
+    });
+    revalidatePath('/settings');
+    return { ok: true, id: created.member.id, password: created.password };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/** 改人：角色 / 条线 / 启用状态。 */
+export async function updateMemberAction(formData: FormData): Promise<ActionResult> {
+  const actor = await currentMember();
+  try {
+    const activeField = field(formData, 'active');
+    await updateMember(db, actor, {
+      memberId: field(formData, 'memberId'),
+      ...(field(formData, 'role') === '' ? {} : { role: field(formData, 'role') }),
+      ...(field(formData, 'line') === ''
+        ? {}
+        : { line: field(formData, 'line') === 'none' ? null : field(formData, 'line') }),
+      ...(activeField === '' ? {} : { active: activeField === 'true' }),
+    });
+    revalidatePath('/settings');
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    revalidatePath('/');
+  }
+}
+
+/** 停用（删除的软版本）。 */
+export async function deactivateMemberAction(formData: FormData): Promise<ActionResult> {
+  const actor = await currentMember();
+  try {
+    await deactivateMember(db, actor, { memberId: field(formData, 'memberId') });
+    revalidatePath('/settings');
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/** 重置口令：新口令只在这一次的返回值里出现。 */
+export async function resetPasswordAction(formData: FormData): Promise<
+  { ok: true; password: string } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    const result = await resetPassword(db, actor, { memberId: field(formData, 'memberId') });
+    return { ok: true, password: result.password };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/** 通知口味（设置 · 我）。自己改自己；超管可以替别人改。 */
+export async function saveNotifyPrefsAction(formData: FormData): Promise<ActionResult> {
+  const actor = await currentMember();
+  try {
+    await saveNotifyPrefs(db, actor, {
+      memberId: field(formData, 'memberId') === '' ? null : field(formData, 'memberId'),
+      prefs: {
+        inherit: field(formData, 'inherit') !== 'false',
+        changed: field(formData, 'changed') !== 'false',
+        rejected: field(formData, 'rejected') !== 'false',
+      },
+    });
+    revalidatePath('/settings');
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
 }
