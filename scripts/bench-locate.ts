@@ -38,7 +38,11 @@
  *   npx tsx scripts/bench-locate.ts --only 776         # 面一只跑一条
  *   npx tsx scripts/bench-locate.ts --commits 60       # 面二只跑前 60 条
  *   npx tsx scripts/bench-locate.ts --surface 1        # 只跑面一（面二的 A/B 很慢）
+ *   npx tsx scripts/bench-locate.ts --surface 2 --c-only  # 面二只跑 C/C'（513 条约 40 秒）
  *   npx tsx scripts/bench-locate.ts --json /tmp/x.json # 另存一份机器可读结果
+ *
+ * `--c-only` 是报告 §0.4 那条复现命令的一部分（A 每条约 30 秒，513 条跑不完，见
+ * `armSet`）。用法块早先漏了它，照着报告复现的人会以为只能整面跑。
  */
 import { execFile } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -123,7 +127,32 @@ function reposOf(all: Merged[], token: string): string[] {
 
 type Picked = string[];
 
-/** 中文业务词 → 代码里的英文片段（与 compare-locate.ts 里那份冻结的一致）。 */
+// ═══════════════════════════════════════════════════════════════════════════
+// A 臂：**冻结副本**——与本分支代码零共享（终审 Blocker 3）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 为什么整段抄一份，而不 `import { keywordsFrom } from '../src/core/uemaster/inspect.js'`：
+// A 的定义是「重做**之前**线上跑的那一套」。`keywordsFrom` 在本分支被改过（`5d818ce`
+// 加了虚词过滤：含 的/了/为/对… 的 n-gram 一律不成词）。import 生产版本，等于让 A 跟着
+// 分支一起变形——「改前 vs 改后」就不再是同一个尺子量两次，而这条评测的全部意义就是
+// 那个差值。抄一份之后，A 永远代表 `5d818ce` 之前的语义（**无虚词过滤**），
+// 而这一份只随「要重测一个更早的基线」这类决定才改。`compare-locate.ts` 里的那一份
+// 同样是抄的，两份一致是**碰巧一致**（都抄自 `5d818ce` 之前），不是 import 关系。
+//
+// 三样东西一起冻结，缺一不可：
+// 1. 26 条中英词表（`PATH_TERMS`）——bench 早先的表是 31 条，多出来的
+//    权益/空间/域名/实况图/风控 正是 7 条案例标题里的词，等于给 A 递答案；
+// 2. 30 条停用词（`STOP_WORDS`，`compare-locate.ts` 的 A 用它滤关键词）；
+// 3. `keywordsFrom` 的**副本**（下面那份，无虚词过滤）。
+
+/** 到处都有的词，拿它们定位等于随机挑文件（冻结自 `compare-locate.ts` 的 A 半边）。 */
+const STOP_WORDS = new Set([
+  '文件', '当前', '返回', '结果', '目录', '上一级', '支持', '需要', '可以', '进行',
+  '展示', '操作', '页面', '功能', '设置', '进入', '点击', '选择', '内容', '数据',
+  '新增', '增加', '优化', '调整', '统一', '确认', '记录', '显示', '以下', '上述',
+]);
+
+/** 中文业务词 → 代码里的英文片段。**26 条**，与 `compare-locate.ts` 的冻结版逐条相同。 */
 const PATH_TERMS: Array<[string, string[]]> = [
   ['搜索', ['search']], ['分享', ['share']], ['目录', ['directory', 'dir']],
   ['面包屑', ['breadcrumb', 'crumbs']], ['排序', ['sort', 'order']],
@@ -135,41 +164,122 @@ const PATH_TERMS: Array<[string, string[]]> = [
   ['下载', ['download']], ['历史', ['history']], ['设置', ['setting', 'config']],
   ['多选', ['select', 'checkbox']], ['导航', ['nav', 'navigation']],
   ['移动端', ['mobile', 'h5', 'app']], ['首页', ['home', 'index']],
-  ['权益', ['vip', 'equity', 'member']], ['空间', ['space']], ['域名', ['domain']],
-  ['实况图', ['live', 'photo']], ['风控', ['risk', 'control']],
 ];
+
+// ─── `keywordsFrom` 的冻结副本（语义取 `5d818ce` 之前：**无虚词过滤**）────────
+//
+// 与 `src/core/uemaster/inspect.ts` 的同名函数**逐行对应**，只有一处不同：切 n-gram 时
+// 不挡含虚词的碎片（`FUNCTION_CHARS` / `hasFunctionChar` 在本分支 `5d818ce` 才加）。
+// 这不是「旧代码更对」——`5d818ce` 的改动是对的，生产就该用新的；冻结只是为了让 A 臂
+// 保持「改之前」的身份。两处一旦被谁「顺手合并」，A 臂的差值就会失真，而且**不会报错**。
+
+const CJK_RUN = /[\u4e00-\u9fa5]+/g;
+const ANY_RUN = /[\u4e00-\u9fa5A-Za-z0-9]+/g;
+const QUOTED = /[「“"']([^「」“”"'\n]{2,12})[」”"']/g;
+const FROZEN_MAX_KEYWORDS = 8;
+
+const FROZEN_STOPWORDS: ReadonlySet<string> = new Set([
+  '进行', '可以', '需要', '如果', '所有', '以及', '同时', '必须', '就是', '这个', '那个',
+  '我们', '他们', '以下', '如下', '上述', '相关', '对应', '情况', '场景', '问题', '内容',
+  '方式', '时间', '数据', '能够', '一个', '本期', '产品', '研发', '确认', '按照', '通过',
+  '复用', '现有', '已经', '不再', '不得', '不能', '保留', '统一', '具体', '包括', '例如',
+]);
+
+const FROZEN_STOP_CHARS: ReadonlySet<string> = new Set(['的', '了', '和', '与', '在', '为', '是', '中', '上', '下', '不']);
+
+function frozenBump(map: Map<string, number>, word: string, weight: number): void {
+  const clean = word.trim();
+  if (clean.length < 2 || FROZEN_STOPWORDS.has(clean) || FROZEN_STOP_CHARS.has(clean)) return;
+  map.set(clean, (map.get(clean) ?? 0) + weight);
+}
+
+function frozenNgrams(run: string, map: Map<string, number>, weight: number): void {
+  for (let len = 2; len <= 6; len += 1) {
+    for (let i = 0; i + len <= run.length; i += 1) frozenBump(map, run.slice(i, i + len), weight);
+  }
+}
+
+/** 冻结版关键词抽取（`5d818ce` 之前的语义）。改它之前先读上面那段注释。 */
+function frozenKeywordsFrom(markdown: string, title: string, max = FROZEN_MAX_KEYWORDS): string[] {
+  const counts = new Map<string, number>();
+
+  QUOTED.lastIndex = 0;
+  for (let m = QUOTED.exec(markdown); m !== null; m = QUOTED.exec(markdown)) {
+    const text = (m[1] ?? '').trim();
+    if (/[\u4e00-\u9fa5]/.test(text)) frozenBump(counts, text, 3);
+  }
+
+  for (const run of title.match(ANY_RUN) ?? []) {
+    frozenBump(counts, run, 2);
+    if (/[\u4e00-\u9fa5]/.test(run)) frozenNgrams(run, counts, 2);
+  }
+
+  for (const run of markdown.match(CJK_RUN) ?? []) frozenNgrams(run, counts, 1);
+
+  const ranked = [...counts.entries()]
+    .map(([word, count]) => ({ word, score: count * word.length }))
+    .sort((a, b) => b.score - a.score || b.word.length - a.word.length || a.word.localeCompare(b.word));
+
+  const picked: string[] = [];
+  for (const item of ranked) {
+    if (picked.length >= max) break;
+    const redundant = picked.some((word) => word.includes(item.word) || item.word.includes(word));
+    if (redundant) continue;
+    picked.push(item.word);
+  }
+  return picked;
+}
+
+/** A 用的关键词：冻结词表 + 停用词过滤（与 `compare-locate.ts` 的 `runA` 同一口径）。 */
+function frozenKeywords(query: string, title: string): string[] {
+  return frozenKeywordsFrom(query, title).filter((word) => !STOP_WORDS.has(word) && word.length >= 2);
+}
 
 function pathTokens(word: string): string[] {
   const hit = PATH_TERMS.find(([cn]) => word.includes(cn) || cn.includes(word));
   return hit === undefined ? [] : hit[1];
 }
 
-/** A：改之前线上那套（与 compare-locate.ts 同源，冻结不动）。 */
+/**
+ * A：改之前线上那套（`ssh grep` + 26 条中英词表）。
+ *
+ * 打分口径也照冻结版（路径命中 ×10 + 正文命中、只留路径命中过的文件、每仓取 6 个）——
+ * 早先这里用的是「命中次数相加」，与 `compare-locate.ts` 的 A 不是同一个算法，
+ * 那样 A 臂就不是「改之前线上那一套」，而是「本分支顺手写的一个近似」。
+ */
 async function pathA(query: string, title: string): Promise<Picked> {
-  const keywords = keywordsFrom(query, title);
+  const keywords = frozenKeywords(query, title);
   const picked: string[] = [];
   for (const repo of REPOS) {
     const tree = await lsTree(repo);
     if (!tree.ok) continue;
     const pool = new Set(tree.data.filter((p) => CODE_DIR.test(p) && SRC.test(p)));
-    const hits = new Map<string, number>();
+
+    const hits = new Map<string, { content: number; path: number }>();
+    const bumpHit = (path: string, field: 'content' | 'path'): void => {
+      const cur = hits.get(path) ?? { content: 0, path: 0 };
+      cur[field] += 1;
+      hits.set(path, cur);
+    };
     for (const path of pool) {
       const low = path.toLowerCase();
       for (const word of keywords) {
-        if (low.includes(word.toLowerCase())) hits.set(path, (hits.get(path) ?? 0) + 1);
-        else if (pathTokens(word).some((t) => low.includes(t))) hits.set(path, (hits.get(path) ?? 0) + 1);
+        if (low.includes(word.toLowerCase())) bumpHit(path, 'path');
+        else if (pathTokens(word).some((t) => low.includes(t))) bumpHit(path, 'path');
       }
     }
     for (const word of keywords) {
       const found = await grep(repo, word, { max: 60 });
       if (!found.ok) continue;
-      for (const hit of found.data) {
-        if (!pool.has(hit.path)) continue;
-        hits.set(hit.path, (hits.get(hit.path) ?? 0) + 1);
-      }
+      for (const hit of found.data) if (pool.has(hit.path)) bumpHit(hit.path, 'content');
     }
-    const ranked = [...hits.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .slice(0, 6).map(([p]) => p);
+
+    const ranked = [...hits.entries()]
+      .filter(([, v]) => v.path > 0)
+      .sort((a, b) => (b[1].path * 10 + b[1].content) - (a[1].path * 10 + a[1].content)
+        || a[0].localeCompare(b[0]))
+      .slice(0, 6)
+      .map(([p]) => p);
     for (const p of ranked) picked.push(p);
   }
   return picked;
@@ -423,7 +533,7 @@ async function main(): Promise<void> {
       if (answer !== null) console.log(`  真答案合并：657 条里第 ${answer.rank}（动了 ${answer.files} 个文件）`);
       if (process.argv.includes('--verbose')) {
         console.log(`  检索式 C   ${shortQuery}`);
-        console.log(`  关键词 A   ${keywordsFrom(longQuery, req.title).join(' / ')}`);
+        console.log(`  关键词 A   ${frozenKeywords(longQuery, req.title).join(' / ')}（冻结词表）`);
         console.log(`  标准答案   ${expected.slice(0, 4).join(' , ')}${expected.length > 4 ? ' …' : ''}`);
         console.log(`  A 挑了     ${arms.A?.picked.slice(0, 4).join(' , ') || '（本批未跑）'}`);
         console.log(`  B 挑了     ${arms.B?.picked.slice(0, 4).join(' , ') || '（本批未跑）'}`);
