@@ -1,7 +1,7 @@
 import { db } from '../src/db/client';
 import { getBoard } from '../src/core/read/board';
 import { getRequirementDetail } from '../src/core/read/detail';
-import { currentMember, listMembers } from '../src/core/read/member';
+import { currentMemberRow, listMembers, ownerCandidates } from '../src/core/read/member';
 import { listReleases } from '../src/core/read/version';
 import { generatorView } from '../src/core/uemaster/settings';
 import { Board } from './components/Board';
@@ -50,16 +50,24 @@ export default async function BoardPage({
   // 不需要知道生成器的存在。
   // `generator` 要问**当前成员**（P2.12）：他自己配了 key，抽屉里那三行「生成」的
   // 结论就得按他那一份算，而不是按平台的算。与 `getBoard()` 内部取的是同一个 cookie。
-  const [columns, detail, actor] = await Promise.all([
-    getBoard(),
-    openId === null ? Promise.resolve(null) : getRequirementDetail(openId),
-    currentMember(),
-  ]);
+  const [columns, viewer] = await Promise.all([getBoard(), currentMemberRow()]);
+  /**
+   * 抽屉的动作条要**这个人**的权限（P4-05）：`detail.actions` 是
+   * `actionsFor(state) ∩ can(actor, …)`，`permissions` 是描述「编辑」、负责人「改」、
+   * 参考段两个写按钮的可见性。所以这里不能只传 id——身份必须一起交进去。
+   */
+  const detail = openId === null ? null : await getRequirementDetail(openId, viewer);
+  const actor = viewer.name;
   const generator = openId === null ? null : await generatorView(db, actor);
 
   // 名册只在需要开表单时查：负责人下拉是唯一需要它的地方（看板与抽屉都不需要）。
   const formOpen = creating || (openId !== null && editing);
   const members = formOpen ? await listMembers() : [];
+
+  // 「改负责人」的候选：只在抽屉给出转交权时才查（超管全名册 / 条线负责人本线）。
+  const owners = detail !== null && detail.permissions.reassignOwner
+    ? await ownerCandidates(viewer, detail.info.type)
+    : [];
 
   // 版本列表只给排期表单用：抽屉里没有「排期」这个动作时不查（版本页有自己的口径）。
   const releases = detail !== null && detail.actions.includes('schedule')
@@ -77,7 +85,13 @@ export default async function BoardPage({
       {/* key 是需求 id：从 A 的抽屉直接跳到 B 的抽屉（URL 导航）时，整块重新挂载，
           上一个动作留下的失败消息与表单值不会跟着漂到另一条需求上。 */}
       {detail !== null && generator !== null && (
-        <Drawer key={detail.id} detail={detail} releases={releases} generator={generator} />
+        <Drawer
+          key={detail.id}
+          detail={detail}
+          releases={releases}
+          generator={generator}
+          owners={owners}
+        />
       )}
       {/* 新建：任何时候都能开（抽屉开着也开——它是一个独立的对话框，不是一个页面）。 */}
       {creating && (

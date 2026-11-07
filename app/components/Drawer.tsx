@@ -2,12 +2,14 @@ import { Fragment } from 'react';
 import Link from 'next/link';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail';
+import type { Member } from '../../src/core/read/member';
 import { formatMonthDay } from '../../src/core/read/board';
 import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
 import { GenerateButton } from './GenerateButton';
 import { AttachForm } from './AttachForm';
+import { OwnerPicker } from './OwnerPicker';
 
 /**
  * 需求抽屉：读模型那六段的直接渲染。
@@ -41,8 +43,19 @@ const PILL: Record<string, string> = {
 };
 
 function RefRow({
-  item, id, number, generator,
-}: { item: DetailRef; id: string; number: number; generator: GeneratorView }) {
+  item, id, number, generator, canEdit,
+}: {
+  item: DetailRef;
+  id: string;
+  number: number;
+  generator: GeneratorView;
+  /**
+   * 这个人能不能在这条需求上写（P4-05）。生成与交回材料都是**写**：生成会落产物与
+   * 事件，交回材料同样。owner 的规矩是「别人的需求只读」，所以没有 `edit` 时
+   * 这两个按钮都不出现——不是禁用：一个灰掉的按钮仍然在说「这里有个能做的事」。
+   */
+  canEdit: boolean;
+}) {
   // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「生成」。
   // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
   //
@@ -78,16 +91,20 @@ function RefRow({
         {item.present && item.versions > 1 && (
           <span className="pill no">第 {item.versions} 版</span>
         )}
-        <GenerateButton
-          requirementId={id}
-          stage={item.stage}
-          runningJobId={item.generation?.id ?? null}
-          generator={generator}
-          present={item.present}
-          fresh={item.freshness === 'fresh'}
-          versions={item.versions}
-        />
-        <AttachForm id={id} number={number} stage={item.stage} />
+        {canEdit && (
+          <>
+            <GenerateButton
+              requirementId={id}
+              stage={item.stage}
+              runningJobId={item.generation?.id ?? null}
+              generator={generator}
+              present={item.present}
+              fresh={item.freshness === 'fresh'}
+              versions={item.versions}
+            />
+            <AttachForm id={id} number={number} stage={item.stage} />
+          </>
+        )}
       </div>
     </div>
   );
@@ -108,8 +125,14 @@ function ReviewRow({ review }: { review: DetailReview }) {
 }
 
 export function Drawer({
-  detail, releases, generator,
-}: { detail: Detail; releases: ReleaseOption[]; generator: GeneratorView }) {
+  detail, releases, generator, owners,
+}: {
+  detail: Detail;
+  releases: ReleaseOption[];
+  generator: GeneratorView;
+  /** 「改负责人」下拉的候选；没有转交权时是空数组。 */
+  owners: Member[];
+}) {
   const { info, commit, review, description } = detail;
   // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
   const refs = detail.refs;
@@ -140,7 +163,15 @@ export function Drawer({
             <h3>信息</h3>
             <dl className="fields">
               <dt>提出人</dt><dd>{info.requester ?? '—'}</dd>
-              <dt>负责人</dt><dd>{info.owner ?? '—'}</dd>
+              {/* 负责人这一行是「改」的入口（P4-05）。控件只在有转交权时挂出来，
+                  候选也由读模型筛过（超管全名册 / 条线负责人只看本线）。 */}
+              <dt>负责人</dt>
+              <dd>
+                {info.owner ?? '—'}
+                {detail.permissions.reassignOwner && owners.length > 0 && (
+                  <OwnerPicker id={detail.id} owner={info.owner} members={owners} />
+                )}
+              </dd>
               <dt>类型</dt><dd>{info.typeLabel}</dd>
               <dt>进入本状态</dt><dd>{formatMonthDay(info.stateEnteredAt) ?? '—'}</dd>
               {info.prdUrl !== null && (
@@ -169,7 +200,10 @@ export function Drawer({
           <section className="dsec">
             <div className="sechd">
               <h3>描述</h3>
-              <Link className="btn sm ghost" href={`/?open=${detail.id}&edit=1`}>编辑</Link>
+              {/* 「编辑」与动作条同一个判据：`can('edit')`。没有它就没有这一格入口。 */}
+              {detail.permissions.edit && (
+                <Link className="btn sm ghost" href={`/?open=${detail.id}&edit=1`}>编辑</Link>
+              )}
             </div>
             <dl className="fields">
               {DESCRIPTIVE_FIELDS.map((field) => (
@@ -223,6 +257,7 @@ export function Drawer({
                 id={detail.id}
                 number={detail.number}
                 generator={generator}
+                canEdit={detail.permissions.edit}
               />
             ))}
           </section>

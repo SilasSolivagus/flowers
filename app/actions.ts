@@ -39,6 +39,8 @@ import {
   currentMemberRow, latestNoticeSeq, markRead, notifyView, type NotifyView,
 } from '../src/core/read/notify';
 import { attachFromForm } from './attach-form';
+import { changePassword } from './password-change';
+import { transferOwnedRequirements } from './member-transfer';
 
 /**
  * 抽屉里那九个动作的服务端入口。
@@ -726,6 +728,54 @@ export async function resetPasswordAction(formData: FormData): Promise<
   } catch (error) {
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
+  }
+}
+
+/**
+ * 自改口令（设置 · 我的）：旧口令 + 新口令 + 确认。
+ *
+ * 规则在 `app/password-change.ts`（旧口令验一次、两次一致、长度交给 `setPassword`）；
+ * 这里只做那三件 Next 专有的事：取字段、把 `AppError` 翻成一句中文、失效设置页。
+ * 成功不返回任何口令——本人刚输入的那个就在他手里，回显一次只是多一个能把它读走的地方。
+ */
+export async function changePasswordAction(formData: FormData): Promise<ActionResult> {
+  const actor = await currentMember();
+  try {
+    await changePassword(db, actor, {
+      oldPassword: field(formData, 'oldPassword'),
+      newPassword: field(formData, 'newPassword'),
+      confirm: field(formData, 'confirm'),
+    });
+    revalidatePath('/settings');
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/**
+ * 转交一个成员名下的全部需求（设置 · 成员，停用被挡住之后的那一步）。
+ *
+ * 一条条调 `reassignOwner`：权限、本线约束、事件全部由那个服务回答，这里不复制。
+ * 失败时把服务那句中文原样带回；成功时 `moved` 只是让界面能收起那一行。
+ */
+export async function transferOwnedAction(formData: FormData): Promise<
+  { ok: true; moved: number } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    const result = await transferOwnedRequirements(db, actor, {
+      fromMemberId: field(formData, 'fromMemberId'),
+      toMemberId: field(formData, 'toMemberId'),
+    });
+    return { ok: true, moved: result.moved };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  } finally {
+    revalidatePath('/settings');
+    revalidatePath('/');
   }
 }
 

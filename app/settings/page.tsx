@@ -1,10 +1,14 @@
 import Link from 'next/link';
 import { headers } from 'next/headers';
+import { notFound } from 'next/navigation';
 
 import { db } from '../../src/db/client';
 import { listTokens } from '../../mcp/tokens';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
+import { can } from '../../src/core/auth/roles';
+import { prefsOf } from '../../src/core/read/notify';
+import { memberAdminView } from '../../src/core/read/member-admin';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
 import type { GeneratorView, MemberKeyView } from '../../src/core/uemaster/candidates';
 import {
@@ -15,6 +19,8 @@ import { generatorView } from '../../src/core/uemaster/settings';
 import { GeneratorRow } from './GeneratorRow';
 import { McpRow, type McpTokenRow } from './McpRow';
 import { MemberKeyRow } from './MemberKeyRow';
+import { MemberAdmin } from './MemberAdmin';
+import { NotifyRow, PasswordRow } from './MeSecurity';
 import { endpointFromHeaders } from './mcp-endpoint';
 import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
@@ -40,13 +46,23 @@ import { Shell } from '../components/Shell';
  * - **空要诚实地空**：某个评审角色没有成员时显示「未配置」，而不是编一个名字出来。
  */
 
-type TabId = 'me' | 'project';
+type TabId = 'me' | 'project' | 'members';
 
-/** tab 的地址就是选中态本身（服务端链接，不是按钮）。 */
+/**
+ * tab 的地址就是选中态本身（服务端链接，不是按钮）。
+ *
+ * 「成员」这一格只给超管（P4-05）：没有 `manageMembers` 的人既看不到这个入口，
+ * 手改 `?tab=members` 也只会拿到 404（见下面 `notFound()`）。不是把他领回「我的」——
+ * 一个被悄悄改写的 URL 会让人以为自己看到的就是他要的那一页。
+ */
 const TABS: ReadonlyArray<{ id: TabId; href: string; label: string }> = [
   { id: 'me', href: '/settings?tab=me', label: '我的' },
   { id: 'project', href: '/settings?tab=project', label: '项目' },
 ];
+
+const MEMBERS_TAB: { id: TabId; href: string; label: string } = {
+  id: 'members', href: '/settings?tab=members', label: '成员',
+};
 
 /**
  * 工作流的十行，按状态机顺序。
@@ -87,13 +103,23 @@ export default async function SettingsPage({
 }) {
   const { tab } = await searchParams;
   // 没带参数、带了个手改出来的值，都落回「我的」：一个坏链接不该让设置页白屏。
-  const active: TabId = tab === 'project' ? 'project' : 'me';
+  const active: TabId = tab === 'project'
+    ? 'project'
+    : (tab === 'members' ? 'members' : 'me');
 
   const [members, actor] = await Promise.all([listMembers(), currentMember()]);
 
   // 名册里这个人（cookie 里的名字 → 那一行）。找不到就是 null：那时「我的模型 key」
   // 落「未配置」，也存不进去（`saveMemberKeyAction` 会说「不在名册上」）。
   const self = members.find((member) => member.name === actor) ?? null;
+
+  // 「成员管理」的入口判据就是 `can('manageMembers')`——不在这里写 role === '...'，
+  // 否则「谁能管成员」会长出第二份答案（服务层那一份才是权威）。
+  const admin = self !== null && can(self, { type: '', ownerMemberId: null }, 'manageMembers');
+  const tabs = admin ? [...TABS, MEMBERS_TAB] : TABS;
+  // 没有入口，也没有路由：手改 URL 的人拿到的是一张 404，而不是一张只读的名册。
+  if (active === 'members' && !admin) notFound();
+  const memberRows = active === 'members' ? await memberAdminView(self) : null;
 
   // 「生成器」这一行在「项目」栏里，但这一页只有两个 server component 分支：
   // 顺手一起读，省得为一行再开一次请求。`app_settings` 是主键读，探测有进程缓存。
@@ -126,7 +152,7 @@ export default async function SettingsPage({
       <main className="view">
       <div className="setwrap">
         <nav className="stabs" aria-label="设置分栏">
-          {TABS.map((item) => (
+          {tabs.map((item) => (
             <Link
               key={item.id}
               href={item.href}
@@ -141,13 +167,16 @@ export default async function SettingsPage({
           ? (
             <MePanel
               actor={actor}
+              self={self}
               members={members}
               memberKey={memberKey}
               endpoint={endpoint}
               tokens={tokenRows}
             />
           )
-          : <ProjectPanel members={members} generator={generator} />}
+          : (active === 'members'
+            ? <><MemberAdmin rows={memberRows ?? []} /></>
+            : <ProjectPanel members={members} generator={generator} />)}
       </div>
       </main>
     </Shell>
@@ -166,13 +195,16 @@ export default async function SettingsPage({
  * 身份由配置决定，这一页只把它读到屏上。
  *
  * 角色是本页唯一能给出、且真的来自数据库的第二条事实（`members.role`）。
- * 通知偏好属于 P3：库里没有通知相关的表，所以这一页没有那一行——一行点了不生效的
- * 「站内 / 企微」不是只读展示，是假数据。
+ *
+ * P4-05 起多两格：**收变动通知**（`notify_prefs`）与**自改口令**。两者都是「我对我
+ * 自己」的写，入口只在这一栏；通知的默认值与扇出规则仍然在读侧
+ * （`src/core/read/notify.ts`），这一页只把它翻成一个开关。
  */
 function MePanel({
-  actor, members, memberKey, endpoint, tokens,
+  actor, self, members, memberKey, endpoint, tokens,
 }: {
   actor: string;
+  self: Member | null;
   members: Member[];
   memberKey: MemberKeyView;
   endpoint: string;
@@ -180,7 +212,13 @@ function MePanel({
 }) {
   // 名册里找不到这个人（cookie 里是个离职的人、或者库里还没 seed）：角色行如实说
   // 「未在名册」，不猜、也不给他安一个默认角色。
-  const self = members.find((member) => member.name === actor) ?? null;
+  const mine = self ?? members.find((member) => member.name === actor) ?? null;
+  // 「开」= 至少还收着一类扇出。`prefsOf` 把 null / inherit:true 都翻成全开，
+  // 所以这里不需要再判默认值——默认值的唯一一份在读侧。
+  const notifyOn = mine === null ? false : (() => {
+    const prefs = prefsOf(mine.notifyPrefs);
+    return prefs.changed || prefs.rejected;
+  })();
 
   return (
     <>
@@ -202,9 +240,19 @@ function MePanel({
         </div>
         <div className="i">
           <div className="l"><b>角色</b></div>
-          <div className="v">{self === null ? '未在名册' : roleLabel(self.role)}</div>
+          <div className="v">{mine === null ? '未在名册' : roleLabel(mine.role)}</div>
         </div>
+        {/* 自改口令与身份同一张卡：它们都是「我是谁」这件事的一部分，而屏上不该出现
+            第二个叫「口令」的标题。 */}
+        {mine !== null && <PasswordRow />}
       </section>
+
+      {mine !== null && (
+        <section className="sg">
+          <div className="h">通知</div>
+          <NotifyRow on={notifyOn} />
+        </section>
+      )}
     </>
   );
 }
@@ -212,9 +260,9 @@ function MePanel({
 /**
  * 项目。
  *
- * 两段：成员与评审线、工作流。都是只读——P4 不交付工作流编辑，也没有「改成员角色」的动作
- * （那要走领域层，而领域层这一版没有对应服务）。所以这里一行可点的控件都没有：
- * 一个点不动的按钮，比它不在更糟。
+ * 两段：评审线、工作流，加上生成器那一格。都不涉及「人怎么管」——成员管理在
+ * 「成员」那一栏（只给超管），这里不再放一份只读的名册：同一份事实两个入口，
+ * 改完一处另一处就会看起来没变。
  */
 function ProjectPanel({
   members, generator,
@@ -224,21 +272,6 @@ function ProjectPanel({
       {/* 生成器：这一页上唯一一个可写的格子。它必须可写——「谁在跑」是这台机器的
           事实，不是代码里的常量；而写不写对只有「测试」能回答（见 settings.ts）。 */}
       <GeneratorRow view={generator} />
-
-      <section className="sg">
-        <div className="h">成员</div>
-        {members.length === 0 ? (
-          // 空名册：一行「未配置」，不编人。角色行同理（见下面的评审线）。
-          <div className="i"><div className="l"><b>未配置</b></div></div>
-        ) : (
-          members.map((member) => (
-            <div className="i" key={member.id}>
-              <div className="l"><b>{member.name}</b></div>
-              <div className="v">{roleLabel(member.role)}</div>
-            </div>
-          ))
-        )}
-      </section>
 
       {/* 「评审人由类型决定」（spec §2）在界面上的那一半：
           类型 → 覆盖它的角色 → 那个角色现在是谁。界面上不做派单，只把这条规则摊开。

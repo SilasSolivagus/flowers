@@ -82,3 +82,28 @@
 /* 表单与原文块都是**一组行**，不是一行：`.sg .i` 是 flex，这里要盖成 grid。 */
 .sg .i.mcp-form{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px;padding-top:0;padding-bottom:12px}
 .sg .i.mcp-token{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding-top:0;padding-bottom:12px}
+
+/* P4-05：成员管理、通知开关、自改口令。
+   仍然是「标签 + 值 + 控件」三样，没有解释段落；颜色只取 var(--c-*)。 */
+
+/* 成员行：名字下面一行小字（角色 · 条线），右端「状态 / 负责需求数」。
+   `min-width:0` 与 `overflow-wrap` 照旧：名字可以很长，行不能被顶出屏幕。 */
+.mem-sub{display:block;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4);overflow-wrap:anywhere}
+.mem-owned{font:400 var(--t-caption) var(--f-num);color:var(--c-text-3);white-space:nowrap}
+
+/* 下拉在 .mk-f 的第二列：与输入框同高、同宽，右端不出格。 */
+.mk-f select{width:100%}
+
+/* 通知开关：一个圆角轨道 + 一个圆点，状态由 `.on` 切换。
+   role="switch" 已经在 DOM 上（读屏读得到 aria-checked），这里只画。 */
+.sw{position:relative;width:36px;height:20px;border-radius:999px;border:1px solid var(--c-line-strong);background:var(--c-surface-2);padding:0;cursor:pointer;transition:background var(--d-fast) var(--e-standard),border-color var(--d-fast) var(--e-standard)}
+.sw i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--c-text-3);transition:transform var(--d-fast) var(--e-standard),background var(--d-fast) var(--e-standard)}
+.sw.on{background:var(--c-accent);border-color:var(--c-accent)}
+.sw.on i{transform:translateX(16px);background:var(--c-on-accent)}
+.sw:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
+.sw[disabled]{opacity:.45;cursor:not-allowed}
+
+/* 一次性口令：只出现这一行，选得中、抄得走。等宽字是必须的（0/O、1/l 要能分辨）。 */
+.pw-once{display:flex;align-items:center;gap:12px;min-width:0}
+.pw-once b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-3);flex:0 0 auto}
+.pw-once code{font:400 var(--t-body-s) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:4px 8px;border-radius:var(--r-xs);user-select:all;overflow-wrap:anywhere}

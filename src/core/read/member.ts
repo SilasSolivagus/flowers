@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { firstProductOwner, loadMembers, memberByName, type Exec } from '../auth/members.js';
-import type { Member } from '../auth/roles.js';
+import { isAdmin, lineOfType, type Member } from '../auth/roles.js';
 import { readSessionName } from '../auth/session.js';
 
 /**
@@ -136,4 +136,23 @@ export function actorFromCookie(raw: string | undefined): string | null {
   } catch {
     return raw.trim() === '' ? null : raw.trim();
   }
+}
+
+/**
+ * 抽屉「改负责人」那份下拉的候选（P4-05）。
+ *
+ * 两档，与 `reassignOwner` 服务里的那条约束**同口径**，但这里只决定「摆给谁选」：
+ * - 超管：名册上所有活着的人；
+ * - 条线负责人：与需求类型同一条线的人（跨线转交在服务层会被拒，
+ *   与其让人选完再撞一句中文，不如不摆出来）。
+ *
+ * 这不是权限判断——真正能不能转、能转给谁，仍然由 `can()` 与服务层回答；
+ * PM 或别的线的人根本看不到这个控件（`detail.permissions.reassignOwner` 是 false）。
+ */
+export async function ownerCandidates(actor: Member, type: string): Promise<Member[]> {
+  const all = await loadMembers(db);
+  if (isAdmin(actor)) return all;
+  const line = lineOfType(type);
+  if (line === null) return [];
+  return all.filter((member) => member.line === line);
 }

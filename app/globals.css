@@ -53,6 +53,10 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 .me b{display:block;font:600 var(--t-body) var(--f-sans);color:var(--c-text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 角色：比姓名小一档、比正文浅一档（线稿的「更安静的第二行」）。 */
 .me .r{margin-top:4px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 退出：和角色同一档字，但可点。不做成按钮外形——左轨底部不该出现一个描边按钮。 */
+.me .logout{margin-top:6px;padding:0;border:0;background:none;cursor:pointer;
+  font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);text-align:left}
+.me .logout:hover{color:var(--c-text-1)}
 
 /* 设置与身份之间只差一条 hairline，所以两者之间不留额外间距：
    设置的行高（--h-row）自己就是间距。 */
@@ -507,3 +511,9 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 @media (max-width:767px){
   .npanel{width:min(360px,calc(100vw - 24px))}
 }
+
+/* P4-05：抽屉「负责人」那一行的「改」。它是行内的一个文字按钮，不是第二个控件组：
+   与值同排、只占 28px 高，避免把「信息」那一段拉成一张表单。 */
+.fields dd .owner-pick{margin-left:8px;height:22px;padding:0 8px;border:0;border-radius:var(--r-xs);background:transparent;color:var(--c-accent);font:500 var(--t-caption) var(--f-sans);cursor:pointer}
+.fields dd .owner-pick:hover{background:var(--c-surface-2)}
+.fields dd .owner-pick:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}

@@ -3,6 +3,8 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
+import { logoutAction } from '../actions';
+
 import { SETTINGS_SECTION, isCurrent } from './sections';
 
 /**
@@ -50,6 +52,14 @@ export function RailFooter({ name, role }: { name: string; role: string }) {
           <span className="abbr" aria-hidden="true">{name.slice(0, 1)}</span>
         </b>
         {role === '' ? null : <div className="r">{role}</div>}
+        {/* 退出：整页只有这一个入口。没有它，「换个账号看看」只能去清 cookie——
+            三个视角的权限验证（PM / 条线负责人 / 超管）就是这么卡住的。 */}
+        <form action={logoutAction}>
+          <button className="logout" type="submit" title="退出">
+            <span className="lbl">退出</span>
+            <span className="abbr" aria-hidden="true">退</span>
+          </button>
+        </form>
       </div>
     </>
   );

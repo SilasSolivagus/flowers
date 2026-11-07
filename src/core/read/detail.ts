@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
+import { can, type Ability, type Member, type RequirementFacts } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
@@ -27,6 +28,41 @@ import {
 export type DetailAction =
   | 'evaluate' | 'submitReview' | 'reject' | 'shelve'
   | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore';
+
+/**
+ * 动作 → 它要求的那一格能力（P4-05）。
+ *
+ * **不要在这里判断谁能做**：映射只回答「这个按钮属于哪一种写」，结论一律由
+ * `can()`（`src/core/auth/roles.ts`）给。界面、服务层、MCP 因此共用同一份规则；
+ * 以后往 `DetailAction` 加一个动作时，这张 `Record` 会编译失败，逼人先表态它要
+ * 哪一格能力，而不是让它悄悄对所有角色可见。
+ *
+ * 评审那两个是唯一非 `edit` 的动作：`can('review')` 里有状态门与派单门，
+ * 所以「待评审」「不是派给我」两件事都由它回答，这里不重复写。
+ */
+export const ACTION_ABILITY: Record<DetailAction, Ability> = {
+  evaluate: 'edit',
+  submitReview: 'edit',
+  reject: 'edit',
+  shelve: 'edit',
+  schedule: 'edit',
+  bounce: 'edit',
+  restore: 'edit',
+  reviewPass: 'review',
+  reviewReject: 'review',
+};
+
+/** 抽屉要显不显示某几处控件（描述「编辑」、负责人「改」、参考段的两个写按钮）。 */
+export type DetailPermissions = {
+  edit: boolean;
+  review: boolean;
+  reassignOwner: boolean;
+  manageMembers: boolean;
+};
+
+const NO_PERMISSIONS: DetailPermissions = {
+  edit: false, review: false, reassignOwner: false, manageMembers: false,
+};
 
 export type DetailRef = {
   stage: 'evaluate' | 'review' | 'inspect';
@@ -133,7 +169,20 @@ export type Detail = {
   refs: DetailRef[];
   review: DetailReview | null;
   events: DetailEvent[];
+  /**
+   * 动作条：**状态合法 ∩ 这个人能做**（P4-05）。
+   *
+   * 服务层拒绝的是「做不成」，这里过滤的是「看不看得见」。两件事必须同时成立：
+   * 只过滤服务层会让 owner 那句「别人连按钮都不出现」不成立；只过滤界面会让
+   * 一个手写的请求仍然成功（那才是安全洞）。所以交集在这里算，规则从 `can()` 来。
+   *
+   * 没有身份（`actor === undefined`，MCP 的纯读）时退回「这个状态合法的全部」：
+   * 那是这个字段在 P4-05 之前就有的口径，MCP 的漂移探测器逐状态钉着它。
+   * 明确「没有身份」（`null`）则是空数组——没有身份的人不该看见任何动作。
+   */
   actions: DetailAction[];
+  /** 上面那几处控件各自要不要渲染。同样只来自 `can()`，页面不自己推导。 */
+  permissions: DetailPermissions;
 };
 
 const TYPE_LABEL: Record<string, string> = { commercial: '商业', feature: '功能' };
@@ -168,7 +217,7 @@ const ATTACH_LABEL: Record<string, string> = {
  * 写成穷举 switch 而不是查表：给 State 加成员时这里编译失败，逼人重新表态；
  * 页面拿到的动作列表因此不可能悄悄漏掉一个状态。
  */
-function actionsFor(state: State): DetailAction[] {
+export function actionsFor(state: State): DetailAction[] {
   switch (state) {
     case 'inbox':
       // 没有「评估」：它不是一个点一下就能完成的动作（材料要生成），一个必然失败的
@@ -195,6 +244,28 @@ function actionsFor(state: State): DetailAction[] {
     case 'shelved':
       return ['restore'];
   }
+}
+
+/**
+ * 动作条的真值：`actionsFor(state)` ∩ `can(actor, facts, ability)`。
+ *
+ * 这是这一层唯一的过滤点——页面拿到的就是结果，它不再做一次 `can()`（那样会出现
+ * 第二份判断，而两份判断一定会分叉）。测试表直接调它，不复制它的实现。
+ */
+export function visibleActions(
+  state: State, actor: Member, facts: RequirementFacts,
+): DetailAction[] {
+  return actionsFor(state).filter((action) => can(actor, facts, ACTION_ABILITY[action]));
+}
+
+/** 抽屉里那几处控件的能力结论。`can()` 是唯一来源，页面只读结果。 */
+export function permissionsFor(actor: Member, facts: RequirementFacts): DetailPermissions {
+  return {
+    edit: can(actor, facts, 'edit'),
+    review: can(actor, facts, 'review'),
+    reassignOwner: can(actor, facts, 'reassignOwner'),
+    manageMembers: can(actor, facts, 'manageMembers'),
+  };
 }
 
 type Payload = Record<string, unknown>;
@@ -361,6 +432,7 @@ type Row = {
   commit_due_at: string | null;
   created_at: string;
   owner: string | null;
+  owner_member_id: string | null;
   release_id: string | null;
   release_name: string | null;
   window_start: string | null;
@@ -376,6 +448,7 @@ type Row = {
 type ReviewRow = {
   name: string;
   role: string;
+  reviewer_id: string;
   verdict: string | null;
   reason: string | null;
   decided_at: string | null;
@@ -387,8 +460,15 @@ type ReviewRow = {
  * 非 uuid 也返回 null 而不是抛 AppError：那个字符串只可能来自手改的 URL 或点坏的链接，
  * 让页面显示「找不到」比把 PG 的 22P02 抛到上层诚实得多（服务层的入口校验仍然按
  * AppError 走，那是写路径的口径，读路径不需要一个错误码）。
+ *
+ * `actor` 是 P4-05 加的那一半：给了人，`actions` 就是「状态合法 ∩ 他能做」，
+ * `permissions` 也按同一次 `can()` 算。页面**必须**给（Shell 已经保证有会话）；
+ * 不给的那条路留给 MCP 的纯读——它要的是「这个状态有哪些动作」，
+ * 而能不能做由调用服务时的那道闸回答（`tests/mcp-legal-from.test.ts` 钉着）。
  */
-export async function getRequirementDetail(id: string): Promise<Detail | null> {
+export async function getRequirementDetail(
+  id: string, actor?: Member | null,
+): Promise<Detail | null> {
   if (!UUID.test(id)) return null;
 
   // 三处过滤都带 `deleted_at is null`：软删除的行对外等于不存在（P4-02）。
@@ -398,7 +478,7 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
-           m.name as owner,
+           r.owner_member_id, m.name as owner,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
       from requirements r
@@ -411,13 +491,32 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
   // 评审：优先「还挂着的派单」（handed 就是这条需求现在归谁），否则取最近一次判决。
   // 一条需求可能有多行（打回后重新提交会再派一次单），抽屉只显示最近的那一行。
   const reviewRes = await db.execute<ReviewRow>(sql`
-    select m.name, m.role, ra.verdict, ra.reason, ra.decided_at
+    select m.name, m.role, m.id as reviewer_id, ra.verdict, ra.reason, ra.decided_at
       from review_assignments ra
       join members m on m.id = ra.reviewer_member_id
      where ra.requirement_id = ${id}
      order by (ra.verdict = 'handed') desc, ra.decided_at desc nulls last, ra.id desc
      limit 1`);
   const reviewRow = reviewRes.rows[0] ?? null;
+
+  /**
+   * 权限事实：全部来自**这一行**（不是调用方口述）。派单只认 `handed` 那一行——
+   * 一份已收口的旧派单（passed / rejected）不该继续回答「现在谁签字」。
+   */
+  const facts: RequirementFacts = {
+    type: row.type,
+    ownerMemberId: row.owner_member_id,
+    state: row.state,
+    reviewerMemberId: reviewRow !== null && reviewRow.verdict === 'handed'
+      ? reviewRow.reviewer_id
+      : null,
+  };
+  const permissions = actor === undefined || actor === null
+    ? NO_PERMISSIONS
+    : permissionsFor(actor, facts);
+  const actions = actor === undefined
+    ? actionsFor(row.state)
+    : (actor === null ? [] : visibleActions(row.state, actor, facts));
 
   const eventRes = await db.execute<{
     seq: number; actor: string; type: string; payload: string; at: string;
@@ -525,6 +624,7 @@ export async function getRequirementDetail(id: string): Promise<Detail | null> {
       at: e.at,
       dateLabel: formatMonthDay(e.at) ?? '—',
     })),
-    actions: actionsFor(row.state),
+    actions,
+    permissions,
   };
 }
