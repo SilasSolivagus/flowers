@@ -55,4 +55,18 @@ it('commit_history 与 locate_runs 存在，且主键与索引齐', async () => 
      where table_schema = 'public' and table_name in ('commit_history','locate_runs')
      order by 1`);
   expect(res.rows.map((r) => r.table_name)).toEqual(['commit_history', 'locate_runs']);
+
+  // 钉住真实的名字，不只是「表在」。drizzle-kit 的复合主键默认名是「列名拼接」
+  // （commit_history_repo_commit_sha_pk），只有 schema.ts 里显式给了 name 才对得上
+  // 迁移里手写的 commit_history_repo_sha_pk。差一个字，下一次 db:generate 就会吐一条
+  // drop/add constraint 的迁移——静默、且看起来像正常变更。
+  const idx = await db.execute<{ indexname: string }>(sql`
+    select indexname from pg_indexes
+     where tablename in ('commit_history','locate_runs') order by 1`);
+  expect(idx.rows.map((r) => r.indexname)).toEqual([
+    'commit_history_merged_at',
+    'commit_history_repo_sha_pk',
+    'locate_runs_created_at',
+    'locate_runs_pkey',
+  ]);
 });

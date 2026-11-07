@@ -580,7 +580,7 @@ export const commitHistory = pgTable('commit_history', {
   /** 该次合并动过的源码文件。 */
   files: jsonb('files').notNull(),
 }, (t) => ({
-  pk: primaryKey({ columns: [t.repo, t.commitSha] }),
+  pk: primaryKey({ name: 'commit_history_repo_sha_pk', columns: [t.repo, t.commitSha] }),
   at: index('commit_history_merged_at').on(t.mergedAt),
 }));
 
