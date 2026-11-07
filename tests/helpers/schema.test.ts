@@ -48,3 +48,11 @@ it('requirements.number is unique', async () => {
     where tablename = 'requirements' and indexname = 'requirements_number_unique'`);
   expect(idx.rows).toHaveLength(1);
 });
+
+it('commit_history 与 locate_runs 存在，且主键与索引齐', async () => {
+  const res = await db.execute<{ table_name: string }>(sql`
+    select table_name from information_schema.tables
+     where table_schema = 'public' and table_name in ('commit_history','locate_runs')
+     order by 1`);
+  expect(res.rows.map((r) => r.table_name)).toEqual(['commit_history', 'locate_runs']);
+});

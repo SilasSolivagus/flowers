@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  check, jsonb, pgTable, pgSequence, primaryKey, uuid, text, timestamp, integer, index, uniqueIndex,
+  check, jsonb, pgTable, pgSequence, primaryKey, uuid, text, timestamp, integer, index, uniqueIndex, boolean,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -562,3 +562,40 @@ export const codeIndex = pgTable('code_index', {
   pk: primaryKey({ columns: [t.repo, t.sha] }),
   byBuiltAt: index('code_index_built_at').on(t.builtAt),
 }));
+
+/**
+ * 一次合并 = 一个功能落地。
+ *
+ * 粒度故意不是「一次提交」：一条特性分支里会有十几次提交（`fix: 改个字母` 也算），
+ * 只有它最后合并进主干的那一刻，文件清单才是这个功能的完整位置。
+ */
+export const commitHistory = pgTable('commit_history', {
+  repo: text('repo').notNull(),
+  commitSha: text('commit_sha').notNull(),
+  mergedAt: timestamp('merged_at', { withTimezone: true }).notNull(),
+  /** `feat-userEquity-fjd` 里的 `userEquity` 是唯一白给的中英对照线索。 */
+  branch: text('branch'),
+  /** 该分支全部非合并提交信息，用「 / 」拼接。 */
+  message: text('message').notNull(),
+  /** 该次合并动过的源码文件。 */
+  files: jsonb('files').notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.repo, t.commitSha] }),
+  at: index('commit_history_merged_at').on(t.mergedAt),
+}));
+
+/**
+ * 每次定位的账。第一版不设门槛，只记账——攒够 30 条人工案例再定线。
+ *
+ * `outcome` 三值：`none`（一个都没找到）/ `low`（找到候选但不确定）/ `absent`（代码没读到）。
+ * 三值不能合并成一个布尔：`absent` 是「我们没看」，`none` 是「我们看了但没有」。
+ */
+export const locateRuns = pgTable('locate_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requirementId: uuid('requirement_id'),
+  stage: text('stage').notNull(),
+  outcome: text('outcome').notNull(),
+  candidates: integer('candidates').notNull(),
+  hit: boolean('hit'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ at: index('locate_runs_created_at').on(t.createdAt) }));
