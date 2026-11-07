@@ -17,7 +17,9 @@
     "mcp": "node dist/mcp/server.js",
     "mcp:build": "tsc -p tsconfig.mcp.json",
     "seed": "tsx scripts/seed.ts",
-    "migrate:flower": "tsx scripts/migrate-flower.ts"
+    "migrate:flower": "tsx scripts/migrate-flower.ts",
+    "prd:backfill": "tsx scripts/prd-backfill.ts --apply",
+    "prd:backfill:emit": "tsx scripts/prd-backfill.ts --emit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

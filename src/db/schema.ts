@@ -600,6 +600,31 @@ export const prdSnapshots = pgTable('prd_snapshots', {
 }, (t) => ({ byReq: index('prd_snapshots_req').on(t.requirementId, t.fetchedAt) }));
 
 /**
+ * 迁移 0025 的种子表：老系统 PRD 链接与需求标题的**配对快照**。
+ *
+ * 它是「一次外部数据的搬运」留下的台账，不是应用数据：
+ *
+ * - 数据来自 Flower 的 `documents.title` / `documents.external_url`，由
+ *   `scripts/prd-backfill.ts --emit` 生成 `src/db/seeds/prd-url-backfill.json`
+ *   （203 条，一个标题一行）再装进来；应用代码**不读它**，它只被 0025 的
+ *   `update ... from prd_url_backfill_seed` 读一次、以及被人查证时读。
+ * - `title` 主键就是 0025 的判据之一：文档侧「同题唯一」由表的形状保证。
+ * - 故意不在 `src/db/reset.ts` 的 `RESET_TABLES` 里（同 `code_index` 的理由）：
+ *   `cascade` 带不到它，重灌演示库之后仍在；重建的代价是 `npm run prd:backfill`
+ *   一条命令。清掉它只会让 0025「看起来跑过、其实什么也没填」。
+ *
+ * 为什么留在 schema 里而不是只写在迁移 SQL 里：`schema.ts` 是「库里有什么」的
+ * 唯一文字来源，一张只存在于迁移文件里的表会让下一个人以为它不存在。
+ */
+export const prdUrlBackfillSeed = pgTable('prd_url_backfill_seed', {
+  /** 文档标题 = 需求标题（全等，不 trim / 不归一化）。 */
+  title: text('title').primaryKey(),
+  /** `documents.external_url` 原文，一个字都不改写。 */
+  url: text('url').notNull(),
+  loadedAt: timestamp('loaded_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * 静态索引（P4-10）：一个仓库在一个提交上的**结构**，不是正文。
  *
  * 存的是三张关系（`files` / `imports` / `routes`），由 `core/codemirror/code-index.ts`
