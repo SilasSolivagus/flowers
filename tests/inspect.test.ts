@@ -9,7 +9,7 @@ import { AppError } from '../src/core/errors.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { DEFAULT_SSH_HOST, head } from '../src/core/codemirror/mirror.js';
 import { hashMarkdown, saveSnapshot, type Snapshot } from '../src/core/prd/snapshots.js';
-import { CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, PRD_PROMPT_MAX, inspect, keywordsFrom, mermaidFromFlows, prdVersionOf, truncatePrd, validateStructure, type Finding, type InspectDeps, type Structure } from '../src/core/uemaster/inspect.js';
+import { CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, LIVE_LOCATE_DEPS, PRD_PROMPT_MAX, inspect, keywordsFrom, mermaidFromFlows, prdVersionOf, truncatePrd, validateStructure, type Finding, type InspectDeps, type Structure } from '../src/core/uemaster/inspect.js';
 import { normalizeVerdict } from '../src/core/uemaster/shape.js';
 import type { ProviderConfig, ProviderResult } from '../src/core/uemaster/provider.js';
 import { resetDb, seedPeople } from './helpers/db.js';
@@ -108,6 +108,27 @@ const UNI_FILES: Record<string, string> = {
 
 type Fixture = { root: string; repos: Record<string, string>; shas: Record<string, string> };
 
+/**
+ * 每个仓的**那次合并**：从功能分支合进来、消息里带 PRD 的业务词。
+ *
+ * 走查的定位自 Task 8 起只认合并历史（`commit_history`），所以夹具必须是一个「这条
+ * 功能是怎么合进来的」能查得到的真仓——只有一次初始提交的仓在历史里是**空的**，
+ * 那时定位只能给出 `none`，走查的候选段就永远测不到了。合并消息与改动文件都照真实
+ * 场景写：消息是第一段（`出自 11-07「…」` 就取它），改动落在功能路径上。
+ */
+const MERGES: Record<string, { message: string; file: string; add: string }> = {
+  '123pan-pc': {
+    message: 'feat: 分享页搜索补齐 / 工具栏搜索入口改成输入框',
+    file: 'src/pages/Share/Share.tsx',
+    add: '  // 合并带进来的改动：工具栏的搜索入口（走查要能追到这次合并）',
+  },
+  '123pan-uni-app': {
+    message: 'feat: 分享页搜索补齐 / 全链接搜索默认范围',
+    file: 'pages/share/index.vue',
+    add: '  <!-- 合并带进来的改动：分享页搜索入口 -->',
+  },
+};
+
 async function buildFixture(): Promise<Fixture> {
   const root = await mkdtemp(path.join(tmpdir(), 'flowers-inspect-'));
   const repos: Record<string, string> = {};
@@ -129,6 +150,17 @@ async function buildFixture(): Promise<Fixture> {
     await gitCmd(work, ['init', '-q']);
     await gitCmd(work, ['add', '-A']);
     await gitCmd(work, ['commit', '-q', '-m', `fixture: ${id}`]);
+
+    // 一次真的功能合并（`--no-ff`：走查读的是 `rev-list --merges`）——定位的输入就是它。
+    const merge = MERGES[id]!;
+    await gitCmd(work, ['checkout', '-q', '-b', `feat-${id}-search`]);
+    const changed = path.join(work, merge.file);
+    await writeFile(changed, `${await readFile(changed, 'utf8')}${merge.add}\n`, 'utf8');
+    await gitCmd(work, ['add', '-A']);
+    await gitCmd(work, ['commit', '-q', '-m', merge.message]);
+    await gitCmd(work, ['checkout', '-q', '-']);
+    await gitCmd(work, ['merge', '-q', '--no-ff', '-m', merge.message, `feat-${id}-search`]);
+
     await gitCmd(root, ['init', '--bare', '-q', bare]);
     await gitCmd(bare, ['symbolic-ref', 'HEAD', 'refs/heads/master']);
     await gitCmd(work, ['push', '-q', bare, 'HEAD:refs/heads/master']);
@@ -448,10 +480,17 @@ describe('inspect：PRD ⇄ 真实代码', () => {
 
     // 1) 两段模型调用：结构一次 + 复核一次
     expect(fake.calls()).toBe(2);
-    // 2) 提示词 1 带着 PRD（截断并写明）、候选文件与两个仓的 HEAD
+    // 2) 提示词 1 带着 PRD（截断并写明）、**合并历史定位出来的**位置与两个仓的 HEAD
     expect(fake.prompts[0]).toContain('已截断');
     expect(fake.prompts[0]).toContain('分享页搜索补齐 H5 / APP');
-    expect(fake.prompts[0]).toContain('src/pages/Share/Share.tsx');
+    // Task 8 起这一段只由合并历史给出（不是 grep 命中）：那一次合并动的文件必须在场，
+    // 而且带着「出自哪天」的出处。断言从这里改成**新契约**，而不是放宽。
+    expect(fake.prompts[0]).toContain('阶段一：代码位置');
+    expect(fake.prompts[0]).toContain('最可能的位置（待研发确认）：');
+    expect(fake.prompts[0]).toContain('`src/pages/Share/Share.tsx` ← 出自');
+    expect(fake.prompts[0]).toContain('`pages/share/index.vue` ← 出自');
+    // 读到了就不许出现「没能在代码里定位到」——两种结论不能同时成立
+    expect(fake.prompts[0]).not.toContain('没能在代码里定位到');
     for (const id of INSPECT_REPOS) expect(fake.prompts[0]).toContain(`${id}@`);
     // 3) 提示词 2 带着被引用文件的**正文**（不是路径）
     expect(fake.prompts[1]).toContain('工具栏里有一个搜索图标');
@@ -565,6 +604,29 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(out.url).toContain('/uemaster/PAN-');
     expect(await artifactCount()).toBe(1);
   }, 60_000);
+
+  it('两个仓的历史都读不到 → 明确失败，不假装「代码里没有」，也不花一次模型调用', async () => {
+    const r = await inspectable();
+    fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+    const error = await caught(inspect(db, '吕品', { requirementId: r.id }, deps({
+      locateDeps: {
+        ...LIVE_LOCATE_DEPS,
+        ensureHistory: async () => ({
+          ok: false, code: 'git_failed', message: '镜像 ssh 连接超时（mirror@example.test:22）',
+        }),
+        readHistory: async () => [],
+      },
+    })));
+
+    expect(error.code).toBe('locate_absent');
+    // 材料里那句话原样当错误抛出去：带原因、指向「去催人」，不是「代码里没有」
+    expect(error.message).toContain('代码没读到');
+    expect(error.message).toContain('镜像 ssh 连接超时');
+    expect(error.message).not.toContain('代码里没有');
+    expect(fake.calls()).toBe(0);
+    expect(await artifactCount()).toBe(0);
+  }, 30_000);
 
   it('没有 PRD 快照 → 先 readPrd；有快照 → 不读', async () => {
     const r = await inspectable();
