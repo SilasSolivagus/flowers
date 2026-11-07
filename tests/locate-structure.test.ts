@@ -43,13 +43,20 @@ const index = (
 
 describe('扩展词', () => {
   it('模型给出词就用模型的（去重、去空、限 12 个）', async () => {
+    let calls = 0;
     const got = await expandedKeywords(
-      async () => ['权益', 'vip', '', '权益', 'member'],
+      async () => {
+        calls += 1;
+        return ['权益', 'vip', '', '权益', 'member'];
+      },
       '权益套餐',
       '',
       ['原始'],
     );
     expect(got).toEqual(['权益', 'vip', 'member']);
+    // 成功路径也只许打一次：失败路径上的 `calls === 1` 挡不住「先探一次、再要一次」这种
+    // 写法（两次都成功，测试全绿，而评审的耗时翻倍、模型被问两遍）。
+    expect(calls).toBe(1);
   });
 
   it('首尾空白与纯空白项都清掉，顺序按模型给的来（不去排序）', async () => {
@@ -64,8 +71,19 @@ describe('扩展词', () => {
   });
 
   it('模型失败 → 用原始关键词，不重试也不抛', async () => {
-    const got = await expandedKeywords(async () => null, '权益套餐', '', ['权益', '套餐']);
+    let calls = 0;
+    const got = await expandedKeywords(
+      async () => {
+        calls += 1;
+        return null;
+      },
+      '权益套餐',
+      '',
+      ['权益', '套餐'],
+    );
     expect(got).toEqual(['权益', '套餐']);
+    // `null` 这条回落路径最容易被加上「再试一次」：它不抛、看起来像抖动。这里钉死一次。
+    expect(calls).toBe(1);
   });
 
   it('模型抛异常 → 也是回落，调用方看不到异常', async () => {
@@ -92,6 +110,46 @@ describe('扩展词', () => {
   it('模型只给空串 → 清洗后为空 → 回落', async () => {
     const got = await expandedKeywords(async () => ['', '   '], 'x', '', ['原始']);
     expect(got).toEqual(['原始']);
+  });
+
+  /**
+   * **先去重再封顶**，不是先封顶再去重。
+   *
+   * 这两种顺序在「前 8 个里有一半重复」的输入上给出不同答案，所以这条用例能把它钉住：
+   * - 先去重再封顶：12 个不重复的词，正好装满；
+   * - 先封顶再去重：前 12 个里只剩 8 个不重复，清单平白短了 4 条——而且短掉的那几条
+   *   恰恰是模型排在后面的词，看起来像「模型这次给的词少」。
+   *
+   * 为什么这个顺序是对的：上限的目的是「别让关键词个数把匹配趟数顶爆」，而重复词从来不
+   * 增加趟数（`expandTerms` 自己也去重）。先按位置砍，砍掉的是**信息**，省下的不是成本。
+   */
+  it('先去重再封顶：前 8 个里有 4 个重复时仍装满 12 个', async () => {
+    const withDupes = [
+      '甲', '乙', '丙', '丁', '甲', '乙', '丙', '丁',
+      '戊', '己', '庚', '辛', '壬', '癸', '子', '丑',
+    ];
+    const got = await expandedKeywords(async () => withDupes, 'x', '', ['原始']);
+    // 先封顶再去重会得到 8 个（`甲 乙 丙 丁 戊 己 庚 辛`），而不是下面这 12 个。
+    expect(got).toHaveLength(EXPAND_CAP);
+    expect(got).toEqual(['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸', '子', '丑']);
+  });
+
+  it('模型同步抛（不是 rejected promise）→ 同样回落', async () => {
+    // 真实现里 `expand` 末尾可能是一行 `JSON.parse(...)`，它抛的是同步错误——那不会变成
+    // rejected promise，只有 `try { await expand() }` 这种写法才接得住。会接住和「测试证明
+    // 它接住」是两件事。
+    let calls = 0;
+    const got = await expandedKeywords(
+      (): Promise<string[] | null> => {
+        calls += 1;
+        throw new Error('同步炸');
+      },
+      'x',
+      '',
+      ['原始'],
+    );
+    expect(got).toEqual(['原始']);
+    expect(calls).toBe(1);
   });
 
   it('模型给 20 个 → 只留前 12 个', async () => {
@@ -211,7 +269,15 @@ describe('结构检索', () => {
     expect(got.items[0]?.path).toBe('src/components/search-bar/index.vue');
   });
 
-  it('每条的 reason 都非空（空的 why 会在材料里渲染成一个悬空的箭头）', () => {
+  /**
+   * 这条证明的是**当下**材料不会出现悬空箭头：真实索引走一遍，每条 `reason` 都非空。
+   *
+   * 它**不**证明 `probeToCandidate` 里那句兜底（`why === ''` 时补一句话）——那条分支经
+   * `locateAcross` 打不到：`locate()` 丢掉 `score === 0` 的文件，剩下的每个分数都至少由
+   * 一条信号撑起来，所以 `why` 永不为空。兜底那一行是属于「下一个改 `locate()` 的人」的
+   * 保险，它的证明在下面那条 `probeToCandidate` 单测里，两者的可信度不一样，别混着数。
+   */
+  it('真实索引走一遍：每条的 reason 都非空，可以直接进材料', () => {
     const got = locateFromStructure([
       {
         repo: 'uni-app',
@@ -236,22 +302,51 @@ describe('结构检索', () => {
     expect(() => CANDIDATES_LINE(got.items)).not.toThrow();
   });
 
-  it('why 是空的探针也照样给一句话（不让箭头后面空着）', () => {
+  it('why 是空的探针也照样给一句话（兜底分支，经 locateAcross 打不到）', () => {
     const item = probeToCandidate({ path: 'src/pages/a.vue', kind: 'page', score: 6, why: '   ' });
     expect(item.reason.trim()).not.toBe('');
     expect(item.reason).not.toContain('a.vue');
     expect(item.source).toBe('structure');
   });
 
+  /**
+   * `limit` 是**每仓**上限。
+   *
+   * 只拿一个仓测这条是无效的：单仓时「每仓 limit」与「全局 limit」给出同一个答案，改坏了
+   * 也测不出来。所以这里两个仓、每仓都超过 `limit`，要求两边**各自**都出满 `limit` 条。
+   * 这不是精度问题：一个 `items.slice(0, limit)` 会把第二个仓整个吞掉，而清单看起来仍然
+   * 正常（有候选、有理由、有顺序），只有人工读才会发现「后端仓明明有命中却没出现在材料里」。
+   */
   it('limit 是每仓上限，不是全局上限', () => {
-    const files: Record<string, IndexFile> = {
+    const aFiles: Record<string, IndexFile> = {
       'src/pages/search/search.vue': file('page'),
       'src/pages/search/result.vue': file('page'),
       'src/components/search-bar/index.vue': file('component'),
     };
-    const got = locateFromStructure([{ repo: 'uni-app', index: index('uni-app', files) }], ['搜索'], { limit: 1 });
+    const bFiles: Record<string, IndexFile> = {
+      'src/pages/search-b/index.vue': file('page'),
+      'src/services/search-api.ts': file('service'),
+      'src/components/search-input/index.vue': file('component'),
+    };
+    const entries = [
+      { repo: 'uni-app', index: index('uni-app', aFiles) },
+      { repo: 'pc', index: index('pc', bFiles) },
+    ];
+
+    const got = locateFromStructure(entries, ['搜索'], { limit: 2 });
     if (got.kind !== 'candidates') throw new Error(`期望 candidates，实际 ${got.kind}`);
-    expect(got.items).toHaveLength(1);
+
+    const fromA = got.items.filter((item) => item.path in aFiles).length;
+    const fromB = got.items.filter((item) => item.path in bFiles).length;
+    expect(got.items).toHaveLength(4);
+    expect([fromA, fromB]).toEqual([2, 2]);
+  });
+
+  it('关键词是空的 → 没东西可搜 → none（不掉进「用通用词凑一个候选」）', () => {
+    const got = locateFromStructure([
+      { repo: 'uni-app', index: index('uni-app', { 'src/pages/search/search.vue': file('page') }) },
+    ], []);
+    expect(got.kind).toBe('none');
   });
 
   it('score 原样带出来，不在这一层改成 0..1 或再加权', () => {
