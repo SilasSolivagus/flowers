@@ -3,7 +3,9 @@ import {
   DEMO_DATABASE,
   TEST_DATABASE,
   databaseNameOf,
+  missingDatabaseRefusal,
   resolveDatabaseUrl,
+  testDatabaseShapeRefusal,
   withDatabase,
 } from '../src/db/url.js';
 
@@ -54,5 +56,39 @@ describe('resolveDatabaseUrl', () => {
     expect(withDatabase('postgres://u:p@h:5432/app?sslmode=require', 'flowers_test')).toBe(
       'postgres://u:p@h:5432/flowers_test?sslmode=require',
     );
+  });
+});
+
+/**
+ * Item 3：`npm run db:test:setup` 会建库 + 跑迁移。`TEST_DATABASE_URL` 指到 `flowers`
+ * 时它不删任何行，所以没有任何守卫会响——但演示库里会凭空长出一批测试用的表，迁移
+ * 历史也被写进去。这是「比删数据更难发现」的那一类，所以按名字形状提前拒绝。
+ *
+ * 变异：把 `db-test-setup.ts` 里那句 `testDatabaseShapeRefusal` 判断删掉 → 脚本会在
+ * `flowers` 上跑迁移。用例这一侧钉的是纯函数（不碰库）：把函数改成永远返回 null，
+ * 下面三条断言立刻红。
+ */
+describe('db:test:setup 的库名形状（Item 3）', () => {
+  it('flowers 被拒，理由点名 TEST_DATABASE_URL 与默认落点', () => {
+    const reason = testDatabaseShapeRefusal(DEMO_DATABASE);
+    expect(reason).not.toBeNull();
+    expect(reason).toContain('_test');
+    expect(reason).toContain('TEST_DATABASE_URL');
+    expect(reason).toContain(TEST_DATABASE);
+  });
+
+  it('名字带 _test 的库放行（默认库与自建 CI 库都算）', () => {
+    expect(testDatabaseShapeRefusal(TEST_DATABASE)).toBeNull();
+    expect(testDatabaseShapeRefusal('flowers_test_ci')).toBeNull();
+    expect(testDatabaseShapeRefusal('flowers_p410')).not.toBeNull();
+  });
+});
+
+/** Item 4：3D000 的说明书必须能照着做（纯字符串，不碰库）。 */
+describe('缺库时的报错文案（Item 4）', () => {
+  it('点名库名与 npm run db:test:setup', () => {
+    const message = missingDatabaseRefusal(TEST_DATABASE);
+    expect(message).toContain(`测试库 ${TEST_DATABASE} 不存在，先跑 npm run db:test:setup`);
+    expect(message).toContain('TEST_DATABASE_URL');
   });
 });

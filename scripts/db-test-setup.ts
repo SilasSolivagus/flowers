@@ -16,7 +16,9 @@
 import { Client, Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { databaseNameOf, resolveDatabaseUrl } from '../src/db/url.js';
+import {
+  databaseNameOf, missingDatabaseRefusal, resolveDatabaseUrl, testDatabaseShapeRefusal,
+} from '../src/db/url.js';
 
 /**
  * 库名要拼进 `create database` 的标识符位置（参数占位符不行），所以只放行
@@ -28,9 +30,21 @@ const SAFE_DATABASE_NAME = /^[a-z_][a-z0-9_]*$/i;
 async function main() {
   const url = resolveDatabaseUrl({ ...process.env, VITEST: 'true' });
   const database = databaseNameOf(url);
+  /**
+   * 两道检查，问的是两件不同的事：
+   *
+   * 1. **能不能拼进 SQL**（`SAFE_DATABASE_NAME`）：库名要进 `create database "…"` 的
+   *    标识符位置，参数占位符不顶用，奇怪字符会变成语法错误甚至注入。
+   * 2. **该不该在这里建表**（`testDatabaseShapeRefusal`，本轮新增）：`TEST_DATABASE_URL`
+   *    指到 `flowers` 时，这条命令会**当着真数据的面跑迁移**。它不删行，所以没有任何
+   *    守卫会响；但演示库里凭空多出一批测试用的表、迁移历史被写进去，比删数据更难发现
+   *    ——等有人把演示数据灌进去，才发现这张库早被测试改过。所以名字形状不对就停。
+   */
   if (!SAFE_DATABASE_NAME.test(database)) {
     throw new Error(`测试库名不合法：「${database}」（来自 ${url}）`);
   }
+  const shapeRefusal = testDatabaseShapeRefusal(database);
+  if (shapeRefusal !== null) throw new Error(shapeRefusal);
 
   const adminUrl = new URL(url);
   adminUrl.pathname = '/postgres';
@@ -52,6 +66,15 @@ async function main() {
   try {
     await migrate(drizzle(pool), { migrationsFolder: './src/db/migrations' });
     process.stdout.write(`迁移完成：${database}\n`);
+  } catch (error) {
+    // 刚 `create database` 完不会缺库，所以 3D000 出现在这里只有一个原因：
+    // 上面那次建库连的是维护库 postgres、这里连的是目标库本身，两者主机不一致
+    // （TEST_DATABASE_URL 换了主机）。裸 pg 报错只说 "does not exist"，
+    // 把「先跑 db:test:setup」这句给出来，比让人去猜主机/端口快得多。
+    if ((error as { code?: string }).code === '3D000') {
+      throw new Error(missingDatabaseRefusal(database));
+    }
+    throw error;
   } finally {
     await pool.end();
   }
