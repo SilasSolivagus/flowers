@@ -7,8 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
 import { db } from '../src/db/client.js';
+import { grams, locateFromHistory, rankMerges } from '../src/core/locate/history.js';
 import {
-  ensureHistory, readHistory, sinceFor, validateMerges, type FetchMerges,
+  ensureHistory, readHistory, sinceFor, validateMerges, type FetchMerges, type HistoryRow,
 } from '../src/core/locate/history-store.js';
 
 const git = (cwd: string, args: string[]) =>
@@ -503,5 +504,182 @@ describe('ensureHistory：增量补齐', () => {
     // 消息与文件都要能原样回读（jsonb 往返 + 中文不坏）。
     expect(rowsB[0]!.message).toContain('新功能');
     expect(rowsB[0]!.files).toEqual(['new.ts']);
+  });
+});
+
+/**
+ * 中文检索打分：把「需求标题」对上「哪几次合并」，再把那几次合并的文件聚合成候选。
+ *
+ * 这一组和上面两组不同——它是**纯函数**，不碰库、不碰 git、不碰时钟。理由不只是好测：
+ * 打分一旦依赖「现在几点」「库里有几行」，同一份历史换天跑就可能给出不同排名，而这
+ * 份排名的唯一用途是给人看「大概是这里」，飘一次就没人信了。
+ *
+ * 用例里的 fixture 用真名字（`src/pages/video/video.vue`、`用户权益缩减`），因为这一层
+ * 要防的病就是「中文被翻译成英文标识符后再比」——用英文 fixture 测不出来。
+ */
+describe('中文检索打分', () => {
+  type Row = HistoryRow;
+  const mk = (
+    commitSha: string,
+    mergedAt: string,
+    message: string,
+    files: string[],
+  ): Row => ({ repo: 'r', commitSha, mergedAt, branch: 'feat', message, files });
+
+  /** 与 Task 5 brief 同一份 fixture：一次真命中、一次无关、一次共用同一个文件。 */
+  const rows: Row[] = [
+    mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减 / 弹窗文案调整', ['src/pages/video/video.vue', 'src/utils/questions.ts']),
+    mk('b'.repeat(40), '2026-10-20T00:00:00.000Z', '下载限速风控开发', ['src/components/common-modal/common-modal.vue']),
+    mk('c'.repeat(40), '2026-10-01T00:00:00.000Z', '视频播放页样式调整', ['src/pages/video/video.vue']),
+  ];
+
+  it('切块：中文连续段切二字组、英文小写，别的一律不切', () => {
+    const g = grams('用户权益缩减 userEquity');
+    expect(g.has('权益')).toBe(true);
+    expect(g.has('缩减')).toBe(true);
+    expect(g.has('userequity')).toBe(true);
+    // 严格二字组：不要单字、不要三字（单字会把「用」「户」这种高频噪音灌进来，
+    // 三字组在跨词边界时又几乎凑不出来）。
+    expect([...grams('用户权益')].sort()).toEqual(['户权', '权益', '用户']);
+  });
+
+  it('相近的那次合并排第一', () => {
+    const ranked = rankMerges(rows, '用户部分权益缩减调整');
+    expect(ranked[0]!.row.commitSha).toBe('a'.repeat(40));
+    // 分数是 0..1 的覆盖率，不是「有点像」的形容词：排序只因它，展示不用它。
+    expect(ranked[0]!.score).toBeGreaterThan(0);
+    expect(ranked[0]!.score).toBeLessThanOrEqual(1);
+  });
+
+  it('取前 5 次合并，文件按出现次数聚合，并写出处', () => {
+    const got = locateFromHistory(rows, '用户部分权益缩减调整');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.confidence).toBe('low');
+    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+    expect(got.items[0]!.source).toBe('history');
+    // 出处必须是人能直接读进材料的一行：日期 MM-DD + 那次合并的第一句。
+    expect(got.items[0]!.reason).toBe('出自 11-03「用户权益缩减」');
+  });
+
+  it('完全对不上 → none（不是空候选列表）', () => {
+    const got = locateFromHistory(rows, '发票报销流程改造');
+    expect(got.kind).toBe('none');
+  });
+
+  it('历史为空 → none', () => {
+    expect(locateFromHistory([], '任何东西').kind).toBe('none');
+  });
+
+  it('查询里既没有中文也没有英文词 → none，不是崩', () => {
+    // 「。！」是中文标点，不是汉字：它一个二字组都切不出来。若无词时还往下算，
+    // 分母为 0 就是 0/0。
+    expect([...grams('。！')]).toEqual([]);
+    expect(locateFromHistory(rows, '。！').kind).toBe('none');
+  });
+
+  it('只差一个字的两次合并：换个输入顺序，排名一模一样', () => {
+    // 同一天、同一批词，只有最后一个字不同 → 分数很容易相同。排序若只靠 score，
+    // 结果就跟着 Array.sort 的实现走（同一份数据两次运行可能不同序）。
+    const twinA = mk('d'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
+    const twinB = mk('e'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减免', ['src/y.ts']);
+    const forward = rankMerges([twinA, twinB], '用户权益缩减');
+    const backward = rankMerges([twinB, twinA], '用户权益缩减');
+    expect(forward.map((hit) => hit.row.commitSha)).toEqual(backward.map((hit) => hit.row.commitSha));
+  });
+
+  it('同分同日：按 sha 兜底成固定顺序（tie-break 是契约，不是碰巧）', () => {
+    const sameA = mk('a'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
+    const sameB = mk('b'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
+    expect(rankMerges([sameB, sameA], '用户权益缩减').map((hit) => hit.row.commitSha))
+      .toEqual(['a'.repeat(40), 'b'.repeat(40)]);
+  });
+
+  it('IDF 起作用：一个稀有的词命中，压过两个满语料都有的词', () => {
+    // 这条钉的是「权重」而不是「命中个数」。若把 IDF 拿平（每个词都算 1）：R1 和 R2
+    // 各命中 1 / 2 个词 → 同分 → 靠 tie-break 决定胜负，更新更早的 R2 会输给 R1。
+    // 有 IDF 时：`文案` 在 4 条里出现 3 次（几乎不值钱）、`风控` 只出现 1 次（很值钱），
+    // 于是 R2 明显胜出。这正是「按中文词面的稀有程度比」的意义。
+    const flatText = [
+      mk('a'.repeat(40), '2026-11-05T00:00:00.000Z', '文案调整提示', ['src/faq.ts']),
+      mk('b'.repeat(40), '2026-11-01T00:00:00.000Z', '下载风控开发', ['src/risk.ts']),
+      mk('c'.repeat(40), '2026-10-01T00:00:00.000Z', '文案样式修改', ['src/style.ts']),
+      mk('d'.repeat(40), '2026-09-01T00:00:00.000Z', '文案展示效果', ['src/show.ts']),
+    ];
+    const ranked = rankMerges(flatText, '风控文案');
+    expect(ranked[0]!.row.commitSha).toBe('b'.repeat(40));
+    expect(ranked[0]!.score).toBeGreaterThan(ranked[1]!.score);
+  });
+
+  it('提交信息为空的那次合并：不崩，也不会赢', () => {
+    const silent = mk('f'.repeat(40), '2026-11-05T00:00:00.000Z', '', [
+      'src/pages/video/video.vue',
+      'src/only-touched-by-silent-merge.ts',
+    ]);
+    const got = locateFromHistory([silent, ...rows], '用户部分权益缩减调整');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    // video.vue 也被空信息那次碰过，但出处必须是真匹配上的 a 那次。
+    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+    expect(got.items[0]!.reason).toBe('出自 11-03「用户权益缩减」');
+    // 空信息一个词都切不出来 → 它的独占文件根本不该出现。
+    expect(got.items.map((item) => item.path)).not.toContain('src/only-touched-by-silent-merge.ts');
+    // 只有空信息行 → 什么都没有，但也不能崩。
+    expect(locateFromHistory([mk('g'.repeat(40), '2026-11-05T00:00:00.000Z', '', ['x.ts'])], '用户权益').kind)
+      .toBe('none');
+  });
+
+  it('文件按出现次数排序（count 优先）：两次合并碰过的文件压过一次高分合并', () => {
+    // 聚合口径的核心：**先看被几次合并碰过**，再看那几次里最好的分数。
+    // 只按分数排的话，一次「完美命中」的合并会把它自己那个只出现一次的文件顶到第一，
+    // 而真正被反复改动的那处（两次合并都碰）反而沉下去——那正是要找的地方。
+    const perfect = mk('p'.repeat(40), '2026-11-01T00:00:00.000Z', '下载限速风控', ['src/strong-only.ts']);
+    const weak1 = mk('q'.repeat(40), '2026-10-01T00:00:00.000Z', '限速策略调整', ['src/touched-twice.ts']);
+    const weak2 = mk('r'.repeat(40), '2026-09-01T00:00:00.000Z', '风控提示文案', ['src/touched-twice.ts']);
+    const got = locateFromHistory([perfect, weak1, weak2], '下载限速风控');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items[0]!.path).toBe('src/touched-twice.ts');
+    // perfect 那次分数确实更高：不然这条用例就没在测 count。
+    const scores = got.items.map((item) => item.path);
+    expect(scores).toContain('src/strong-only.ts');
+  });
+
+  it('同 count 同分：按路径字典序（按码点，不是按 locale）', () => {
+    // 用 localeCompare 的话大小写顺序会随运行环境的 locale 变；候选表的顺序是给人数的，
+    // 换台机器就换个顺序等于没有排序。
+    const one = mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/b.ts', 'src/A.ts', 'src/a.ts']);
+    const got = locateFromHistory([one], '用户权益缩减');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items.map((item) => item.path)).toEqual(['src/A.ts', 'src/a.ts', 'src/b.ts']);
+  });
+
+  it('只取前 5 次合并：第 6 名的独占文件不出现在候选里', () => {
+    // top 是常量（后面还要调），所以这里钉的是「6 个候选合并里只用 5 个」这件事本身。
+    const many = [
+      mk('1'.repeat(40), '2026-11-06T00:00:00.000Z', '用户权益缩减', ['src/rank1.ts']),
+      mk('2'.repeat(40), '2026-11-05T00:00:00.000Z', '用户权益缩减', ['src/rank2.ts']),
+      mk('3'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', ['src/rank3.ts']),
+      mk('4'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/rank4.ts']),
+      mk('5'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/rank5.ts']),
+      mk('6'.repeat(40), '2026-11-01T00:00:00.000Z', '用户权益缩减', ['src/rank6.ts']),
+    ];
+    expect(rankMerges(many, '用户权益缩减')).toHaveLength(5);
+    const got = locateFromHistory(many, '用户权益缩减');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items.map((item) => item.path)).not.toContain('src/rank6.ts');
+    // limit 只截断、不重排。
+    const two = locateFromHistory(many, '用户权益缩减', { limit: 2 });
+    expect(two.kind).toBe('candidates');
+    if (two.kind !== 'candidates') return;
+    expect(two.items).toHaveLength(2);
+  });
+
+  it('命中了合并但文件列表为空 → none（候选永不为空）', () => {
+    // CANDIDATES_LINE 对空数组直接抛，所以检索层绝不能把「零个文件」交上去。
+    expect(locateFromHistory([mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', [])], '用户权益').kind)
+      .toBe('none');
   });
 });
