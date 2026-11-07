@@ -16,8 +16,10 @@ import type { Candidate, LocateResult } from './types.js';
  *    不读全局、不读库：同一份历史今天和明天给出同一个排名，否则没人敢拿它当线索；
  * 3. 相似度 = 命中的查询词 IDF 之和 ÷ 查询词 IDF 之和（0..1）；
  * 4. 取分数 > 0 的前 `TOP_MERGES` 次合并；
- * 5. 文件聚合：`Map<path, { count, best merge }>`，按 count 降序 → 分数降序 → 路径
- *    升序（全序，两次运行必须一样）；
+ * 5. 文件聚合：每条合并的相似度先按**合并宽度**打折（`mergeWeight`），同一个文件的
+ *    得分取「碰过它的那些合并里最高的那个权重」；排序按 权重降序 → count 降序 → 路径
+ *    升序（全序，两次运行必须一样）。`count` 只当同级兜底，不再主导排序——理由见
+ *    `mergeWeight` 与 `compareFiles`；
  * 6. `reason` 写成 `出自 MM-DD「那次合并的第一句」`；
  * 7. 没有任何命中 / 查询切不出词 → `{ kind: 'none' }`，**绝不**回一个空 `candidates`
  *    （`copy.ts` 的 `CANDIDATES_LINE` 对空数组直接抛，那是刻意的）。
@@ -223,21 +225,48 @@ function firstSegment(message: string): string {
 }
 
 /**
- * 文件聚合后的排序：count 降序 → 分数降序 → 路径升序。
+ * 一次合并对「它自己动的那些文件」的证据强度：相似度按合并宽度打折。
  *
- * 为什么 count 是**第一位**：被两次合并碰过的文件，比「一次完美命中、但只碰过一次」的
- * 文件更可能是这条需求的落点——需求常常分几次合进来（先做页面、再补文案），只按分数排
- * 会把某次措辞特别像的边角改动顶到第一。这是本层的核心口径，调它是产品决定。
+ * 取 max 聚合（而不是 sum / avg）在仓库级代码检索里是更稳的做法：一次合并只要与需求
+ * 高度相似，它动的文件就该算「强证据」，不该因为它在清单里排第几而被摊薄。
+ *
+ * `log2(2 + files.length)` 而不是 `files.length`：文件数 0 的合并不存在除零问题
+ * （`log2(2) = 1`，权重正好等于相似度），1 个文件时是 1.58、50 个文件时是 5.70——
+ * 单调、平滑、没有断崖。分母取 log 而不是直接乘：一条动了 106 个文件的巨型合并
+ * （2023-10-10 那种 20+ 条提交拼起来的「打包合并」）与一条只动 1 个文件的精确合并，
+ * 前者对其中任何**一个**文件的说明力都该弱得多，但不该弱到 1/106。
+ */
+export function mergeWeight(score: number, fileCount: number): number {
+  return score / Math.log2(2 + fileCount);
+}
+
+/** 聚合出来的一个文件：被几次合并碰过、最高权重、以及那次合并本身（`reason` 的来源）。 */
+type FileAgg = { path: string; count: number; weight: number; best: RankedMerge };
+
+/**
+ * 文件聚合后的排序：权重降序 → count 降序 → 路径升序。
+ *
+ * 为什么**权重**第一、`count` 只当兜底（这一版改的就是这里）：按 `count` 排会系统性
+ * 地奖励「被很多次合并碰过」的文件，而被很多次合并碰过的通常是公用件——`request.ts`
+ * 这种 HTTP 客户端、`global-component.vue` 这种全局壳——而不是这条需求的实现。真数据
+ * 657 行上的实测：`上传下载按量限速风控` 按 count 排的第一名是 `src/services/request.ts`，
+ * 正确答案 `src/services/download-risk-modal.ts` 被挤到第 6。原因很直白：一条动了 106 个
+ * 文件的 2023 年老合并（20+ 条提交拼起来的打包合并）也在前 5 名里，它把 request.ts 的
+ * count 顶到 4，而它对自己那 106 个文件里的任何一个都说明不了什么。
+ *
+ * 所以先按合并宽度打折（`mergeWeight`），再取「碰过这个文件的合并里最高的权重」——
+ * 取 max 而不是求和/平均，是因为一个文件只要被**一次**高度相似的合并动过，它就是一条
+ * 值得看的线索；求和会把「被十次不相关的合并顺手改过」的公用件顶上去。
+ *
+ * `count` 留在第二级不是装饰：权重完全相同时（同一个合并动的几个文件），被更多次合并
+ * 碰过的那个更可能是落点。它只在同级内起作用，不会翻掉上面的判断。
  *
  * 路径用**码点**比（`<` / `>`）而不是 `localeCompare`：后者的大小写与重音顺序随运行
  * 环境的 locale 变，候选清单的顺序换台机器就换一次，等于没有排序。
  */
-function compareFiles(
-  a: { path: string; count: number; best: RankedMerge },
-  b: { path: string; count: number; best: RankedMerge },
-): number {
+function compareFiles(a: FileAgg, b: FileAgg): number {
+  if (a.weight !== b.weight) return b.weight - a.weight;
   if (a.count !== b.count) return b.count - a.count;
-  if (a.best.score !== b.best.score) return b.best.score - a.best.score;
   if (a.path === b.path) return 0;
   return a.path < b.path ? -1 : 1;
 }
@@ -260,18 +289,24 @@ export function locateFromHistory(
   const ranked = rankMerges(rows, query, opts.top ?? TOP_MERGES);
   if (ranked.length === 0) return { kind: 'none' };
 
-  // 聚合：path → 被几次合并碰过 + 其中分数最高的那次（也是 `reason` 的来源）。
-  // `best` 保留的是**分数最高**的合并而不是最近的那次：`reason` 要解释「凭什么说这里」，
-  // 说服力来自最像的那次合并，不是时间。
-  const byFile = new Map<string, { count: number; best: RankedMerge }>();
+  // 聚合：path → 被几次合并碰过 + 最高权重 + 那次合并（也是 `reason` 的来源）。
+  // `best` 保留的是**权重最高**的合并，不是最近的那次，也不是相似度最高的那次：
+  // `reason` 要解释「凭什么说这里」，而这个文件的得分就是按这个权重算出来的——
+  // 出处和分数必须是同一件事，否则材料里的「出自 X」解释不了它为什么排在这。
+  const byFile = new Map<string, FileAgg>();
   for (const hit of ranked) {
+    // 每条合并的权重只算一次：`files.length` 在循环里不会变。
+    const weight = mergeWeight(hit.score, hit.row.files.length);
     for (const file of hit.row.files) {
       const seen = byFile.get(file);
       if (seen === undefined) {
-        byFile.set(file, { count: 1, best: hit });
+        byFile.set(file, { path: file, count: 1, weight, best: hit });
       } else {
         seen.count += 1;
-        if (hit.score > seen.best.score) seen.best = hit;
+        if (weight > seen.weight) {
+          seen.weight = weight;
+          seen.best = hit;
+        }
       }
     }
   }
@@ -280,19 +315,18 @@ export function locateFromHistory(
     ? Math.max(0, Math.floor(opts.limit ?? CANDIDATE_LIMIT))
     : CANDIDATE_LIMIT;
 
-  const items: Candidate[] = [...byFile.entries()]
-    .map(([path, agg]) => ({ path, count: agg.count, best: agg.best }))
+  const items: Candidate[] = [...byFile.values()]
     .sort(compareFiles)
     .slice(0, limit)
     .map((entry) => ({
       path: entry.path,
       reason: mergeReason(entry.best.row),
       source: 'history',
-      // 候选分取 `count + best.score`，好让「排序键」和「Candidate.score」说同一件事。
-      // 因为 best.score 落在 (0, 1]，`count` 永远是主导项（整数部分就是它），
-      // 所以按 score 排与按 (count, 分数) 排给出同一个顺序——两套口径分开写，
-      // 早晚会有一处忘了同步，那时清单的顺序和 score 自己说的就对不上了。
-      score: entry.count + entry.best.score,
+      // 候选分就是排序键本身（宽度打折后的权重），仍然落在 (0, 1]。
+      // 为什么不把 count 掺进来（上一版是 `count + 分数`）：掺进去之后 score 就在说
+      // 另一件事，而排序先看权重——两套口径分开写，早晚有一处忘了同步，那时清单的
+      // 顺序和 score 自己说的就对不上了。`count` 只当同级兜底，不进步。
+      score: entry.weight,
     }));
 
   if (items.length === 0) return { kind: 'none' };

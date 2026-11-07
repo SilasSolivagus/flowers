@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
 import { db } from '../src/db/client.js';
-import { grams, locateFromHistory, rankMerges } from '../src/core/locate/history.js';
+import { grams, locateFromHistory, mergeWeight, rankMerges } from '../src/core/locate/history.js';
 import {
   ensureHistory, readHistory, sinceFor, validateMerges, type FetchMerges, type HistoryRow,
 } from '../src/core/locate/history-store.js';
@@ -629,23 +629,73 @@ describe('中文检索打分', () => {
       .toBe('none');
   });
 
-  it('文件按出现次数排序（count 优先）：两次合并碰过的文件压过一次高分合并', () => {
-    // 聚合口径的核心：**先看被几次合并碰过**，再看那几次里最好的分数。
-    // 只按分数排的话，一次「完美命中」的合并会把它自己那个只出现一次的文件顶到第一，
-    // 而真正被反复改动的那处（两次合并都碰）反而沉下去——那正是要找的地方。
-    const perfect = mk('p'.repeat(40), '2026-11-01T00:00:00.000Z', '下载限速风控', ['src/strong-only.ts']);
-    const weak1 = mk('q'.repeat(40), '2026-10-01T00:00:00.000Z', '限速策略调整', ['src/touched-twice.ts']);
-    const weak2 = mk('r'.repeat(40), '2026-09-01T00:00:00.000Z', '风控提示文案', ['src/touched-twice.ts']);
-    const got = locateFromHistory([perfect, weak1, weak2], '下载限速风控');
+  it('公用文件哪怕被 4 次杂合并碰过，也排在「被 3 次真合并抱住的实现文件」后面（相似度明显更高时）', () => {
+    // 这条是聚合口径的全部要点，也是这一版换掉「count 优先」的原因：
+    // count 奖励「被很多次合并碰过」的文件，而被很多次合并碰过的通常是公用件
+    // （`src/utils/request.ts` 这种 HTTP 客户端），不是需求的实现。一次动了 50 个文件的
+    // 合并对其中任何一个文件都说明不了什么，所以按合并宽度打折；见 `mergeWeight`。
+    //
+    // 本 fixture 里 `src/utils/request.ts` 被 4 次杂合并碰过（count=4）、
+    // `src/pages/video/video.vue` 只被 3 次真合并抱过（count=3），而真合并的相似度
+    // 明显更高——排序必须让实现文件在前。旧口径（count 优先）在这里会给出 request.ts。
+    const wide = [
+      'src/utils/request.ts',
+      ...Array.from({ length: 49 }, (_, i) => `src/legacy/wide-${i}.ts`),
+    ];
+    const corpus: Row[] = [
+      mk('1'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/pages/video/video.vue', 'src/types/video.ts']),
+      mk('2'.repeat(40), '2026-11-02T00:00:00.000Z', 'feat: 用户权益缩减', ['src/pages/video/video.vue', 'src/services/equity.ts']),
+      mk('3'.repeat(40), '2026-11-01T00:00:00.000Z', '用户权益缩减 / 弹窗文案调整', ['src/pages/video/video.vue', 'src/components/modal/modal.vue']),
+      mk('4'.repeat(40), '2023-10-10T00:00:00.000Z', '缩减间距', wide),
+      mk('5'.repeat(40), '2023-09-01T00:00:00.000Z', '缩减文案', ['src/utils/request.ts', 'src/utils/a.ts']),
+      mk('6'.repeat(40), '2023-08-01T00:00:00.000Z', '缩减提示', ['src/utils/request.ts', 'src/utils/b.ts']),
+      mk('7'.repeat(40), '2023-07-01T00:00:00.000Z', '缩减样式', ['src/utils/request.ts', 'src/utils/c.ts']),
+    ];
+    // `top: 10` 让 7 次合并全部进入聚合：默认的 5 次里只装得下 3 次真合并 + 2 次杂合并，
+    // 就凑不出「公用件 count=4 > 实现文件 count=3」这个形状（真数据里正是这个形状出的事：
+    // 前 5 名里 3 次真合并都碰了 request.ts，第 4 名那条巨型合并又把它的 count 顶上去）。
+    const got = locateFromHistory(corpus, '用户权益缩减', { top: 10 });
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
-    expect(got.items[0]!.path).toBe('src/touched-twice.ts');
-    // perfect 那次分数确实更高：不然这条用例就没在测 count。
-    const scores = got.items.map((item) => item.path);
-    expect(scores).toContain('src/strong-only.ts');
+    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+    expect(got.items[0]!.reason).toContain('用户权益缩减');
+    // 三次真合并抱住的四个文件，无一例外排在那条公用件之前。
+    const paths = got.items.map((item) => item.path);
+    const utilityRank = paths.indexOf('src/utils/request.ts');
+    expect(utilityRank).toBeGreaterThan(0);
+    for (const impl of [
+      'src/pages/video/video.vue',
+      'src/components/modal/modal.vue',
+      'src/services/equity.ts',
+      'src/types/video.ts',
+    ]) {
+      expect(paths.indexOf(impl)).toBeLessThan(utilityRank);
+    }
+    // count 并没有「不算数」：它只够把公用件留在清单里，不够把它顶到任何真合并前面。
+    // 而那条动了 50 个文件的杂合并，宽度打折后一个文件都没进清单。
+    expect(paths.some((path) => path.startsWith('src/legacy/'))).toBe(false);
   });
 
-  it('同 count 同分：按路径字典序（按码点，不是按 locale）', () => {
+  it('mergeWeight：文件数为 0 也不除零、不出 NaN，且合并越宽权重越小', () => {
+    // 库里真有「动了 0 个源码文件」的合并（只改 package.json / 构建产物的那种）：
+    // `log2(2 + 0) = 1`，权重就等于相似度，不该变成 Infinity 或 NaN。
+    expect(mergeWeight(0.5, 0)).toBe(0.5);
+    expect(Number.isNaN(mergeWeight(1, 0))).toBe(false);
+    expect(mergeWeight(0.5, 1)).toBeCloseTo(0.3155, 4);
+    expect(mergeWeight(0.5, 1)).toBeLessThan(mergeWeight(0.5, 0));
+    expect(mergeWeight(0.5, 50)).toBeLessThan(mergeWeight(0.5, 1));
+  });
+
+  it('碰到 0 个源码文件的合并：不崩，也不让候选分变成 NaN', () => {
+    const withEmpty = [...rows, mk('9'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', [])];
+    const got = locateFromHistory(withEmpty, '用户部分权益缩减调整');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+    for (const item of got.items) expect(Number.isFinite(item.score)).toBe(true);
+  });
+
+  it('同分同 count：按路径字典序（按码点，不是按 locale）', () => {
     // 用 localeCompare 的话大小写顺序会随运行环境的 locale 变；候选表的顺序是给人数的，
     // 换台机器就换个顺序等于没有排序。
     const one = mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/b.ts', 'src/A.ts', 'src/a.ts']);
