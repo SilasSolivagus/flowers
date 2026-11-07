@@ -6,6 +6,7 @@ import {
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
+import { normalizePlatforms, platformsLabel } from '../requirements/platforms.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
 } from './board.js';
@@ -151,6 +152,16 @@ export type Detail = {
     ownerLine: string | null;
     ownerLineLabel: string | null;
     prdUrl: string | null;
+    /**
+     * 平台（P4-08）：这条需求落在哪几个端上。空数组 = 未标注。
+     *
+     * 放在 `info` 而不是 `description`：它是「这条需求是什么」的分类属性（跟类型、
+     * 提出人同一层），不是六个结构化问题之一。抽屉把它渲染成信息段里的一行；
+     * **看板卡上没有它**——那张卡只有两行，一个九列的板放不下第三个标签。
+     */
+    platforms: string[];
+    /** 上面那组键的一行中文（`H5 · Android`），空数组时是「未标注」。 */
+    platformsLabel: string;
     skipReason: string | null;
     stateLabel: string;
     stateEnteredAt: string;
@@ -476,6 +487,8 @@ type Row = {
   surfaces: string | null;
   edge_cases: string | null;
   out_of_scope: string | null;
+  /** `text[]`（P4-08）：pg 驱动给的是字符串数组；空数组 = 未标注。 */
+  platforms: string[] | null;
 };
 
 type ReviewRow = {
@@ -511,6 +524,7 @@ export async function getRequirementDetail(
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
+           r.platforms,
            r.owner_member_id, m.name as owner, m.line as owner_line,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
@@ -616,6 +630,8 @@ export async function getRequirementDetail(
       ownerLine: row.owner_line,
       ownerLineLabel: lineLabelOf(row.owner_line),
       prdUrl: row.prd_url,
+      platforms: normalizePlatforms(row.platforms),
+      platformsLabel: platformsLabel(normalizePlatforms(row.platforms)),
       skipReason: row.skip_reason,
       stateLabel: STATE_LABEL[row.state],
       stateEnteredAt: row.state_entered_at,

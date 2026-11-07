@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { normalizePlatforms } from './platforms.js';
 
 /**
  * 描述内容的指纹：**这一份产物是照着哪一版需求生成的**。
@@ -11,7 +12,8 @@ import { createHash } from 'node:crypto';
  * ## 序列化规则（对外，改它就是改契约）
  *
  * 1. 字段与顺序固定为 `FINGERPRINT_FIELDS`：title、context、problem、outcome、
- *    surfaces、edgeCases、outOfScope、prdUrl。用**数组**而不是对象：JSON 对象的键序
+ *    surfaces、edgeCases、outOfScope、prdUrl、platforms（P4-08 加的第九格）。用**数组**
+ *    而不是对象：JSON 对象的键序
  *    取决于调用方怎么拼这个对象，而数组的顺序只由这一行决定——「key 顺序无关」因此
  *    是这条实现的性质，不是巧合。
  * 2. 每个值先归一：
@@ -26,6 +28,18 @@ import { createHash } from 'node:crypto';
  *    拼接：拼接会让 `['ab','c']` 与 `['a','bc']` 得到同一个串，于是把内容从 `ab`/`c`
  *    改成 `a`/`bc`（真的改了描述）不会让产物变旧。JSON 有分隔符与转义，没有这个问题。
  * 4. 输出是小写十六进制，长度 64。库里存 text（只用来比对，不参与计算）。
+ * 5. `platforms` 是唯一一个**非文本**字段：它是一个字符串数组，序列化前先走
+ *    `normalizePlatforms`（小写、去重、按词表顺序、丢掉词表外的值），再 `join(',')`。于是 `['h5','app']` 与 `['app','h5']` 同哈希——
+ *    同一条需求的同一组平台，换一次勾选顺序不该把产物打成「需求已更新」。
+ *    `null` 与 `[]` 同哈希（与第 2 条同一条理由：未标注只有一种写法）。
+ *
+ * ## P4-08：这一版**故意**让所有老产物变旧
+ *
+ * 加第九格 = 改变了 `JSON.stringify` 的数组长度，于是**每一个**历史 `input_hash` 都对
+ * 不上了，抽屉里每一份老材料都会显示「需求已更新」。这是正确的：那条记录的含义是
+ * 「这份材料是照着一版**不含平台**的描述生成的」，而现在描述里多了一格它会读的东西。
+ * 想要「老产物仍然新鲜」只有一条路——在序列化里跳过空平台——那会让「给一条需求补上
+ * 平台」不改变指纹，也就是**补了平台却仍说材料是新的**，正好是这条指纹要防的事。
  *
  * ## 什么**不**参与
  *
@@ -35,9 +49,10 @@ import { createHash } from 'node:crypto';
  */
 export const FINGERPRINT_FIELDS = [
   'title', 'context', 'problem', 'outcome', 'surfaces', 'edgeCases', 'outOfScope', 'prdUrl',
+  'platforms',
 ] as const;
 
-/** 参与指纹的八个值（界面上是标题 + 六问 + PRD 链接）。 */
+/** 参与指纹的九个值（界面上是标题 + 六问 + PRD 链接 + 平台）。 */
 export type FingerprintInput = {
   title: string;
   context?: string | null;
@@ -47,6 +62,8 @@ export type FingerprintInput = {
   edgeCases?: string | null;
   outOfScope?: string | null;
   prdUrl?: string | null;
+  /** 平台（P4-08）。`null` / `[]` / `undefined` 三者同值。 */
+  platforms?: readonly string[] | null;
 };
 
 /** 归一一个字段：null 与 '' 同值，去首尾空白，CRLF 折成 LF。见文件头第 2 条。 */
@@ -54,9 +71,16 @@ function normalize(value: string | null | undefined): string {
   return (value ?? '').replace(/\r\n/g, '\n').trim();
 }
 
-/** 指纹。两条路径（写 / 读）都走这一个函数。 */
+/**
+ * 指纹。两条路径（写 / 读）都走这一个函数。
+ *
+ * `platforms` 单独序列化（数组 → 词表顺序的逗号串，见文件头第 5 条）：其余八格都是
+ * 文本，只有它不是。
+ */
 export function requirementFingerprint(input: FingerprintInput): string {
-  const parts = FINGERPRINT_FIELDS.map((field) => normalize(input[field]));
+  const parts = FINGERPRINT_FIELDS.map((field) => (field === 'platforms'
+    ? normalizePlatforms(input.platforms).join(',')
+    : normalize(input[field])));
   return createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
 }
 
@@ -77,6 +101,8 @@ export type FingerprintRow = {
   edge_cases: string | null;
   out_of_scope: string | null;
   prd_url: string | null;
+  /** `text[]`：pg 驱动给的是字符串数组；null 只在理论上出现（列是 not null default '{}'）。 */
+  platforms: readonly string[] | null;
 };
 
 export function fingerprintOfRow(row: FingerprintRow): string {
@@ -89,6 +115,7 @@ export function fingerprintOfRow(row: FingerprintRow): string {
     edgeCases: row.edge_cases,
     outOfScope: row.out_of_scope,
     prdUrl: row.prd_url,
+    platforms: row.platforms,
   });
 }
 
@@ -100,7 +127,7 @@ export function fingerprintOfRow(row: FingerprintRow): string {
  * ——改它不会把产物标成旧的，而这种漏读在代码里看不出来、在界面上只表现为「明明改了
  * 却没提示」。所以列清单只写一遍，谁要算指纹就把它拼进 select。
  */
-export const FINGERPRINT_COLUMNS = 'title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url';
+export const FINGERPRINT_COLUMNS = 'title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url, platforms';
 
 /**
  * 产物的新鲜度，三态。

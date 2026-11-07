@@ -1,11 +1,13 @@
 'use server';
 
+import { sql } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { db } from '../src/db/client';
 import { AppError } from '../src/core/errors';
 import type { DetailAction } from '../src/core/read/detail';
 import { currentMember, memberIdByName } from '../src/core/read/member';
+import { assertCan, requirementFacts } from '../src/core/auth/guard';
 import { evaluate } from '../src/core/requirements/evaluate';
 import { submitReview } from '../src/core/requirements/submit-review';
 import { reviewPass, reviewReject } from '../src/core/requirements/review';
@@ -22,6 +24,8 @@ import {
   configOf, memberProviderParts, saveMemberProviderSettings,
 } from '../src/core/uemaster/member-provider';
 import { probeProvider, resolveProviderConfig } from '../src/core/uemaster/provider';
+import { splitDescription, SPLIT_KEYS } from '../src/core/uemaster/intake';
+import { DESCRIPTIVE_FIELDS } from '../src/core/requirements/fields';
 import { createRequirement } from '../src/core/requirements/create';
 import { reassignOwner } from '../src/core/requirements/assign';
 import { claimRequirement } from '../src/core/requirements/claim';
@@ -511,6 +515,9 @@ export async function createRequirementAction(formData: FormData): Promise<Entry
     type: field(formData, 'type'),
     requester: field(formData, 'requester'),
     ownerMemberId: owner === '' ? null : owner,
+    // 平台是**多值**（P4-08）：同名 checkbox 提交上来是几行，`getAll` 取全部。
+    // 一个都没勾就是空数组 = 未标注（不是「没传」：表单永远会提交这一格的存在性）。
+    platforms: formData.getAll('platforms').filter((v): v is string => typeof v === 'string'),
     context: field(formData, 'context'),
     problem: field(formData, 'problem'),
     outcome: field(formData, 'outcome'),
@@ -531,6 +538,8 @@ export async function updateRequirementAction(formData: FormData): Promise<Entry
   return entry((actor) => updateRequirement(db, actor, {
     requirementId: field(formData, 'id'),
     title: field(formData, 'title'),
+    // 多选 chips：一个都没勾 → `[]` → 「未标注」。这与「不改」不同，后者是字段缺席。
+    platforms: formData.getAll('platforms').filter((v): v is string => typeof v === 'string'),
     context: field(formData, 'context'),
     problem: field(formData, 'problem'),
     outcome: field(formData, 'outcome'),
@@ -538,6 +547,103 @@ export async function updateRequirementAction(formData: FormData): Promise<Entry
     edgeCases: field(formData, 'edgeCases'),
     outOfScope: field(formData, 'outOfScope'),
   }));
+}
+
+/**
+ * 「从原文拆六问」（P4-08）：**一次性工具**，不是保存路径上的一步。
+ *
+ * 三件事，全在这里：
+ * 1. 取这条需求的标题（模型要知道它在拆什么）+ 人粘进来的旧描述；
+ * 2. 用**当前这个人**的模型配置拆一次（`resolveProviderConfig(actor)`：env → 成员自己
+ *    的三格 → 平台三格，与生成材料同一套解析）；
+ * 3. 把六格与依据交回**表单**。这个动作不写库、不落产物、不发事件——保存是人的下一次
+ *    点击（`updateRequirementAction`）。
+ *
+ * 为什么需要 `edit` 权限才让调：它是一次要花钱的模型调用，而"看得到这条需求的描述"
+ * 不等于"能改它"。与保存同一个判据（`manage.ts` 的 `edit`），省得有人拿只读身份把
+ * 一个部署的 key 用成一台免费翻译机。
+ */
+export type SplitFillResult = {
+  ok: boolean;
+  /** 六格的新值（camelCase，与表单字段同名）。失败时全空。 */
+  filled: Record<string, string>;
+  /** 回来是空的字段（原文没依据，或引文对不上原文）。 */
+  missing: { key: string; label: string }[];
+  /** 用了 / 拒了哪些原文片段（`←` / `⨯`），一行一条。 */
+  notes: string[];
+  /** 失败时那一句中文；成功时 null。 */
+  message: string | null;
+};
+
+/** 六问的 camelCase 键 ↔ intake 的 snake_case 键（六问的定义只有一处：`fields.ts`）。 */
+const SPLIT_TO_FORM: Record<string, string> = {
+  context: 'context',
+  problem: 'problem',
+  outcome: 'outcome',
+  surfaces: 'surfaces',
+  edge_cases: 'edgeCases',
+  out_of_scope: 'outOfScope',
+};
+
+const SPLIT_TO_SNAKE: Record<string, string> = Object.fromEntries(
+  Object.entries(SPLIT_TO_FORM).map(([snake, camel]) => [camel, snake]),
+);
+
+const SPLIT_LABEL: Record<string, string> = Object.fromEntries(
+  DESCRIPTIVE_FIELDS.map((field) => [field.key, field.label]),
+);
+
+export async function splitDescriptionAction(formData: FormData): Promise<SplitFillResult> {
+  const empty: SplitFillResult['filled'] = Object.fromEntries(
+    Object.values(SPLIT_TO_FORM).map((camel) => [camel, '']),
+  );
+  try {
+    const actor = await currentMember();
+    const id = field(formData, 'id');
+    const found = await db.execute<{ title: string }>(
+      sql`select title from requirements where id = ${id} and deleted_at is null`);
+    const row = found.rows[0];
+    if (row === undefined) {
+      return { ok: false, filled: empty, missing: [], notes: [], message: '需求不存在' };
+    }
+    await assertCan(db, actor, await requirementFacts(db, id), 'edit');
+
+    const cfg = await resolveProviderConfig(actor);
+    if (cfg === null) {
+      return {
+        ok: false,
+        filled: empty,
+        missing: [],
+        notes: [],
+        message: '未配置模型接口：拆分要问模型，先把「接口地址 + API Key + 模型名」配好',
+      };
+    }
+
+    const result = await splitDescription(cfg, {
+      title: row.title,
+      description: field(formData, 'description'),
+    });
+
+    const filled: Record<string, string> = {};
+    for (const snake of SPLIT_KEYS) {
+      filled[SPLIT_TO_FORM[snake]!] = result[snake];
+    }
+    return {
+      ok: true,
+      filled,
+      missing: result.missing.map((snake) => ({
+        key: SPLIT_TO_FORM[snake]!,
+        label: SPLIT_LABEL[SPLIT_TO_FORM[snake]!] ?? snake,
+      })),
+      notes: result.notes,
+      message: null,
+    };
+  } catch (error) {
+    if (error instanceof AppError) {
+      return { ok: false, filled: empty, missing: [], notes: [], message: error.message };
+    }
+    throw error;
+  }
 }
 
 /** 软删除一条需求（编辑框里的「删除」）。 */
@@ -684,6 +790,8 @@ export async function createMemberAction(formData: FormData): Promise<
   try {
     const created = await createMember(db, actor, {
       name: field(formData, 'name'),
+      // 登录名（P4-08）：建人时必须给，否则这个人建出来也登不进来。
+      email: field(formData, 'email'),
       role: field(formData, 'role'),
       line: field(formData, 'line') === '' ? null : field(formData, 'line'),
       password: field(formData, 'password') === '' ? null : field(formData, 'password'),

@@ -170,6 +170,8 @@ export type RequirementRow = {
   surfaces: string | null;
   edge_cases: string | null;
   out_of_scope: string | null;
+  /** 平台（P4-08）：它参与指纹，所以生成入口必须把它读出来。 */
+  platforms: string[] | null;
 };
 
 // ─── 提示词 1：只要一段 mermaid ──────────────────────────────────────────────
@@ -792,7 +794,7 @@ export function missingProviderText(): string {
 export async function loadRequirement(db: Db, requirementId: string): Promise<RequirementRow> {
   const res = await db.execute<RequirementRow>(sql`
     select id, number, title, type, requester, prd_url,
-           context, problem, outcome, surfaces, edge_cases, out_of_scope
+           context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms
       from requirements
      where id = ${requirementId} and deleted_at is null`);
   const row = res.rows[0];

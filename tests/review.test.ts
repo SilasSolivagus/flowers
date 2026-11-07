@@ -290,6 +290,7 @@ describe('readFindings / 引文核对', () => {
     const req = {
       id: 'x', number: 6, title: '分享页搜索', type: 'feature', requester: '吕品', prd_url: null,
       context: null, problem: null, outcome: null, surfaces: null, edge_cases: null, out_of_scope: null,
+      platforms: null,
     };
     const findings = [
       { type: 'dead_end' as const, node: 'C', quote: QUOTE_DEAD_END, why: 'w' },

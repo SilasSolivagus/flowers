@@ -91,6 +91,7 @@ describe('requirementFingerprint', () => {
     edgeCases: '搜不到时给空态',
     outOfScope: '不做全文检索',
     prdUrl: 'https://doc.example.com/p/1',
+    platforms: ['h5', 'android'],
   };
 
   it('null 与空串哈希相同（库里两种「没写」是同一件事）', () => {
@@ -107,10 +108,12 @@ describe('requirementFingerprint', () => {
     expect(a).toBe(b);
   });
 
-  it('八个字段每一个都参与', () => {
+  it('九个字段每一个都参与（P4-08 起多了 platforms）', () => {
     const original = requirementFingerprint(base);
     for (const field of FINGERPRINT_FIELDS) {
-      const changed = requirementFingerprint({ ...base, [field]: `${base[field]}-改` });
+      const changed = field === 'platforms'
+        ? requirementFingerprint({ ...base, platforms: [...base.platforms, 'pc'] })
+        : requirementFingerprint({ ...base, [field]: `${base[field]}-改` });
       expect(changed, `改 ${field} 之后指纹必须变`).not.toBe(original);
     }
   });
@@ -132,6 +135,7 @@ describe('requirementFingerprint', () => {
       edgeCases: base.edgeCases,
       surfaces: base.surfaces,
       outcome: base.outcome,
+      platforms: base.platforms,
       problem: base.problem,
       context: base.context,
       title: base.title,
@@ -149,7 +153,18 @@ describe('requirementFingerprint', () => {
       edge_cases: base.edgeCases,
       out_of_scope: base.outOfScope,
       prd_url: base.prdUrl,
+      platforms: base.platforms,
     })).toBe(requirementFingerprint(base));
+  });
+
+  it('平台的顺序与重复不影响指纹；null 与空数组同值（未标注只有一种写法）', () => {
+    expect(requirementFingerprint({ ...base, platforms: ['h5', 'android'] }))
+      .toBe(requirementFingerprint({ ...base, platforms: ['android', 'H5', 'h5', 'android'] }));
+    expect(requirementFingerprint({ title: 't', platforms: [] }))
+      .toBe(requirementFingerprint({ title: 't', platforms: null }));
+    // 词表外的键不算数：它不参与指纹（写入端也不落库）。
+    expect(requirementFingerprint({ ...base, platforms: ['APP' as 'h5'] }))
+      .toBe(requirementFingerprint({ ...base, platforms: [] }));
   });
 
   it('输出是 64 位小写十六进制', () => {

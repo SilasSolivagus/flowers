@@ -624,6 +624,8 @@ type RequirementRow = {
   surfaces: string | null;
   edge_cases: string | null;
   out_of_scope: string | null;
+  /** 平台（P4-08）：与 `compose.ts` 同一条理由——形状对齐，它参与指纹。 */
+  platforms: string[] | null;
 };
 
 async function loadRequirements(numbers: number[]): Promise<RequirementRow[]> {

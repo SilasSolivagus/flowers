@@ -5,6 +5,7 @@ import { AppError } from '../errors.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
 import { assertCan, requirementFacts } from '../auth/guard.js';
 import { DESCRIPTIVE_FIELDS, SHORT_LABEL } from './fields.js';
+import { normalizePlatforms, platformsLabel, type PlatformKey } from './platforms.js';
 
 /**
  * 需要的写路径只有两件事：改描述、软删除（P4-02）。
@@ -15,11 +16,18 @@ import { DESCRIPTIVE_FIELDS, SHORT_LABEL } from './fields.js';
  * 的约束），所以这个模块里没有 `moveTo`、没有 `assertTransition`。
  */
 
-/** 描述里可改的字段。`type` / `requester` / `state` / 排期日期**不在里面**。 */
+/**
+ * 描述里可改的字段。`type` / `requester` / `state` / 排期日期**不在里面**。
+ *
+ * `platforms`（P4-08）是唯一一个**非文本**字段（`text[]`）：它跟着「描述」一起改，
+ * 因为它回答的是「这条需求要落在哪几个端上」——那是内容，不是分类（`type` 不可改
+ * 是 owner 的裁决，平台可以改：一条需求从 H5 长到 H5 + APP 是常态）。
+ */
 export const EDITABLE_FIELDS = [
   'title',
   ...DESCRIPTIVE_FIELDS.map((field) => field.key),
   'prdUrl',
+  'platforms',
 ] as const;
 
 export type EditableField = (typeof EDITABLE_FIELDS)[number];
@@ -43,8 +51,9 @@ const NOT_FOUND = '需求不存在';
 /** 事件 payload 里每个值最多这么长：它是时间轴上的一行，不是一个存档。 */
 const VALUE_MAX = 80;
 
-/** 一个值在事件里的写法：超长截断、null 就是 null（不改写成空串）。 */
-function brief(value: string | null): string | null {
+/** 一个值在事件里的写法：超长截断、null 就是 null（不改写成空串）、平台写成一行中文。 */
+function brief(value: Value): string | null {
+  if (Array.isArray(value)) return platformsLabel(value);
   if (value === null) return null;
   return value.length <= VALUE_MAX ? value : `${value.slice(0, VALUE_MAX)}…`;
 }
@@ -62,6 +71,23 @@ function toStored(value: unknown, label: string): string | null {
   return text === '' ? null : text;
 }
 
+/**
+ * 入参里的平台 → 落库的写法。接受数组（界面的多选、MCP 的 `platforms: [...]`），
+ * 也接受单个字符串（`'h5'` → `['h5']`：MCP 的 agent 常常只写一个）。
+ *
+ * `undefined` = 没传这一格（不改）；`null` / `[]` = 清空（未标注）。三者分开，
+ * 因为「不改」与「改成空」在这一次保存里是两个不同的意图。
+ */
+function toPlatforms(value: unknown): PlatformKey[] | null {
+  if (value === undefined) return null;
+  if (typeof value === 'string') return normalizePlatforms([value]);
+  if (value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new AppError('invalid', `${SHORT_LABEL['platforms']}必须是数组`);
+  }
+  return normalizePlatforms(value);
+}
+
 type CurrentRow = {
   id: string;
   title: string;
@@ -72,10 +98,14 @@ type CurrentRow = {
   edge_cases: string | null;
   out_of_scope: string | null;
   prd_url: string | null;
+  platforms: string[] | null;
 };
 
+/** 一次改动的「旧值 / 新值」：文本字段是字符串，平台是字符串数组。 */
+type Value = string | PlatformKey[] | null;
+
 /** camelCase 的字段名 → 这一行上的当前值。只有一处映射，读与写都用它。 */
-function storedOf(row: CurrentRow, field: EditableField): string | null {
+function storedOf(row: CurrentRow, field: EditableField): Value {
   switch (field) {
     case 'title': return row.title;
     case 'context': return row.context;
@@ -85,7 +115,21 @@ function storedOf(row: CurrentRow, field: EditableField): string | null {
     case 'edgeCases': return row.edge_cases;
     case 'outOfScope': return row.out_of_scope;
     case 'prdUrl': return row.prd_url;
+    // 平台：库里是 `text[]`（空数组 = 未标注），读到就是数组。
+    case 'platforms': return normalizePlatforms(row.platforms);
   }
+}
+
+/**
+ * 比较用的形状：平台比它的**集合**（逗号串），文本比归一后的串。
+ *
+ * 为什么平台不按数组引用比：`['h5','android']` 与 `['android','h5']` 是同一条需求的
+ * 同一组平台——`normalizePlatforms` 已经把它们排成同一个顺序，这里再拼一次串是为了
+ * 让 `norm()` 只有一个返回类型（字符串），diff 那一行不必分叉。
+ */
+function compareKey(value: Value): string {
+  if (Array.isArray(value)) return value.join(',');
+  return norm(value);
 }
 
 /** 同上，另一个方向：字段名 → 列名。SQL 的标识符不接受参数绑定，所以走白名单 raw。 */
@@ -93,6 +137,9 @@ function columnOf(field: EditableField): string {
   switch (field) {
     case 'title': return 'title';
     case 'prdUrl': return 'prd_url';
+    // 平台是 `text[]`：列名与字段名同名，但它**不在** `DESCRIPTIVE_FIELDS` 里
+    // （六问是文本，平台是一组键），所以这里必须显式给。
+    case 'platforms': return 'platforms';
     default: return DESCRIPTIVE_FIELDS.find((f) => f.key === field)!.column;
   }
 }
@@ -140,9 +187,15 @@ export async function updateRequirement(
   }
 
   // 先归一入参（不碰库）：标题空了、值不是文本这类错误不值得开一个事务。
-  const wanted: Partial<Record<EditableField, string | null>> = {};
+  const wanted: Partial<Record<EditableField, Value>> = {};
   for (const field of EDITABLE_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(input, field)) continue;
+    if (field === 'platforms') {
+      // 平台是数组：`null` = 没传 → 不改；`[]` = 清空。所以先判 undefined。
+      const value = toPlatforms(input[field]);
+      if (value !== null) wanted[field] = value;
+      continue;
+    }
     const label = SHORT_LABEL[field] ?? field;
     const value = toStored(input[field], label);
     if (field === 'title' && value === null) throw new AppError('invalid', '标题不能为空');
@@ -151,7 +204,8 @@ export async function updateRequirement(
 
   return db.transaction(async (tx) => {
     const found = await tx.execute<CurrentRow>(sql`
-      select id, title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url
+      select id, title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url,
+             platforms
         from requirements
        where id = ${id} and deleted_at is null
        for update`);
@@ -175,13 +229,19 @@ export async function updateRequirement(
         return { field, from, to };
       })
       // 归一后再比：描述里多一个尾随换行、或者 null 与 '' 互换，都不是「内容变了」。
-      .filter((change) => norm(change.from) !== norm(change.to));
+      // 平台同样：顺序与重复不算改动（`compareKey` 比的是集合）。
+      .filter((change) => compareKey(change.from) !== compareKey(change.to));
 
     if (changes.length === 0) return { id, changed: [] };
 
-    const sets = changes.map(
-      (change) => sql`${sql.raw(columnOf(change.field))} = ${change.to}`,
-    );
+    /**
+     * 每一格一条 `col = $n`。平台单独处理：它是数组，必须走 `sql.param`（否则 drizzle
+     * 把数组摊成 `(a, b)` 的值列表，写进 `text[]` 就变成一句语法错误），并显式 `::text[]`
+     * 让参数类型确定——空数组 `[]` 不加类型转换时 pg 不知道该把它当成什么。
+     */
+    const sets = changes.map((change) => (change.field === 'platforms'
+      ? sql`${sql.raw(columnOf(change.field))} = ${sql.param(change.to)}::text[]`
+      : sql`${sql.raw(columnOf(change.field))} = ${change.to}`));
     await tx.execute(sql`
       update requirements set ${sql.join(sets, sql`, `)} where id = ${id}`);
 

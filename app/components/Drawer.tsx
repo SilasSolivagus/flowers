@@ -188,6 +188,10 @@ export function Drawer({
                 )}
               </dd>
               <dt>类型</dt><dd>{info.typeLabel}</dd>
+              {/* 平台（P4-08）：信息段里的一行。**看板卡上没有它** —— 那张卡只有两行
+                  （标题 / 等谁），一个九列的板再塞一行标签就把「一眼看出这段在等什么」
+                  挤掉了；而平台是「这条需求是什么」的分类，打开抽屉才需要它。 */}
+              <dt>平台</dt><dd>{info.platformsLabel}</dd>
               <dt>进入本状态</dt><dd>{formatMonthDay(info.stateEnteredAt) ?? '—'}</dd>
               {info.prdUrl !== null && (
                 <>

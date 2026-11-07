@@ -7,6 +7,7 @@ import { requirePlainObject } from '../validate.js';
 import { assertCan, requireActor } from '../auth/guard.js';
 import { memberByName } from '../auth/members.js';
 import { can, type Member } from '../auth/roles.js';
+import { normalizePlatforms } from './platforms.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
 // 而对外错误只暴露 issues[0].message，前端会看到英文。
@@ -36,6 +37,15 @@ export const DescriptiveInput = z.object({
   outOfScope: z.string().nullish(),
 });
 
+/**
+ * 平台（P4-08）：多值，可空。
+ *
+ * 这里**不**校验词表——`normalizePlatforms` 会丢掉认不出的键、去重、按词表排序。
+ * 理由：这一列的值来自界面上的勾选（服务层是第二道门），一个写错的键不该让整条
+ * 需求建不出来。空数组 = 未标注，与老需求同一种写法。
+ */
+const PlatformsInput = z.array(z.string()).nullish();
+
 export type DescriptiveInput = z.infer<typeof DescriptiveInput>;
 
 export const CreateInput = z.object({
@@ -43,6 +53,7 @@ export const CreateInput = z.object({
   type: z.enum(['commercial', 'feature'], { message: '必须选择类型：商业或功能' }),
   requester: z.string(NOT_BLANK('提出人不能为空')).trim().min(1, '提出人不能为空'),
   ownerMemberId: z.string(NOT_BLANK(BAD_OWNER)).uuid(BAD_OWNER).nullish(),
+  platforms: PlatformsInput,
 }).merge(DescriptiveInput);
 
 export type CreateInput = z.infer<typeof CreateInput>;
@@ -140,11 +151,12 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
     const inserted = await tx.execute<{ id: string; number: number; state: string }>(sql`
       insert into requirements
         (title, type, state, requester, owner_member_id,
-         context, problem, outcome, surfaces, edge_cases, out_of_scope)
+         context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms)
       values (
         ${input.title}, ${input.type}, 'inbox', ${input.requester}, ${ownerMemberId},
         ${blankToNull(input.context)}, ${blankToNull(input.problem)}, ${blankToNull(input.outcome)},
-        ${blankToNull(input.surfaces)}, ${blankToNull(input.edgeCases)}, ${blankToNull(input.outOfScope)}
+        ${blankToNull(input.surfaces)}, ${blankToNull(input.edgeCases)}, ${blankToNull(input.outOfScope)},
+        ${sql.param(normalizePlatforms(input.platforms))}::text[]
       )
       returning id, number, state`);
     const row = inserted.rows[0]!;

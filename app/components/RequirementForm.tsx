@@ -5,9 +5,11 @@ import { useRouter } from 'next/navigation';
 import type { Member } from '../../src/core/read/member';
 import { DESCRIPTIVE_FIELDS, hintFor } from '../../src/core/requirements/fields';
 import {
-  createRequirementAction, deleteRequirementAction, updateRequirementAction,
+  createRequirementAction, deleteRequirementAction, splitDescriptionAction,
+  updateRequirementAction,
 } from '../actions';
-import type { EntryResult } from '../actions';
+import type { EntryResult, SplitFillResult } from '../actions';
+import { PLATFORMS, type PlatformKey } from '../../src/core/requirements/platforms';
 
 /**
  * 新建 / 编辑需求的表单（P4-02 的录入面）。
@@ -53,6 +55,8 @@ export type RequirementFormProps = {
       edgeCases: string | null;
       outOfScope: string | null;
     };
+    /** 平台（P4-08）：chips 的初值。新建时没有这一格（空数组 = 未标注）。 */
+    platforms?: string[];
   };
 };
 
@@ -67,6 +71,41 @@ function initialValues(initial: RequirementFormProps['initial']): Record<string,
 
 const IDLE: EntryResult = { ok: true, id: '' };
 
+/**
+ * 「从原文拆六问」的结果（P4-08）：**先给人看，再决定按不按保存**。
+ *
+ * 三行信息，一行都不许省：
+ * 1. 填了几格、空了几格（空的那几格保持空——原文没写，工具不编）；
+ * 2. 空的是哪几问，用产品里的标签说（「涉及哪些页面 / 入口」而不是 `surfaces`）；
+ * 3. 依据：每一格用了原文的哪一句（`←`），哪一句因为对不上原文被丢（`⨯`）。
+ *
+ * 第 3 条是这份工具能不能被信任的全部理由。省掉它，六段看起来很像需求的话就没人
+ * 再回头看原文了——而那正是「模型写的不是需求」这件事最容易藏身的地方。
+ */
+function SplitReport({ note }: { note: SplitFillResult }) {
+  if (!note.ok) return <div className="gen-msg bad">{note.message}</div>;
+  const filled = Object.values(note.filled).filter((value) => value !== '').length;
+  return (
+    <div className="splitreport" data-filled={filled} data-missing={note.missing.length}>
+      <div className="splitsum">
+        {`已填入 ${filled} / 6 格（只是填进表单，保存还要按下面那个按钮）`}
+      </div>
+      {note.missing.length > 0 && (
+        <div className="hintline">
+          {`原文没有依据、留空：${note.missing.map((item) => item.label).join('、')}`}
+        </div>
+      )}
+      {note.notes.length > 0 && (
+        <ul className="splitnotes">
+          {note.notes.map((line, index) => (
+            <li key={index} className={line.includes('⨯') ? 'no' : undefined}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function RequirementForm({ mode, members, me, closeHref, initial }: RequirementFormProps) {
   const router = useRouter();
   const [values, setValues] = useState<Record<string, string>>(() => initialValues(initial));
@@ -74,9 +113,35 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
   const [type, setType] = useState(initial?.type ?? 'feature');
   const [requester, setRequester] = useState(initial?.requester ?? me);
   const [owner, setOwner] = useState(initial?.ownerMemberId ?? '');
+  /**
+   * 平台（P4-08）：多选 chips，本地状态。
+   *
+   * 为什么不是 `<select multiple>`：这八个键是**标签**（一条需求常常勾两三个），
+   * 而原生多选控件在 macOS 上是一块「按住 ⌘ 点」的暗色列表——没人会想到那是多选。
+   * chips 一次点击切换一个，勾中的状态是**颜色**（不用读文字就知道选了哪些）。
+   *
+   * 提交形状：每个勾中的 chip 是一个同名 checkbox（`name="platforms"`），服务端用
+   * `getAll('platforms')` 收全部；一个都没勾就一个都不提交 —— 服务层读到 `[]`，
+   * 落库是 `'{}'`，语义是**未标注**（不是「不改」：表单永远表达当前状态）。
+   */
+  const [platforms, setPlatforms] = useState<string[]>(initial?.platforms ?? []);
+  const togglePlatform = (key: string): void => {
+    setPlatforms((was) => (was.includes(key) ? was.filter((k) => k !== key) : [...was, key]));
+  };
   /** 离开过哪些框：只有这些框的提示才出现（见文件头第 3 条）。 */
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [deleting, setDeleting] = useState(false);
+  /**
+   * 「从原文拆六问」（P4-08）：编辑模式的辅助工具。
+   *
+   * 它是**一次性工具 + 一个入口**，不是保存时的静默转换：粘贴旧描述 → 拆 → 六格被填进
+   * 表单 → 人核对、改、再按保存。工具自己不写库（服务端 `splitDescription` 只返回
+   * 结果，`splitDescriptionAction` 只把结果交回这一页）。
+   */
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [oldDescription, setOldDescription] = useState('');
+  const [splitting, setSplitting] = useState(false);
+  const [splitNote, setSplitNote] = useState<SplitFillResult | null>(null);
   const [deleteArmed, setDeleteArmed] = useState(false);
 
   const [state, formAction, pending] = useActionState(
@@ -109,6 +174,35 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
     const result = await deleteRequirementAction(form);
     setDeleting(false);
     if (result.ok) router.push('/');
+  };
+
+  /**
+   * 拆一次，把结果填进六格**供核对**。
+   *
+   * 三条：
+   * 1. **只填、不保存**：`setValues` 之后什么都不提交——保存仍然要按下面那个按钮。
+   * 2. **空的那几格保持空**：服务端已经把「原文没说」的格判成空串，这里不补。
+   * 3. **依据要说出来**：`splitNote.notes` 原文显示在按钮下面（哪一句用了、哪一句被拒），
+   *    人拿着它就能核；不显示的话，六段长得像需求的话就没人再回头看原文了。
+   */
+  const split = async (): Promise<void> => {
+    if (initial === undefined) return;
+    setSplitting(true);
+    setSplitNote(null);
+    try {
+      const form = new FormData();
+      form.set('id', initial.id);
+      form.set('description', oldDescription);
+      const result = await splitDescriptionAction(form);
+      if (!result.ok) {
+        setSplitNote(result);
+        return;
+      }
+      setSplitNote(result);
+      setValues((was) => ({ ...was, ...result.filled }));
+    } finally {
+      setSplitting(false);
+    }
   };
 
   return (
@@ -189,6 +283,78 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
                 </select>
               </div>
             </>
+          )}
+
+          {/* 平台（P4-08）：多选 chips。两种形态都有——它是**内容**（这条需求落在哪几个
+              端上），不是分类（类型不可改是 owner 的裁决，平台可以长）。 */}
+          <div className="fld">
+            <span className="flabel">平台</span>
+            <div className="chips" role="group" aria-label="平台">
+              {PLATFORMS.map((platform) => {
+                const on = platforms.includes(platform.key);
+                return (
+                  <label
+                    key={platform.key}
+                    className={on ? 'chipbox on' : 'chipbox'}
+                    data-platform={platform.key}
+                  >
+                    <input
+                      type="checkbox"
+                      name="platforms"
+                      value={platform.key}
+                      checked={on}
+                      onChange={() => togglePlatform(platform.key)}
+                    />
+                    {platform.label}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="hintline">
+              {platforms.length === 0 ? '未标注：这条需求现在没有说落在哪几个端上' : ' '}
+            </div>
+          </div>
+
+          {/* 「从原文拆六问」（P4-08）：**只在编辑模式**——新建时的需求没有「旧描述」。
+              它是六格旁边的入口，不是保存路径上的一步。 */}
+          {mode === 'edit' && (
+            <div className="fld splitbox">
+              <div className="splithead">
+                <button
+                  type="button"
+                  className="btn sm"
+                  data-act="split-open"
+                  aria-expanded={splitOpen}
+                  onClick={() => setSplitOpen((was) => !was)}
+                >
+                  {splitOpen ? '收起' : '从原文拆六问'}
+                </button>
+                <span className="splitlead">粘一段旧描述，拆成下面六格（只填，不保存）</span>
+              </div>
+              {splitOpen && (
+                <>
+                  <textarea
+                    name="oldDescription"
+                    rows={4}
+                    value={oldDescription}
+                    placeholder="把旧系统里的那段描述整段粘进来"
+                    onChange={(event) => setOldDescription(event.target.value)}
+                  />
+                  <div className="mk-acts">
+                    <button
+                      type="button"
+                      className="btn sm primary"
+                      data-act="split-run"
+                      disabled={splitting || oldDescription.trim() === ''}
+                      onClick={() => void split()}
+                    >
+                      {splitting ? '拆分中…' : '拆分并填入'}
+                    </button>
+                  </div>
+                  {splitNote !== null && <SplitReport note={splitNote} />}
+                </>
+              )}
+            </div>
           )}
 
           {/* 六问。标签就是问题本身（见 `fields.ts`），提示只在「空着且离开过」时出现。 */}

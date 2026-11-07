@@ -90,6 +90,12 @@ export const DESCRIPTIVE_FIELDS: readonly DescriptiveField[] = [
 export const SHORT_LABEL: Record<string, string> = {
   title: '标题',
   prdUrl: 'PRD 链接',
+  /**
+   * 平台（P4-08）。它在 `SHORT_LABEL` 里而不在 `DESCRIPTIVE_FIELDS` 里：六问是**文本**
+   * （`textarea`），平台是一组键（chips）。事件与「改了什么」的字段名共用这张表，
+   * 所以它必须在这里——否则时间轴上那一行会写成 `platforms` 而不是「平台」。
+   */
+  platforms: '平台',
   ...Object.fromEntries(DESCRIPTIVE_FIELDS.map((f) => [f.key, f.short])),
 };
 

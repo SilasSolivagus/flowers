@@ -123,6 +123,8 @@ export default async function BoardPage({
             requester: detail.info.requester,
             ownerMemberId: null,
             description: detail.description,
+            // 平台（P4-08）：编辑表单的 chips 初值。新建时是空数组（未标注）。
+            platforms: detail.info.platforms,
           }}
         />
       )}
