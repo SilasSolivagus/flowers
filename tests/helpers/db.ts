@@ -4,8 +4,11 @@ import { db } from '../../src/db/client.js';
 /**
  * resetDb 现在住在 `src/db/reset.ts`：`scripts/demo.ts` 也要用它，而脚本不该反向
  * 依赖测试助手。这里 re-export 一次，测试里的 import 路径不用动。
+ *
+ * `truncateMembersOnly` 一起 re-export：它是「只想清成员」那些用例的唯一合法入口，
+ * 用例不该为了清一张表去手写 truncate（那条 SQL 的 cascade 会跨库删真数据）。
  */
-export { resetDb } from '../../src/db/reset.js';
+export { resetDb, truncateMembersOnly } from '../../src/db/reset.js';
 
 /**
  * 名册（P4-04 的真实花名册）。

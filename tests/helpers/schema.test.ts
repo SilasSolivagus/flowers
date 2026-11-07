@@ -1,10 +1,15 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../../src/db/client.js';
+import { resetDb } from '../../src/db/reset.js';
 import { members } from '../../src/db/schema.js';
 
 beforeAll(async () => {
-  await db.execute(sql`truncate members restart identity cascade`);
+  // 这里以前是裸的 `truncate members restart identity cascade`。问题是 cascade 会顺着
+  // 外键递归到 requirements / review_assignments / notification_reads / notify_deliveries
+  // / mcp_tokens / uemaster_*：`TEST_DATABASE_URL` 一旦指到演示库，803 条迁移数据会在
+  // 这个 beforeAll 里被删掉——比任何守卫抛错都早。现在走与生产脚本同一道门。
+  await resetDb();
 });
 
 afterAll(async () => {

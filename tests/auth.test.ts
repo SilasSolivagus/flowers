@@ -36,7 +36,7 @@ import { notificationsFor } from '../src/core/read/notify.js';
 import { runTool, toolByName } from '../mcp/tools.js';
 import type { Identity } from '../mcp/tokens.js';
 import { memberByName } from '../src/core/auth/members.js';
-import { emailOf, resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
+import { emailOf, resetDb, seedPeople, truncateMembersOnly, type SeededPerson } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
 
 /**
@@ -910,7 +910,11 @@ describe('currentMember() 的解析顺序', () => {
   });
 
   it('一个成员都没有 → no_member（登录页展示这一句）', async () => {
-    await db.execute(sql`truncate members cascade`);
+    // 以前这里是一条裸的 `truncate members cascade`（连守卫都没过）。cascade 会递归到
+    // requirements.owner_member_id / review_assignments / notification_reads /
+    // notify_deliveries / mcp_tokens / uemaster_*：TEST_DATABASE_URL 指错库时，演示库里
+    // 的 803 条迁移数据会在这里被删掉，且是在任何守卫来得及抛之前。走窄门，门上有锁。
+    await truncateMembersOnly();
     expect(await caught(currentMember())).toMatchObject({
       code: 'no_member', message: '系统里还没有任何成员：请先跑 npm run seed 建人',
     });

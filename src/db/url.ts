@@ -30,6 +30,47 @@ export function isTestRun(env: DbEnv): boolean {
   return env.VITEST === 'true' || env.NODE_ENV === 'test';
 }
 
+/**
+ * 一张库算不算「测试库」：名字带 `_test`（`flowers_test`、`flowers_test_ci`）。
+ *
+ * 为什么用形状而不是白名单：白名单只认识 `flowers_test`，有人用 `TEST_DATABASE_URL`
+ * 建一张 `flowers_test_ci` 就会被守卫拦死；而这条正则对**演示库 `flowers` 永远不成立**
+ * ——这才是要紧的那一半。
+ *
+ * 写在这里（而不是 `reset.ts`）是因为现在有两个门要用同一条形状：清空前的守卫
+ * （`reset.ts`）与 `db:test:setup` 建库/跑迁移前的那道（脚本）。两边各抄一份正则，
+ * 早晚会一份改了另一份没改，于是「一处放行、一处拒绝」。
+ */
+export const TEST_DATABASE_SHAPE = /_test(_|$)/;
+
+/**
+ * `npm run db:test:setup` 的库名形状检查（放行时返回 null）。
+ *
+ * 与 `resetRefusal` 是两个不同的风险、两句话：那条守的是「别把数据 truncate 掉」，
+ * 这条守的是「别把**表结构**建到真库上」。后者更隐蔽——库里只是多了几张空表，
+ * 看板照常打开，等哪天有人往 requirements 里灌演示数据才发现演示库被测试迁移改过。
+ * 所以必须在 `create database` / `migrate` 之前拒绝，且报错要点名那个变量。
+ */
+export function testDatabaseShapeRefusal(database: string): string | null {
+  if (TEST_DATABASE_SHAPE.test(database)) return null;
+  return `拒绝初始化测试库：库名「${database}」里没有 _test，不像一张测试库。`
+    + 'db:test:setup 会在这张库里建表、跑迁移——如果它就是演示库 flowers，'
+    + '等于把表结构写进了有真数据的那张库。'
+    + `请把 TEST_DATABASE_URL 改成 …_test（或删掉这个变量，默认落到 ${TEST_DATABASE}）再跑。`;
+}
+
+/**
+ * 「库不存在」的说明书（`3D000`）。
+ *
+ * 新克隆一份仓库、`npm run db:up` 之后直接 `npx vitest run`，第一个查询就会死在
+ * 裸的 `error: database "flowers_test" does not exist`——一句没有任何指向的英文。
+ * 这条路径唯一的现实原因就是「还没跑 db:test:setup」，所以直接把那句命令写进报错。
+ */
+export function missingDatabaseRefusal(database: string): string {
+  return `测试库 ${database} 不存在，先跑 npm run db:test:setup`
+    + `（它会建库并跑迁移；若 TEST_DATABASE_URL 指到了别的库，先改对或删掉它）。`;
+}
+
 /** 连接串里的库名（去掉前导斜杠）；解析不了就返回空串，交给守卫去拒绝。 */
 export function databaseNameOf(url: string): string {
   try {

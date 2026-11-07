@@ -2,7 +2,15 @@
  * 演示种子：把前端线稿那张看板灌进库里。
  *
  *   npm run seed            # 空库才灌（库里已有数据就拒绝，不覆盖别人的库）
- *   npx tsx scripts/seed.ts --reset   # 先清空 5 张表再灌
+ *   npx tsx scripts/seed.ts --reset   # 先清空 15 张表再灌（**库里有迁移数据时会被拒绝**）
+ *   npx tsx scripts/seed.ts --reset --force-with-migrated
+ *                           # 明知库里有 803 条 legacy_ref 需求，仍要清空重灌
+ *
+ * 最后那条是本轮（数据守卫）加的第二道门。`flowers` 里现在有 803 条从旧系统迁移来
+ * 的需求（`legacy_ref` 非空），而 `--reset` 会对 requirements 做
+ * `truncate … restart identity cascade`——一条命令就能把它们连同编号一起抹掉，且迁移
+ * 不会自己回来。所以 `--reset` 单独出现时只允许在**没有**迁移数据的库上跑；要清真
+ * 数据，必须再给一个开关（见 main() 里那段注释：谁是最后一道门，为什么在这里）。
  *
  * 两条硬口径：
  *
@@ -38,7 +46,7 @@ import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { shanghaiDayOf, startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
-import { assertSafeToReset, resetDb } from '../src/db/reset.js';
+import { assertNoMigratedRequirements, assertSafeToReset, resetDb } from '../src/db/reset.js';
 import { getBoard } from '../src/core/read/board.js';
 import { listReleases } from '../src/core/read/version.js';
 import { generatePassword, setPassword } from '../src/core/auth/password.js';
@@ -175,16 +183,41 @@ async function tickAt(dayText: string, note: string): Promise<void> {
 }
 
 async function main() {
-  const reset = process.argv.slice(2).includes('--reset');
+  const argv = process.argv.slice(2);
+  const reset = argv.includes('--reset');
+  /**
+   * 第二个开关（本轮新增）：只有它和 `--reset` **同时**出现，才允许清掉迁移数据。
+   *
+   * 为什么必须是两个：`/tmp/restore-demo.sh` 里那句 `npm run seed -- --reset` 今天
+   * 被反射地按了十几次。一个参数就是「一个手滑」；两个参数（或一个专门的 env 名）
+   * 才是「我知道库里有 803 条真需求，我还是要清」。
+   */
+  const forceMigrated = argv.includes('--force-with-migrated')
+    || process.env.FLOWERS_WIPE_MIGRATED === '1';
   log('=== flowers · 演示种子 ===');
   log(`库：${process.env.DATABASE_URL ?? 'postgres://postgres:flowers@localhost:54330/flowers'}`);
   log(`今天（Asia/Shanghai）：${day(0)}`);
 
   if (reset) {
-    // resetDb 是 truncate 五张表：先问库自己叫什么（不是看 DATABASE_URL 字符串）。
+    // resetDb 是 truncate 十五张表：先问库自己叫什么（不是看 DATABASE_URL 字符串）。
     const database = await assertSafeToReset();
+    /**
+     * 最后一道门就在这两行之间：**库名对了**（不是 flowers_test 之类的误连）**还不够**，
+     * 还要问「这张库里有没有真数据」。守卫的实现住在 `src/db/reset.ts`（能被用例钉住），
+     * 但调用点必须在这里——因为 `npm run seed -- --reset` 是唯一会带着 `--reset` 走进
+     * resetDb 的脚本入口，把它放在 /tmp/restore-demo.sh 里等于把门建在库外（那个文件
+     * 不进版本库、换机器就没了、也没人 review 它的 diff）。
+     *
+     * 顺序也是刻意的：先判库名（配置错 → 立刻停，连 count 都不查），再判迁移数据
+     * （库对但里面是 803 条真数据 → 拒绝）。两条都不会走到 resetDb。
+     */
+    const migrated = await assertNoMigratedRequirements({ force: forceMigrated, database });
+    if (migrated > 0) {
+      log(`⚠ --force-with-migrated：即将清空，并删除 ${migrated} 条迁移需求（无可撤销）。`);
+      log('  （commit_history / locate_runs 也在这张清空清单里；要重建它们见 docs 里的恢复步骤）');
+    }
     await resetDb();
-    log(`--reset：已清空 5 张表（current_database() = ${database}）`);
+    log(`--reset：已清空 15 张表（current_database() = ${database}）`);
   } else {
     // 不加 --reset 就只在空库上灌：不然每跑一次就多 12 条，看板会慢慢变成一锅粥，
     // 而「重复的演示数据」最容易被人当成真需求。
@@ -196,6 +229,7 @@ async function main() {
     if (n > 0) {
       log(`库里已经有数据（${n} 行），不覆盖。要重灌请加 --reset：`);
       log('  npx tsx scripts/seed.ts --reset');
+      log('（若这张库里还有迁移需求，--reset 会拒绝；那说明这里不该重灌，见 /tmp/restore-demo.sh）');
       process.exitCode = 1;
       return;
     }
