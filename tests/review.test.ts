@@ -12,6 +12,7 @@ import {
   findingsAnno, listCounts, readFindings, normalizeQuote, quoteInPrd, reviewRequirement, reviewTitle,
   type ReviewDeps,
 } from '../src/core/uemaster/review.js';
+import type { CodeIndex } from '../src/core/codemirror/code-index.js';
 import { runJob } from '../src/core/uemaster/start.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
@@ -572,6 +573,82 @@ describe('start.ts 接线', () => {
     const findingsRows = (await attemptsOf(jobId)).filter((a) => a.phase === 'findings');
     expect(findingsRows).toHaveLength(2);
     expect(findingsRows.every((a) => (a.error ?? '').includes('找不到'))).toBe(true);
+  }, 90_000);
+});
+
+// ─── 评审定位接线（任务 9） ──────────────────────────────────────────────────
+
+/**
+ * 这一条**必须让镜像读得到**：其它评审用例里镜像没配，`gatherBaseline` 走 `absent`
+ * 且一次扩展词调用都不发，所以整条「真 expand → 结构检索 → 记账 → 留痕」的接线
+ * 在那几条里一行都没跑到。
+ *
+ * 钉三件事：
+ * 1. `uemaster_job_attempts` 里有一行 `phase: 'locate'`——扩展词失败/成功都要留痕，
+ *    删掉 `onAttempt` 这条会红；
+ * 2. 检索用的是**模型的词**，不是回落词：两个路径集合刻意不重叠（`download` 只在模型
+ *    给词的路径上，`Share/Search.tsx` 只在 PRD 关键词的路径上）；
+ * 3. `locate_runs` 记一条 `stage: 'review'`。
+ */
+describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记账', () => {
+  it('镜像读得到 + 模型给词 → locate 留痕一行、用模型的词、locate_runs 一条 review 行', async () => {
+    const provider = await useFake();
+    const r = await reviewable();
+
+    const job = await db.execute<{ id: string }>(sql`
+      insert into uemaster_jobs (requirement_id, stage, status)
+      values (${r.id}, 'review', 'running') returning id`);
+    const jobId = job.rows[0]!.id;
+
+    // 调用顺序：图 → 扩展词 → 问题清单 → 页面片段（现状夹在图与问题清单之间）。
+    // 扩展词刻意给一个 PRD 关键词里**不会**出现的词（PRD 里既没有「剪贴板」也没有
+    // `clipboard`），好把「模型的词」与「回落的词」两条路彻底分开。
+    provider.enqueue(GOOD_FLOW, '["clipboard"]', THREE_FINDINGS, PAGES_JSON);
+
+    const sha = 'a'.repeat(40);
+    // 两个文件刻意与提示词里的形状示例（`src/pages/Share/Search.tsx`）不撞名。
+    const PATHS = ['src/utils/clipboard-helper.ts', 'src/services/download-risk.ts'];
+    const codeIndex = (repo: string, paths: string[]): CodeIndex => ({
+      repo,
+      sha,
+      files: Object.fromEntries(paths.map((path) => [path, { kind: 'page', exports: [], size: 1 }])),
+      imports: {},
+      routes: [],
+      builtAt: '2026-11-07T00:00:00.000Z',
+    });
+
+    const out = await reviewRequirement(db, '吕品', { requirementId: r.id, jobId }, {
+      head: async () => ({ ok: true, data: { sha, date: '2026-11-07T00:00:00.000Z', subject: 'x' } }),
+      lsTree: async () => ({ ok: true, data: PATHS }),
+      show: async (_repo, path) => ({ ok: true, data: `// ${path}` }),
+      // 后端仓没有前端文件：索引空着，它不该贡献候选。
+      repoIndex: async (_db, repo, _sha) => ({
+        ok: true,
+        data: { index: codeIndex(repo, repo === '123pan-pc' ? PATHS : []), built: false, buildMs: 0 },
+      }),
+    });
+
+    // 扩展词是一次真实调用，`stats.modelCalls` 要数它（审计成本时漏掉这一格就差一次）。
+    expect(provider.prompts).toHaveLength(4);
+    expect(out.stats.modelCalls).toBe(4);
+    expect(provider.prompts[1]).toContain('分享页搜索补齐 H5 / APP');
+
+    // (1) 留痕：`locate` 一行且通过（成功那一次 error 为 null）。
+    const locateRows = (await attemptsOf(jobId)).filter((row) => row.phase === 'locate');
+    expect(locateRows).toHaveLength(1);
+    expect(locateRows[0]!.error).toBeNull();
+
+    // (2) 材料里出现的是模型词命中的那个文件；回落词（下载）命中的那个一个都不该出现。
+    const findingsPrompt = provider.prompts[2] ?? '';
+    expect(findingsPrompt).toContain('src/utils/clipboard-helper.ts');
+    expect(findingsPrompt).not.toContain('src/services/download-risk.ts');
+    expect(findingsPrompt).toContain('最可能的位置（待研发确认）');
+
+    // (3) 记账：一条 review 行，有候选 → low，候选数 1。
+    const runs = await db.execute<{ stage: string; outcome: string; candidates: number }>(sql`
+      select stage, outcome, candidates from locate_runs`);
+    expect(runs.rows.map((row) => [row.stage, row.outcome, row.candidates]))
+      .toEqual([['review', 'low', 1]]);
   }, 90_000);
 });
 

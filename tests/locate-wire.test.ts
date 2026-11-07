@@ -409,8 +409,8 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     expect(asked[0]?.description).toContain('上传下载按量限速');
     expect(descriptionOf(req)).toBe('上传下载按量限速');
 
-    // 模型给的词就是检索用的词：落点是 search（回落词命中的是 download）。
-    expect(baseline.keywords).toEqual(['search']);
+    // 模型给的词就是检索用的词：落点是 search，而回落词（下载/限速）只会命中 download。
+    // 两个路径集合互不重叠，所以这两条断言同时钉住了「用的是模型的词」这件事。
     expect(baseline.locate.kind).toBe('candidates');
     const paths = baseline.locate.kind === 'candidates'
       ? baseline.locate.items.map((item) => item.path) : [];
@@ -435,13 +435,13 @@ describe('评审定位：模型给的词就是检索用的词', () => {
       expand: async () => null,
     }), db);
 
-    expect(baseline.keywords).toEqual(FALLBACK);
     expect(FALLBACK.length).toBeGreaterThan(0);
     expect(baseline.locate.kind).toBe('candidates');
     const paths = baseline.locate.kind === 'candidates'
       ? baseline.locate.items.map((item) => item.path) : [];
     // 回落词（下载 / 限速）指向 download，而不是模型才可能给出的 search。
     expect(paths).toContain('src/services/download-risk.ts');
+    expect(paths).not.toContain('src/pages/search/Search.tsx');
     expect(baseline.text.startsWith(LOW_CONFIDENCE_HEADLINE)).toBe(true);
 
     const rows = await ledger();
@@ -458,8 +458,10 @@ describe('评审定位：模型给的词就是检索用的词', () => {
       expand: async () => { throw new Error('模型 502'); },
     }), db);
 
-    expect(baseline.keywords).toEqual(FALLBACK);
     expect(baseline.locate.kind).toBe('candidates');
+    const paths = baseline.locate.kind === 'candidates'
+      ? baseline.locate.items.map((item) => item.path) : [];
+    expect(paths).toContain('src/services/download-risk.ts');
     const rows = await ledger();
     expect(rows.map((row) => row.stage)).toEqual(['review']);
   });
@@ -518,27 +520,57 @@ describe('评审定位：模型给的词就是检索用的词', () => {
   });
 });
 
-describe('真 expand（createExpand）：围栏照样认，其余失败一律 null', () => {
+describe('真 expand（createExpand）：不重试、不白等，围栏照样认，其余失败一律 null', () => {
   const CFG = { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm' };
 
-  function fake(reply: Awaited<ReturnType<Parameters<typeof createExpand>[0]['complete']>>, seen?: {
-    prompts: string[];
-    opts: Array<{ maxTokens?: number; timeoutMs?: number } | undefined>;
-  }) {
-    return createExpand({
-      resolveConfig: async () => CFG,
-      complete: async (_cfg, prompt, opts) => {
-        seen?.prompts.push(prompt);
-        seen?.opts.push(opts);
-        return reply;
-      },
-    });
+  type Reply = Awaited<ReturnType<Parameters<typeof createExpand>[0]['complete']>>;
+
+  /**
+   * 记账用的假 provider：数调用次数、记提示词与预算，再按脚本回话（或按脚本抛）。
+   *
+   * 为什么必须有 `calls`：这一层最贵的错不是「回了 null」，是**回了 null 又去问一次**
+   * ——评审是批处理，一个需求多等 4 秒，整轮就走不动。`null` 那个分支不抛，看起来像
+   * 抖动，最容易被顺手加上重试；只有数次数才拦得住。
+   */
+  function providerStub(reply: Reply | (() => never)) {
+    const seen = {
+      calls: 0,
+      prompts: [] as string[],
+      opts: [] as Array<{ maxTokens?: number; timeoutMs?: number } | undefined>,
+    };
+    const complete: Parameters<typeof createExpand>[0]['complete'] = async (_cfg, prompt, opts) => {
+      seen.calls += 1;
+      seen.prompts.push(prompt);
+      seen.opts.push(opts);
+      if (typeof reply === 'function') return (reply as () => never)();
+      return reply;
+    };
+    return { seen, complete };
   }
 
-  it('```json 围栏里的数组照样取出来（围栏不是失败——词还是那个词）', async () => {
-    const seen = { prompts: [] as string[], opts: [] as Array<{ maxTokens?: number; timeoutMs?: number } | undefined> };
-    const expand = fake({ ok: true, text: '```json\n["搜索", "search"]\n```' }, seen);
+  function expandWith(reply: Reply | (() => never), onAttempt?: Parameters<typeof createExpand>[0]['onAttempt']) {
+    const stub = providerStub(reply);
+    const expand = createExpand({ resolveConfig: async () => CFG, complete: stub.complete, onAttempt });
+    return { expand, seen: stub.seen };
+  }
+
+  it('超时预算是「3–5 秒」这个**数**：写死上限，不拿常量自己比自己', async () => {
+    // 简报的判据是秒数。拿 `EXPAND_TIMEOUT_MS` 去断言 `timeoutMs === EXPAND_TIMEOUT_MS`
+    // 是循环论证：把它改成 9000 也全绿，而「评审不能被一个猜词调用卡住」正是这条的意义。
+    expect(EXPAND_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
+    expect(EXPAND_TIMEOUT_MS).toBeGreaterThanOrEqual(3_000);
+
+    const { expand, seen } = expandWith({ ok: true, text: '["a"]' });
+    await expand('t', '');
+    expect(seen.opts[0]?.timeoutMs).toBe(EXPAND_TIMEOUT_MS);
+    expect(seen.opts[0]?.maxTokens).toBe(400);
+  });
+
+  it('```json 围栏里的数组照样取出来（围栏不是失败——词还是那个词），且只问一次', async () => {
+    const { expand, seen } = expandWith({ ok: true, text: '```json\n["搜索", "search"]\n```' });
     expect(await expand('分享页搜索', '')).toEqual(['搜索', 'search']);
+    // 成功路径也只许打一次：失败路径的 `calls === 1` 挡不住「先探一次、再要一次」。
+    expect(seen.calls).toBe(1);
 
     const prompt = seen.prompts[0] ?? '';
     expect(prompt).toContain('分享页搜索');
@@ -546,43 +578,54 @@ describe('真 expand（createExpand）：围栏照样认，其余失败一律 nu
     expect(prompt).toContain('JSON 字符串数组');
     // 描述为空时整行不出现（拼出「描述：」后面空着会诱导模型替我们补内容）。
     expect(prompt).not.toContain('描述：');
-    // 预算：4 秒硬上限 + 一个小 max_tokens（`complete` 用 AbortSignal.timeout 落这个上限）。
-    expect(seen.opts[0]).toEqual({ maxTokens: 400, timeoutMs: EXPAND_TIMEOUT_MS });
   });
 
   it('散文后面接一段数组也认；对象、混合类型、空数组一律 null', async () => {
-    expect(await fake({ ok: true, text: '好的：["a","b"]' })('t', '')).toEqual(['a', 'b']);
-    expect(await fake({ ok: true, text: '{"keywords":["a"]}' })('t', '')).toBeNull();
+    expect(await expandWith({ ok: true, text: '好的：["a","b"]' }).expand('t', '')).toEqual(['a', 'b']);
+    expect(await expandWith({ ok: true, text: '{"keywords":["a"]}' }).expand('t', '')).toBeNull();
     // 元素不是字符串：整条判失败，不做 `String(x)`（那会造出一个叫 null 的关键词）。
-    expect(await fake({ ok: true, text: '[1,"a"]' })('t', '')).toBeNull();
-    expect(await fake({ ok: true, text: '[]' })('t', '')).toBeNull();
-    expect(await fake({ ok: true, text: '没有词' })('t', '')).toBeNull();
+    expect(await expandWith({ ok: true, text: '[1,"a"]' }).expand('t', '')).toBeNull();
+    expect(await expandWith({ ok: true, text: '[]' }).expand('t', '')).toBeNull();
+    expect(await expandWith({ ok: true, text: '没有词' }).expand('t', '')).toBeNull();
   });
 
-  it('非 2xx / 超时（complete 的 ok:false）→ null，且不抛', async () => {
-    const expand = fake({ ok: false, error: '请求超时：4 秒内没有响应' });
+  it('非 2xx / 超时（complete 的 ok:false）→ null，不抛，也不再问一次', async () => {
+    const { expand, seen } = expandWith({ ok: false, error: '请求超时：4 秒内没有响应' });
     expect(await expand('t', '描述')).toBeNull();
+    expect(seen.calls).toBe(1);
   });
 
-  it('没配模型 → null（评审按回落词继续，不留一次白等）', async () => {
-    const expand = createExpand({
-      resolveConfig: async () => null,
-      complete: async () => { throw new Error('不该发出请求'); },
-    });
+  it('provider 自己抛（连接被掐）→ null，不抛，也不再问一次', async () => {
+    const attempts: Array<string | null> = [];
+    const { expand, seen } = expandWith(
+      () => { throw new Error('socket hang up'); },
+      (record) => { attempts.push(record.error); },
+    );
     expect(await expand('t', '')).toBeNull();
+    expect(seen.calls).toBe(1);
+    expect(attempts[0]).toContain('socket hang up');
   });
 
-  it('失败原因写进留痕：超时与「不是数组」分得开，成功那一行 error 为 null', async () => {
-    const seen: Array<{ words: number | null; error: string | null }> = [];
-    const withLog = (reply: Awaited<ReturnType<Parameters<typeof createExpand>[0]['complete']>>) => createExpand({
-      resolveConfig: async () => CFG,
-      complete: async () => reply,
-      onAttempt: (record) => { seen.push({ words: record.words, error: record.error }); },
-    });
+  it('没配模型 → null，且一次请求都不发（连提示词都没拼出去）', async () => {
+    // 只断言「返回 null」是测不出这条的：删掉 `cfg === null` 的提前返回，那个被守卫的
+    // throw 会被同一个 catch 吞成 null，用例照样绿。所以要数 `calls` 与 `prompts`。
+    const stub = providerStub({ ok: true, text: '["不该到这"]' });
+    const expand = createExpand({ resolveConfig: async () => null, complete: stub.complete });
 
-    await withLog({ ok: false, error: '请求超时：4 秒内没有响应' })('t', '');
-    await withLog({ ok: true, text: '{"keywords":[]}' })('t', '');
-    await withLog({ ok: true, text: '["a"]' })('t', '');
+    expect(await expand('t', '')).toBeNull();
+    expect(stub.seen.calls).toBe(0);
+    expect(stub.seen.prompts).toHaveLength(0);
+  });
+
+  it('失败原因写进留痕：超时、不是数组、成功三种分得开', async () => {
+    const seen: Array<{ words: number | null; error: string | null }> = [];
+    const log = (record: { words: number | null; error: string | null }) => {
+      seen.push({ words: record.words, error: record.error });
+    };
+
+    await expandWith({ ok: false, error: '请求超时：4 秒内没有响应' }, log).expand('t', '');
+    await expandWith({ ok: true, text: '{"keywords":[]}' }, log).expand('t', '');
+    await expandWith({ ok: true, text: '["a"]' }, log).expand('t', '');
 
     expect(seen).toEqual([
       { words: null, error: '请求超时：4 秒内没有响应' },

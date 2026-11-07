@@ -373,8 +373,6 @@ export type Baseline = {
    * 而两者的 `text` 只是一句话的差别，靠读字符串分辨迟早会被改坏。
    */
   locate: LocateResult;
-  /** 真正拿去检索的词（模型的扩展词，或回落的原始关键词）——标题里没有，但留痕要看。 */
-  keywords: string[];
 };
 
 /** 现状摘取的文件数/字节预算：够模型看出「现在怎么做的」，又不至于把仓库搬进提示词。 */
@@ -487,8 +485,10 @@ function repoOf(path: string, trees: Map<string, Set<string>>): string | null {
  * 2. 扩展词：`expandedKeywords(expand, 标题, 描述, PRD 关键词)`。任何失败都回落，
  *    一次都不重试（见 `structure.ts` 与 `expand.ts`）；
  * 3. `locateFromStructure`：结构命中一律 `low`，不重排、不跨仓比分数；
- * 4. 记账：**三种结果都记**（`recordLocate` 抛就抛——那是库坏了，与模型无关）；
- * 5. 有候选才 `show` 正文：那几段是模型判断「与现状冲突」时唯一能引用的东西。
+ * 4. 有候选才 `show` 正文：那几段是模型判断「与现状冲突」时唯一能引用的东西；
+ * 5. **最后**记账：三种结果都记（`recordLocate` 抛就抛——那是库坏了，与模型无关）。
+ *    顺序是有意的：先写一行 `low`、后因为 `show` 抛了而没产出材料，库里就会留下一条
+ *    指向从未存在过的材料的记录，而 `locate_runs` 是拿来算准确率的分母。
  *
  * 返回 `Baseline` 而不是 `Baseline | null`：以前的 `null` 表示「镜像没配」，材料里那句
  * 「这次没有代码现状可参考」把「没读到」与「没配」混成了一句。现在读不到就是 `absent`，
@@ -505,14 +505,11 @@ export async function gatherBaseline(
 
   if (!inputs.ok) {
     const located: LocateResult = { kind: 'absent', why: inputs.why };
+    const text = renderLocate(located);
+    // 记账放在材料拼好之后（顺序见函数头第 6 条）：先写一行 `low`、后因为 `show` 抛了
+    // 而没产出材料，库里就会留下一条指向从未存在过的材料的记录。
     await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
-    return {
-      text: renderLocate(located),
-      repos: [],
-      trees: new Map(),
-      locate: located,
-      keywords: [],
-    };
+    return { text, repos: [], trees: new Map(), locate: located };
   }
 
   // 回落值取**全量** markdown，不是提示词里那份截断过的 `prd.text`：关键词只要词，
@@ -520,7 +517,6 @@ export async function gatherBaseline(
   const fallback = keywordsFrom(prd.snapshot.markdown, req.title);
   const keywords = await expandedKeywords(deps.expand, req.title, descriptionOf(req), fallback);
   const located = locateFromStructure(inputs.entries, keywords, { limit: BASELINE_FILES });
-  await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
 
   const repoLine = `现状基线：${inputs.repos
     .map((r) => `${r.id}@${r.sha.slice(0, 8)}（${r.date.slice(0, 10)}）`).join(' / ')}`;
@@ -529,12 +525,13 @@ export async function gatherBaseline(
   // `absent` 走不到这里——读不到代码时 `readBaselineInputs` 已经整段返回了；类型上它还在
   // 联合里，所以一并按结论渲染：不抛（评审不该因为一个不该发生的分支失败），也不假装有候选。
   if (located.kind !== 'candidates') {
+    const text = `${renderLocate(located)}\n${repoLine}`;
+    await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
     return {
-      text: `${renderLocate(located)}\n${repoLine}`,
+      text,
       repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
       trees: inputs.trees,
       locate: located,
-      keywords,
     };
   }
 
@@ -552,20 +549,22 @@ export async function gatherBaseline(
     chunks.push(`【${repo}:${item.path}】\n${body.data}`);
   }
 
+  const text = [
+    // 第一行永远是那三句结论之一（`copy.ts`）：读者先看到「这是什么结论」，
+    // 再看到「对着哪一版代码」和片段。
+    renderLocate(located),
+    repoLine,
+    ...(chunks.length === 0
+      ? []
+      : ['', '下面是这些位置**现在**的样子（从代码镜像只读取出，未经修改）：', '', ...chunks]),
+  ].join('\n');
+  // 记账在材料**拼好之后**：这一行要描述一份真的产出过的材料。
+  await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
   return {
-    text: [
-      // 第一行永远是那三句结论之一（`copy.ts`）：读者先看到「这是什么结论」，
-      // 再看到「对着哪一版代码」和片段。
-      renderLocate(located),
-      repoLine,
-      ...(chunks.length === 0
-        ? []
-        : ['', '下面是这些位置**现在**的样子（从代码镜像只读取出，未经修改）：', '', ...chunks]),
-    ].join('\n'),
+    text,
     repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
     trees: inputs.trees,
     locate: located,
-    keywords,
   };
 }
 
