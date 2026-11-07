@@ -50,6 +50,19 @@ export const requirementsNumberSeq = pgSequence('requirements_number_seq');
 export const members = pgTable('members', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
+  /**
+   * **登录名**（P4-08）：`<拼音>@123pan.com`，公司的统一口径。
+   *
+   * 为什么把登录名从 `name` 挪到这一列：`name` 是**人**的名字，它要出现在事件流、
+   * 权限判断、通知里的「这条欠谁一个动作」上；把名字当凭证意味着「重名即冲突」
+   * （吕 … 这类名字在公司里真会撞），也意味着改一次显示名就是改一次登录名。
+   * 现在两者分开：凭证是这一列（唯一、稳定、不可改），身份仍然是 `name`
+   * （`events.actor` 按名字写、`memberByName` 按名字查、MCP token 的 `member` 也是名字）。
+   *
+   * 存**小写**，查的时候把输入也折成小写：邮箱的本地部分技术上区分大小写，但在这里
+   * 区分它只会制造「明明填对了却进不去」。拼音来自企业微信通讯录，不猜。
+   */
+  email: text('email').notNull(),
   // 'product_owner' | 'feature_reviewer' | 'commercial_reviewer' | 'pm'
   role: text('role').notNull(),
   // 'feature' | 'commercial' | null
@@ -105,8 +118,13 @@ export const members = pgTable('members', {
     'members_line_check',
     sql`${t.line} in ('feature', 'commercial')`,
   ),
-  /** 名字是登录名：同名的两个人无法区分，登录会取决于 `order by id limit 1`。 */
+  /** 名字是**身份**（事件、权限、通知）：同名的两个人无法区分，登录会取决于 `order by id limit 1`。 */
   nameUnique: uniqueIndex('members_name_unique').on(t.name),
+  /**
+   * 邮箱是**凭证**（P4-08）。唯一索引是「一个邮箱一个账号」的唯一保证：登录要先按
+   * 邮箱取行，撞车的话取到的是哪一行取决于执行计划，而「我是谁」不能靠运气。
+   */
+  emailUnique: uniqueIndex('members_email_unique').on(t.email),
 }));
 
 /**
@@ -173,6 +191,26 @@ export const requirements = pgTable('requirements', {
   surfaces: text('surfaces'),        // 涉及哪些页面 / 入口
   edgeCases: text('edge_cases'),     // 失败 / 空 / 无权限怎么办
   outOfScope: text('out_of_scope'),  // 这次不做什么
+
+  /**
+   * 平台（P4-08）：这条需求要落在哪几个端上。
+   *
+   * **为什么是 `text[]` 而不是 jsonb**：值来自一份**固定词表**（`pc` / `web` / `h5` /
+   * `ios` / `android` / `api` / `admin` / `mini`，见 `requirements/platforms.ts`），
+   * 是一组**无序、去重、可判等**的标签——正是数组的形状。jsonb 在这里没有好处：
+   * 词表固定，不需要嵌套结构；而 jsonb 会把「两个值相等吗」变成一次 JSON 归一，
+   * 数组的 `=` 与 `@>` 是原生语义。代价是它不参与 `text` 的排序/比较习惯，但那两件
+   * 事在这一列上都不存在。
+   *
+   * `not null default '{}'`：空数组 = **未标注**，这是真实状态（老需求、以及「就是不
+   * 知道落在哪几个端」）。同一条理由让指纹把 null 与 `[]` 哈希成同一个值（见
+   * `requirements/fingerprint.ts`）：否则「打开表单、什么都不改、保存」会把所有产物
+   * 打成「需求已更新」。
+   *
+   * 词表在库里**没有 CHECK**：它是服务层的一份常量，加一个平台（比如鸿蒙）不该是
+   * 一次迁移。写入端（`manage.ts` / `create.ts`）按词表过滤，读侧认不出的值原样跳过。
+   */
+  platforms: text('platforms').array().notNull().default(sql`'{}'::text[]`),
 
   /**
    * 软删除（P4-02）。

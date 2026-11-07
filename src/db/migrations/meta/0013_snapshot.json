@@ -1,6 +1,6 @@
 {
-  "id": "4018dfb5-8a2d-4c0a-bb39-ad8cde21d06a",
-  "prevId": "b7f5c90c-f6f0-4317-b8b1-5228c585d761",
+  "id": "097b5195-f519-4ebd-b1d6-980f6ec046f2",
+  "prevId": "4018dfb5-8a2d-4c0a-bb39-ad8cde21d06a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -211,6 +211,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "role": {
           "name": "role",
           "type": "text",
@@ -234,6 +240,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "session_epoch": {
+          "name": "session_epoch",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
         },
         "notify_prefs": {
           "name": "notify_prefs",
@@ -273,6 +286,21 @@
           "columns": [
             {
               "expression": "name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "members_email_unique": {
+          "name": "members_email_unique",
+          "columns": [
+            {
+              "expression": "email",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -752,6 +780,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "platforms": {
+          "name": "platforms",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::text[]"
         },
         "deleted_at": {
           "name": "deleted_at",
