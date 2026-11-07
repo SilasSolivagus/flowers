@@ -7,7 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
 import { db } from '../src/db/client.js';
-import { grams, locateFromHistory, mergeWeight, rankMerges } from '../src/core/locate/history.js';
+import {
+  grams, isFeatureMerge, locateFromHistory, mergeWeight, rankMerges,
+} from '../src/core/locate/history.js';
 import {
   ensureHistory, readHistory, sinceFor, validateMerges, type FetchMerges, type HistoryRow,
 } from '../src/core/locate/history-store.js';
@@ -524,7 +526,9 @@ describe('中文检索打分', () => {
     mergedAt: string,
     message: string,
     files: string[],
-  ): Row => ({ repo: 'r', commitSha, mergedAt, branch: 'feat', message, files });
+  ): Row => ({ repo: 'r', commitSha, mergedAt, branch: 'feat-x', message, files });
+  // 默认 `branch: 'feat-x'`：`isFeatureMerge` 认的是 `feat-` / `feature-` 前缀，
+  // fixture 里这些行就是在说「一次功能合并」。要测杂活合并时显式改 branch 或加杂活词。
 
   /** 与 Task 5 brief 同一份 fixture：一次真命中、一次无关、一次共用同一个文件。 */
   const rows: Row[] = [
@@ -674,6 +678,57 @@ describe('中文检索打分', () => {
     // count 并没有「不算数」：它只够把公用件留在清单里，不够把它顶到任何真合并前面。
     // 而那条动了 50 个文件的杂合并，宽度打折后一个文件都没进清单。
     expect(paths.some((path) => path.startsWith('src/legacy/'))).toBe(false);
+  });
+
+  it('发版杂活合并整条不参与打分：动 1 个文件、相似度近乎满分也不露面', () => {
+    // 这是「宽度打折奖励窄合并」的反面：发版杂活永远窄、又天然带着功能词，
+    // 所以它只能被**剔掉**，不能被打折。
+    const plumbing = {
+      ...mk('c'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减 / 升级pc版本到327', [
+        'src/services/release-plumbing.ts',
+      ]),
+      branch: null,
+    };
+    const feature = mk('d'.repeat(40), '2026-11-03T00:00:00.000Z', 'feat: 用户权益缩减', [
+      'src/pages/video/video.vue',
+    ]);
+    // branch 为 null 才会走到消息判断；它就是靠「升级pc版本」被判成杂活的。
+    expect(isFeatureMerge(plumbing)).toBe(false);
+    const got = locateFromHistory([plumbing, feature], '用户权益缩减');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items.map((item) => item.path)).toEqual(['src/pages/video/video.vue']);
+    // 只剩杂活合并时，等于「这条历史里没有可用的合并」→ none，而不是把它的文件交上去。
+    expect(locateFromHistory([plumbing], '用户权益缩减').kind).toBe('none');
+  });
+
+  it('同样一句「feat: … / 升级pc版本」，挂在 feat- 分支上就要用：branch 说话，措辞不算', () => {
+    // 反向钉一遍：判据是 `branch`，不是消息里那几个词。否则一旦有人真在功能分支里
+    // 写了一句「同步xx」，整条合成就凭空消失了。
+    const onFeatureBranch = {
+      ...mk('e'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减 / 升级pc版本到327', [
+        'src/pages/video/video.vue',
+      ]),
+      branch: 'feat-userEquity-fjd',
+    };
+    expect(isFeatureMerge(onFeatureBranch)).toBe(true);
+    const got = locateFromHistory([onFeatureBranch], '用户权益缩减');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+  });
+
+  it('isFeatureMerge：分支前缀优先，分支为空才看消息，杂活词一票否决', () => {
+    expect(isFeatureMerge({ ...mk('1'.repeat(40), '2026-11-01T00:00:00.000Z', 'whatever', []), branch: 'feat-userEquity-fjd' })).toBe(true);
+    expect(isFeatureMerge({ ...mk('2'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 用户权益缩减', []), branch: 'master-1103' })).toBe(false);
+    // 发布分支不是功能分支：它说的是「这次发什么」。
+    expect(isFeatureMerge({ ...mk('3'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 下载限速风控开发', []), branch: 'release-download-limit-yl' })).toBe(false);
+    expect(isFeatureMerge({ ...mk('4'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 用户权益缩减', []), branch: null })).toBe(true);
+    // 「合并 master」与「合并master」两种写法都要拦住。
+    expect(isFeatureMerge({ ...mk('5'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 合并master', []), branch: null })).toBe(false);
+    expect(isFeatureMerge({ ...mk('6'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: Revert 用户权益缩减', []), branch: null })).toBe(false);
+    // 不是 feat 开头的一段，本来就不算功能提交。
+    expect(isFeatureMerge({ ...mk('7'.repeat(40), '2026-11-01T00:00:00.000Z', 'fix: 文案调整', []), branch: null })).toBe(false);
   });
 
   it('mergeWeight：文件数为 0 也不除零、不出 NaN，且合并越宽权重越小', () => {

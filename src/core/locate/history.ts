@@ -10,7 +10,10 @@ import type { Candidate, LocateResult } from './types.js';
  * 而且错得看不出来（候选照样有，只是全错）。所以这里的相似度直接在中文上算：
  * 两边都是中文，比的是「字面的词组有没有重合」，不需要谁先变成另一种语言。
  *
- * 打分形状（照 spec §5）：
+ * 打分形状（照 spec §5，加上「先剔掉发版/同步类合并」这一道）：
+ * 0. **先剔掉「杂活合并」**（`isFeatureMerge`）：升级版本号、热备域名更换、嵌套 web
+ *    同步、Revert/回滚这类合并**整条不参与打分**——它们没有「功能落在哪儿」可言，
+ *    放进打分只能把真正的实现压下去（理由见 `isFeatureMerge`）；
  * 1. 切块：中文连续段切**二字组**，英文词小写；
  * 2. IDF：`log(1 + N / df)`，`N` = **传进来的这批**行数，`df` = 含该词的合并数。
  *    不读全局、不读库：同一份历史今天和明天给出同一个排名，否则没人敢拿它当线索；
@@ -105,6 +108,66 @@ export function grams(text: string): Set<string> {
   return out;
 }
 
+/**
+ * 发版/同步/回滚类的「杂活合并」——消息里出现这些词就说明那次提交不是在做功能。
+ *
+ * 为什么整条剔掉、而不是打个折：`mergeWeight` 的宽度打折在**奖励窄合并**，而发版杂活
+ * 永远是窄的（「升级pc版本到327」动 1 个文件、「热备域名更换」动 10 个），同时它的消息
+ * 又天然带着功能词（一句「feat: 专业空间回滚」把「专业空间」全命中了），相似度因此很高。
+ * 任何固定倍率（0.5、0.2）都只是把门槛挪一格，换个仓、换个版本号就失效。正确的说法是
+ * **语义**上的：一次版本号变更不是一次功能。它没有「功能落在哪儿」这个答案，让它参与
+ * 打分只可能把真答案挤下去。
+ *
+ * 只按词面剔、不按词面留：这些词出现在消息任何一段都算（发版火车常常一段一个版本）。
+ * 代价是可能误伤（比如「feat: 同步通讯录」里的「同步」）——所以第一优先看 `branch`。
+ */
+const PLUMBING_WORDS = [
+  'revert',
+  '回滚',
+  '合并master',
+  '升级pc版本',
+  '升级版本号',
+  '同步',
+  '热备',
+  '重新打包',
+  '发版',
+  '上线准备',
+] as const;
+
+/**
+ * 功能分支前缀。
+ *
+ * 认 `feat-` / `feature-` / `feat/` / `feature/` 四种写法，**不是**只认横杠：
+ * 这个仓的真历史里 `feat/architectural-transformation`（46 条）、`feat/remould-dll`（8 条）
+ * 用的是斜杠，`feat-direct-link-renovation-tw` 用的是横杠，两种并存。只认横杠会把 54 条
+ * 「明摆着的功能分支」整条扔掉——那是判据没写全，不是口径问题。
+ */
+const FEATURE_BRANCH = /^(feat|feature)[-/]/;
+
+/**
+ * 这条合并是不是「一次真的功能合并」。
+ *
+ * `branch` 是最强的信号，优先于措辞：
+ * - 分支以 `feat-` / `feature-` 开头 → 是功能合并，**不再看消息**（有人在 feat 分支里
+ *   写了「同步xx」也不影响它就是那次功能）；
+ * - 分支存在但不是这个前缀（`master-1103`、`release-download-limit-yl`）→ 不是。
+ *   发布分支上的一次提交说的是「这次发什么」，不是「功能怎么实现」；
+ * - 分支为空（pc 仓有大量这种行）时退到消息：首段以 `feat` 开头、且消息里没有杂活词。
+ *
+ * 消息里的空白先压掉再匹配：清单里的写法是「合并 master」「合并master」并存。
+ */
+export function isFeatureMerge(row: HistoryRow): boolean {
+  const branch = (row.branch ?? '').trim().toLowerCase();
+  if (FEATURE_BRANCH.test(branch)) return true;
+  if (branch !== '') return false;
+
+  const head = (row.message.split(' / ')[0] ?? '').trim().toLowerCase();
+  if (!head.startsWith('feat')) return false;
+
+  const haystack = row.message.toLowerCase().replace(/\s+/g, '');
+  return !PLUMBING_WORDS.some((word) => haystack.includes(word));
+}
+
 /** 一次合并与查询的匹配结果。`score` 只用于排序，绝对值没有意义。 */
 export type RankedMerge = { row: HistoryRow; score: number };
 
@@ -132,6 +195,9 @@ function compareRanked(a: RankedMerge, b: RankedMerge): number {
 /**
  * 按相似度给合并排名，只留分数 > 0 的，取前 `top` 条。
  *
+ * 打分前先过 `isFeatureMerge`：发版/同步/回滚类合并整条不参与（理由见那里的注释）。
+ * 剔完一条不剩时返回空数组，调用方据此给 `{ kind: 'none' }`。
+ *
  * `top` 用 `Number.isFinite` 兜一下：调用方从命令行/配置拿来的值可能是 `NaN`
  * （`slice(0, NaN)` 会静默返回空数组，看起来像「没有相近的合并」，其实是个配置错）。
  */
@@ -146,12 +212,18 @@ export function rankMerges(
   const wanted = [...grams(query)];
   if (wanted.length === 0) return [];
 
+  // 先剔掉杂活合并，再算 df / IDF：**IDF 的语料就是这批可用的合并**。
+  // 若先算 df 再剔，df 里会混进那些永远不参与打分的行，`log(1 + N/df)` 的 N 与 df 也
+  // 不再对应同一批文档，「稀有权重」就名不副实了。
+  const usable = rows.filter(isFeatureMerge);
+  if (usable.length === 0) return [];
+
   // 文档侧只切 `message`，**不切 branch、不切文件路径**。
   // 理由：branch 是 `feat-userEquity-fjd` 这种英文标识符，把英文标识符也拿来比，等于
   // 偷偷引入了「中文需求 ↔ 英文命名」这一层猜测——本次改造要消灭的就是它。文件路径同理
   // （`src/pages/video/video.vue` 里的 `video` 会跟「视频」混不掉，只会让结果看起来对、
   // 理由说不清）。路径在这一层只作为**聚合的键**，不参与打分。
-  const docs = rows.map((row) => grams(row.message));
+  const docs = usable.map((row) => grams(row.message));
 
   // df 只在**查询词**上算：算全量词的 df 是白干（657 条 × 每条约 30 个词），而打分只需要
   // 查询词的 IDF。
@@ -166,7 +238,7 @@ export function rankMerges(
     // ——明明有相近的合并却报「没有」，这是最糟的失败形态。
     // 剔掉之后：分母 = 语料里真实存在的那部分查询词，score 仍是 0..1，且含义更好读
     // （「查询词里能在历史中对照上的部分，被这次合并覆盖了多少」）。
-    if (df > 0) idf.set(gram, Math.log(1 + rows.length / df));
+    if (df > 0) idf.set(gram, Math.log(1 + usable.length / df));
   }
   if (idf.size === 0) return [];
 
@@ -175,9 +247,9 @@ export function rankMerges(
   if (total <= 0) return [];
 
   const hits: RankedMerge[] = [];
-  for (let i = 0; i < rows.length; i += 1) {
+  for (let i = 0; i < usable.length; i += 1) {
     const doc = docs[i];
-    const row = rows[i];
+    const row = usable[i];
     if (doc === undefined || row === undefined) continue;
     let matched = 0;
     for (const [gram, weight] of idf) if (doc.has(gram)) matched += weight;
