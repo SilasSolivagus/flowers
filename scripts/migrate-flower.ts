@@ -589,13 +589,27 @@ async function verify(baselinePath: string): Promise<boolean> {
     if (diffs.length > 0) mismatches.push(`Flower #${want.number}（${id}）：${diffs.join('；')}`);
   }
 
-  // 按落点分组：期望（基线里每个旧状态的条数）与库里实际的条数并排放。
+  // 两套计数，不能混：
+  //   按**旧状态**（baseline 的 11 个桶）：这一格搬了几条 —— 与基线 stateBuckets 对；
+  //   按**落点**（我们的状态）：最终落进哪一格 —— 与基线 stateTotals 对。
+  const actualByOld = new Map<string, number>();
   const actualByState = new Map<string, number>();
-  for (const row of res.rows) actualByState.set(row.state, (actualByState.get(row.state) ?? 0) + 1);
+  for (const row of res.rows) {
+    const want = expected.get(row.legacy_ref);
+    if (want === undefined) continue;
+    actualByOld.set(want.stateKey, (actualByOld.get(want.stateKey) ?? 0) + 1);
+    actualByState.set(row.state, (actualByState.get(row.state) ?? 0) + 1);
+  }
   const expectedByState = new Map<string, number>();
   for (const row of baseline.rows) {
     if (row.state === null) continue;
     expectedByState.set(row.state, (expectedByState.get(row.state) ?? 0) + 1);
+  }
+  // 基线的 stateTotals 与逐行累加必须自洽（基线文件自己先过一遍，再拿去比库）。
+  for (const [state, want] of Object.entries(baseline.analysis.stateTotals)) {
+    if ((expectedByState.get(state) ?? 0) !== want) {
+      process.stdout.write(`基线自相矛盾：${state} 声明 ${want} 条，逐行累加 ${expectedByState.get(state) ?? 0} 条\n`);
+    }
   }
 
   process.stdout.write('\n== 逐条对账 ==\n');
@@ -603,17 +617,27 @@ async function verify(baselinePath: string): Promise<boolean> {
     + `缺失 ${missing.length}；多余 ${extra.length}；字段不一致 ${mismatches.length}\n`);
   process.stdout.write(`requirements 总行数 ${counts.rows[0]!.total}（搬来的 ${counts.rows[0]!.migrated} + 本系统自建 ${counts.rows[0]!.native}）\n`);
 
-  process.stdout.write('\n== 按落点（旧状态 → 我们的状态：期望 = 实际） ==\n');
+  let bucketsOk = true;
+  process.stdout.write('\n== 按旧状态（Flower → 我们：基线 = 库内） ==\n');
   for (const bucket of baseline.analysis.stateBuckets) {
-    const state = bucket.state;
-    if (state === null) continue;
-    const want = expectedByState.get(state) ?? 0;
+    const got = actualByOld.get(bucket.old) ?? 0;
+    const same = got === bucket.count;
+    bucketsOk = bucketsOk && same;
+    process.stdout.write(`${pad(bucket.old, 16)}→ ${pad(bucket.state ?? '（未映射）', 10)}基线 ${pad(String(bucket.count), 6)}库内 ${pad(String(got), 6)}${same ? '一致' : '**不一致**'}\n`);
+  }
+
+  let totalsOk = true;
+  process.stdout.write('\n== 按落点（我们的状态：基线 = 库内） ==\n');
+  for (const [state, want] of Object.entries(baseline.analysis.stateTotals)) {
     const got = actualByState.get(state) ?? 0;
-    process.stdout.write(`${pad(bucket.old, 16)}→ ${pad(state, 10)}期望 ${pad(String(want), 6)}实际 ${pad(String(got), 6)}${want === got ? '一致' : '**不一致**'}\n`);
+    const same = got === want;
+    totalsOk = totalsOk && same;
+    process.stdout.write(`${pad(state, 12)}基线 ${pad(String(want), 6)}库内 ${pad(String(got), 6)}${same ? '一致' : '**不一致**'}\n`);
   }
   for (const [state, got] of actualByState) {
     if (!(state in baseline.analysis.stateTotals)) {
       process.stdout.write(`库里有基线没有的落点 ${state}：${got} 条\n`);
+      totalsOk = false;
     }
   }
 
@@ -622,8 +646,7 @@ async function verify(baselinePath: string): Promise<boolean> {
   if (extra.length > 0) process.stdout.write(`  多余：${extra.slice(0, 10).join('、')}\n`);
 
   const ok = missing.length === 0 && extra.length === 0 && mismatches.length === 0
-    && expectedByState.size === actualByState.size
-    && [...expectedByState].every(([state, want]) => (actualByState.get(state) ?? 0) === want);
+    && bucketsOk && totalsOk;
   process.stdout.write(`\n对账${ok ? '通过' : '**失败**'}。\n`);
   return ok;
 }
