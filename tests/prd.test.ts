@@ -454,6 +454,26 @@ describe('readPrd', () => {
     const events = await db.execute<{ n: string }>(sql`select count(*)::text as n from events`);
     expect(events.rows[0]?.n).toBe('0');
   });
+
+  it('软删的需求视为不存在：不抓 doc、不落快照、不落事件', async () => {
+    // 软删 = 从每一条读路径上消失。一条**有** prd_url 的软删需求曾经能被读出来：
+    // 抓一次正文、落一版 prd_snapshots、记一条 prd.fetched —— 一条不在板上的需求
+    // 还在产出快照。判据是 `deleted_at is null`，缺席的说法与「没有这一行」同一句。
+    const id = await makeRequirement(DOC);
+    await db.execute(sql`update requirements set deleted_at = now() where id = ${id}`);
+
+    const result = await readPrd(db, '吕品', { requirementId: id });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe('not_found');
+    expect(result.message).toBe('找不到这条需求');
+
+    expect(await snapshotCount(db, id)).toBe(0);
+    const events = await db.execute<{ n: string }>(sql`select count(*)::text as n from events`);
+    expect(events.rows[0]?.n).toBe('0');
+    // 连链接都不该去抓：客户端被拉起来，就说明查需求这一步先放行了。
+    expect(await calls()).toHaveLength(0);
+  });
 });
 
 afterAll(async () => {

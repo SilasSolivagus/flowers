@@ -247,3 +247,71 @@ docker exec flowers-db-1 psql -U postgres -d flowers -f /dev/stdin \
 
 不碰的东西：`src/core/locate/*`、`src/db/reset.ts`、除 0026 外的任何迁移；没跑 `git clean`；
 没有新依赖。
+
+---
+
+## 9. 收尾：三处漏掉 `deleted_at` 的读路径（同一类缺陷）
+
+§8.6 记下的三处口径漏洞这一轮一并补掉。缺陷类是同一个：**一份事实，两个答案**。软删
+（`deleted_at`）的唯一含义是「从每一条读路径上消失，只为历史保留」，而这三处读路径都只
+认行存在、不认删除标记 —— 于是「已经删掉的需求」在库里还在、在某个入口上还活着。
+
+| # | 位置 | 漏掉什么 | 后果 | 今天为什么没炸 |
+|---|---|---|---|---|
+| 1 | `src/core/prd/read.ts:60` | 按 id 取 `prd_url` 时没有 `deleted_at is null` | 软删但仍带 `prd_url` 的需求能被抓正文 → 落 `prd_snapshots` + 写 `prd.fetched` | PAN-338 没有 `prd_url`，先撞 `missing_prd_url`（潜伏） |
+| 2 | `src/core/requirements/lock.ts:51` | `lockRequirement` 锁行不看 `deleted_at` | 状态动作（立项 / 提交评审 / 排期 / 打回 / 搁置 …）能推进软删的行并写事件 | PAN-338 停在 `rejected`，迁移表里没有出边，任何动作都先撞 `illegal_transition` |
+| 3 | `scripts/prd-backfill.ts`（`loadRequirements` / `buildPlan`） | 「同题唯一」把软删的行也数进去 | 下次 `--emit` 仍把 `用户部分权益缩减调整` 判成歧义 → 从种子掉出去 | 种子文件不会自动重生成；已落库的 `prd_url` 由 `prd_url is null` 那道门保住 |
+
+### 9.2 修法
+
+1. **`readPrd`**：查询加 `and deleted_at is null`，软删的行返回**已有的** `not_found`
+   （`'找不到这条需求'`），不新开错误码 —— 调用方本来就只认这一种缺席，删除与「真的
+   没有这一行」不必分成两种故事。附带效果：连 WeCom CLI 都不会被拉起来。
+2. **`lockRequirement`**：判据放在**锁行这一层**，不是每个服务里各写一遍。理由是覆盖率：
+   `evaluate` / `submit-review` / `review` / `assign` / `claim` / `schedule` / `bounce` /
+   `terminal` 全部从这里过，一处过滤覆盖全部调用方；散到 8 个地方写，漏一个就重新长回
+   同一个洞。错误用既有那句 `AppError('not_found', '找不到这条需求')`。走到锁行时还
+   没有任何写入，所以「失败」与「什么都没发生」是同一件事。唯一的外部入口
+   `uemaster.attach` 早就自带 `deleted_at is null`（`attach.ts:191`），两处同一条口径。
+3. **回填口径**：`buildPlan` 里先 `const live = reqs.filter((r) => r.deleted_at === null)`，
+   `pairs` / `ambiguous` / `gaps` / `counts` 全部基于 `live`。**过滤只做一次**（不在
+   `loadRequirements` 的 SQL 里再做一遍）：计划与计数必须是同一份事实，分两处过滤迟早
+   分叉；`deleted_at` 仍然跟着行走，缺口分类才知道一行为什么不算。
+   顺带把口径拆成纯函数 `src/core/prd/backfill-plan.ts`：脚本带顶层 `await main()`，
+   import 它就等于跑一遍回填，口径没法测。脚本现在只剩取数 / emit / apply。
+
+0026 之后的实际形状：`用户部分权益缩减调整` 未删只有 PAN-742，而它的 `prd_url` 已被
+0026 填上 → 下次 `--emit` 走的是 `prd_url !== null` 那道门（进 `gaps.alreadyFilled`），
+`pairs` 仍是 **203 条**，种子文件不变。修的是**判据**，不是数据。
+
+### 9.3 用例与变异表（每条都必须在其判据被移除时变红）
+
+| 用例 | 变异（移除的判据） | 变异后的红 |
+|---|---|---|
+| `tests/prd.test.ts`「软删的需求视为不存在：不抓 doc、不落快照、不落事件」 | `read.ts` 的 `and deleted_at is null` | `expected true to be false`（`readPrd` 返回 `ok: true`，快照落了库） |
+| `tests/requirements.test.ts`「软删的需求视为不存在：立项失败，不动状态也不写事件」 | `lock.ts` 的 `and r.deleted_at is null` | `expected AppError, nothing thrown`（立项成功、状态被推进） |
+| `tests/prd-backfill.test.ts`「软删的重复行视为不存在：那个标题不再判歧义，该配的配上」 | `backfill-plan.ts` 的 `live` 过滤（`live = reqs`） | `expected [ … ] to have a length of +0 but got 1`（歧义又长回来了） |
+| `tests/prd-backfill.test.ts`「软删的迁移行也不进缺口分类」 | 同上 | `expected { noDocument: [ 338 ], … } to deeply equal { noDocument: [], … }` |
+| `tests/prd-backfill.test.ts`「对偶：没软删时同一场景是歧义」 | —（对照，不设变异：它证明上一条的绿来自 `deleted_at`，两边都该绿） | — |
+
+三条状态动作的失败用例都额外断言了「没有任何事件」与「状态没变」：只断言抛错，一个
+「先 moveTo 再抛」的实现同样会通过。
+
+### 9.4 修完后的复验（实测）
+
+```
+npx vitest run        # 59 个文件：1374 passed | 1 skipped
+npx tsc --noEmit      # 干净
+```
+
+| 计数 | 值 |
+|---|---|
+| 未删需求 | **814** |
+| 未删且 `legacy_ref` 非空 | **802** |
+| `deleted_at` 非空 | **1** |
+| 表里总行数 | 815 |
+
+与 §8.4 执行后的那一行逐格一致 —— 本轮不动数据，只动判据。
+
+不碰的东西：`src/core/locate/*`、迁移（0025 / 0026 一个字节没动）、`src/db/reset.ts` 的
+守卫；没有新依赖；没有 `git clean`。

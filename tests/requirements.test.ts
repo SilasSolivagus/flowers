@@ -274,6 +274,21 @@ describe('evaluate', () => {
     }))).toMatchObject({ code: 'not_found', message: '找不到这条需求' });
   });
 
+  it('软删的需求视为不存在：立项失败，不动状态也不写事件', async () => {
+    // 软删 = 从每一条读路径上消失。状态动作是**写**路径上最要紧的那条读：不挡住它，
+    // 一条已经不在板上的需求照样能被立项 / 排期 / 打回，每一步都写一条事件。
+    // 判据在 `lockRequirement`（每个状态动作都从那里过），所以这里用哪一步都一样。
+    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const before = await eventCountOf(r.id); // createRequirement 写的那一条
+    await db.execute(sql`update requirements set deleted_at = now() where id = ${r.id}`);
+
+    expect(await caught(evaluate(db, '吕品', { requirementId: r.id }))).toMatchObject({
+      code: 'not_found', message: '找不到这条需求',
+    });
+    expect((await rowOf(r.id)).state).toBe('inbox');
+    expect(await eventCountOf(r.id)).toBe(before);
+  });
+
   it.each([undefined, null, [], 'str', 42])('非对象入参 %j 给中文消息', async (body) => {
     expect(await caught(evaluate(db, '吕品', body))).toMatchObject({
       code: 'invalid', message: '参数不合法',

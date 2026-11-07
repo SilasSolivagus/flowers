@@ -56,8 +56,15 @@ export async function readPrd(
   // 先校验成 uuid 再进 SQL：非 uuid 会被 PG 以 22P02 拒掉，那不是我们能翻成中文的错误。
   if (!UUID.test(requirementId)) return { ok: false, code: 'bad_id', message: BAD_ID };
 
+  // `deleted_at is null`：软删的含义就是「从每一条读路径上消失，只为历史保留」，而
+  // 读 PRD 是一条读路径。少了这一句，一条已经不在板上的需求仍能被抓正文、落一行
+  // `prd_snapshots`、写一条 `prd.fetched` —— 那是「一条不存在的需求在产出快照」。
+  // 对软删的行返回与「真的没有这一行」同样的 not_found：调用方本来就只认这一种
+  // 缺席（不新开错误码，不让删除与不存在分成两种故事）。
   const found = await db.execute<{ prd_url: string | null }>(sql`
-    select prd_url from requirements where id = ${requirementId} limit 1`);
+    select prd_url from requirements
+     where id = ${requirementId} and deleted_at is null
+     limit 1`);
   const row = found.rows[0];
   if (row === undefined) return { ok: false, code: 'not_found', message: '找不到这条需求' };
 

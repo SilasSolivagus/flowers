@@ -37,6 +37,12 @@
  * 链接比没有链接更坏（`prd_snapshots` 与材料生成会把它当权威源）。这类只报出来，
  * 由 owner 选。
  *
+ * **软删的行不算同题需求**（`deleted_at is not null` 的行在这里等于不存在）：软删
+ * 的意思是「从每一条读路径上消失，只为历史保留」，而「同题唯一」是一个读路径上的
+ * 判断。这一条是承重的——0026 按 owner 裁定软删了 PAN-338，「用户部分权益缩减调整」
+ * 从此只剩一行；不滤掉已删的行，`--emit` 会把它重新判成歧义、从种子里掉出去，于是
+ * 种子与刚修好的库各说一套。口径在 `src/core/prd/backfill-plan.ts`（`buildPlan`）。
+ *
  * ## 可撤销性
  *
  * 回填只写 `prd_url` 一列，且只写 `prd_url is null` 的迁移行。撤销是一条 SQL：
@@ -49,6 +55,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
+// 口径（`buildPlan`）住在 `src/core/prd/backfill-plan.ts`：它是纯函数，用例要能直接
+// 拿内存里的两串行钉住它，而 import 一个带顶层 `await main()` 的脚本就是跑一遍回填。
+import {
+  buildPlan, type FlowerDoc, type LocalReq, type Pair, type Plan,
+} from '../src/core/prd/backfill-plan.js';
 
 const SSH_HOST = process.env.FLOWER_SSH_HOST ?? 'dogyun';
 const CONTAINER = process.env.FLOWER_PG_CONTAINER ?? 'flower-postgres-1';
@@ -79,8 +90,6 @@ copy (select encode(convert_to(coalesce(json_agg(x)::text, '[]'), 'utf8'), 'base
 ) x) to stdout;
 `;
 
-type FlowerDoc = { title: string; external_url: string; kind: string };
-
 function loadFlowerDocuments(): FlowerDoc[] {
   const res = spawnSync(
     'ssh',
@@ -98,124 +107,17 @@ function loadFlowerDocuments(): FlowerDoc[] {
   return JSON.parse(json) as FlowerDoc[];
 }
 
-type LocalReq = {
-  number: number;
-  legacy_ref: string | null;
-  title: string;
-  prd_url: string | null;
-};
-
+/**
+ * 需求侧的行。**软删的行一起读出来**（`deleted_at` 跟着行走），而不是在 SQL 里就滤掉：
+ * 过滤只做一次，在 `buildPlan` 里（`live`）——口径与计数必须是同一份事实。这里少给一列
+ * 等于把「哪些行被排除了」这个决定藏进两条 SQL 里，读代码的人再也看不到它。
+ */
 async function loadRequirements(): Promise<LocalReq[]> {
   const res = await db.execute<LocalReq>(sql`
-    select number, legacy_ref, title, prd_url from requirements order by number`);
+    select number, legacy_ref, title, prd_url, deleted_at
+      from requirements
+     order by number`);
   return res.rows;
-}
-
-// ─── 配对（口径，与 0025 的 where 一一对应） ─────────────────────────────────
-
-export type Pair = { title: string; url: string };
-
-export type Ambiguous = {
-  title: string;
-  url: string;
-  candidates: { number: number; migrated: boolean; prdUrl: string | null }[];
-};
-
-export type Plan = {
-  pairs: Pair[];
-  ambiguous: Ambiguous[];
-  /** 迁移行里没有 PRD 的原因分类（合计 = 迁移行 − pairs.length）。 */
-  gaps: {
-    /** 一条同名文档都没有。 */
-    noDocument: number[];
-    /** 有同名文档，但文档的 external_url 是空的。 */
-    documentWithoutUrl: number[];
-    /** 有同名文档且有 URL，但同名需求不止一条（本题的 2 条）。 */
-    ambiguous: number[];
-    /** 已经填过（不该出现：迁移行里 prd_url 全为 null）。 */
-    alreadyFilled: number[];
-  };
-  counts: { total: number; migrated: number; demo: number; docs: number; docsWithUrl: number };
-};
-
-/** 标题全等比较用的键：就是标题本身（刻意不做 trim / 归一化）。 */
-const key = (title: string): string => title;
-
-export function buildPlan(docs: FlowerDoc[], reqs: LocalReq[]): Plan {
-  const withUrl = docs.filter((d) => d.external_url.trim() !== '');
-  const withoutUrl = docs.filter((d) => d.external_url.trim() === '');
-
-  // 同一标题在文档侧是否只有一条（217 行里没有重名，但这里有判据，让报告说得出来）。
-  const urlDocTitles = new Map<string, FlowerDoc>();
-  for (const d of withUrl) urlDocTitles.set(key(d.title), d);
-  const emptyDocTitles = new Set(withoutUrl.map((d) => key(d.title)));
-
-  const byTitle = new Map<string, LocalReq[]>();
-  for (const r of reqs) {
-    const k = key(r.title);
-    const bucket = byTitle.get(k);
-    if (bucket === undefined) byTitle.set(k, [r]);
-    else bucket.push(r);
-  }
-
-  const pairs: Pair[] = [];
-  const ambiguous: Ambiguous[] = [];
-  const gaps: Plan['gaps'] = {
-    noDocument: [], documentWithoutUrl: [], ambiguous: [], alreadyFilled: [],
-  };
-
-  // 文档侧驱动：只有「有 URL 的文档」能提供一条链接。
-  for (const [title, doc] of urlDocTitles) {
-    const matches = byTitle.get(title) ?? [];
-    if (matches.length === 0) continue; // 与需求无关的文档（217 里的一条使用手册等）
-    if (matches.length > 1) {
-      // 歧义只在「这些候选里至少有迁移行、且都还没填」时才有意义。
-      const open = matches.filter((r) => r.legacy_ref !== null && r.prd_url === null);
-      if (open.length === 0) continue;
-      ambiguous.push({
-        title,
-        url: doc.external_url,
-        candidates: matches.map((r) => ({
-          number: r.number, migrated: r.legacy_ref !== null, prdUrl: r.prd_url,
-        })),
-      });
-      continue;
-    }
-    const only = matches[0]!;
-    if (only.legacy_ref === null) continue; // 演示行不填（0025 的 legacy_ref 判据）
-    if (only.prd_url !== null) continue;
-    pairs.push({ title, url: doc.external_url });
-  }
-
-  // 缺口分类：迁移行里没被配上的那些。
-  const paired = new Set(pairs.map((p) => key(p.title)));
-  const ambiguousTitles = new Set(ambiguous.map((a) => key(a.title)));
-  for (const r of reqs) {
-    if (r.legacy_ref === null) continue;
-    if (r.prd_url !== null) { gaps.alreadyFilled.push(r.number); continue; }
-    const k = key(r.title);
-    if (paired.has(k)) continue;
-    if (ambiguousTitles.has(k)) gaps.ambiguous.push(r.number);
-    else if (emptyDocTitles.has(k)) gaps.documentWithoutUrl.push(r.number);
-    else gaps.noDocument.push(r.number);
-  }
-
-  // 排序用码点比较（不用 localeCompare）：同一个仓库在任何机器上 emit 出的字节一致。
-  pairs.sort((a, b) => (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
-  ambiguous.sort((a, b) => (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
-
-  return {
-    pairs,
-    ambiguous,
-    gaps,
-    counts: {
-      total: reqs.length,
-      migrated: reqs.filter((r) => r.legacy_ref !== null).length,
-      demo: reqs.filter((r) => r.legacy_ref === null).length,
-      docs: docs.length,
-      docsWithUrl: withUrl.length,
-    },
-  };
 }
 
 // ─── emit ────────────────────────────────────────────────────────────────────

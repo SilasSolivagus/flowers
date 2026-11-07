@@ -47,6 +47,17 @@ export type Locked = {
  * 各写一条事件、把状态推两步。
  *
  * 行不存在就抛 not_found（消息各服务统一）：锁不到的行不能被假装推进一步。
+ *
+ * **软删（`deleted_at`）在这一层挡**：软删的意思是「从每一条读路径上消失，只为历史
+ * 保留」，而状态动作是**写**路径上最要紧的一条读——不挡住它，一条已经不在板上的需求
+ * 照样能被立项 / 提交评审 / 排期 / 打回 / 搁置，每一步都写一条事件。判据放这里而不是
+ * 每个服务里各写一遍，是因为**每个状态动作都从这里过**（evaluate / submit-review /
+ * review / assign / claim / schedule / bounce / terminal 全部），一处过滤覆盖全部调用方；
+ * 散到 8 个地方写，漏一个就重新长回同一个洞。
+ *
+ * 不存在与已删除抛同一个 `not_found`、同一句中文：对着调用方它们是一件事——这一行
+ * 没有可以被推进的状态。何况调用方本来就按 code 分支，多一个码只会多一条没人测的路径。
+ * 走到这里时还没有任何写入（锁行是先手），所以「失败」与「什么都没发生」是同一件事。
  */
 export async function lockRequirement(tx: Tx, requirementId: string): Promise<Locked> {
   // `for update of r`：join 进来的是 members（左侧是 r），不加 `of r` 的
@@ -57,6 +68,7 @@ export async function lockRequirement(tx: Tx, requirementId: string): Promise<Lo
       from requirements r
       left join members m on m.id = r.owner_member_id
      where r.id = ${requirementId}
+       and r.deleted_at is null
        for update of r`);
   const row = cur.rows[0];
   if (!row) throw new AppError('not_found', '找不到这条需求');
