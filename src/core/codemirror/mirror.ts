@@ -904,17 +904,42 @@ function shellQuote(text: string): string {
  *   里可以有竖线），切分交给调用方——字段分隔符只有 \u0002。
  */
 const HISTORY_SCRIPT = [
-  'cd "$1" || exit 9',
-  // $2 为空时 ${2:+...} 一个词都不展开；非空时展开成 --since=<日期>。
-  'git rev-list --merges ${2:+--since=$2} HEAD | while read -r m; do',
-  '  at=$(git log -1 --format=%cI "$m")',
-  '  subj=$(git log -1 --format=%s "$m")',
-  '  msgs=$(git log --no-merges --format=%s "$m^1..$m" 2>/dev/null)',
+  // 管道的退出码默认是**最后一个命令**的：`git rev-list | while read` 里 rev-list 失败
+  // 会被整个吞掉，于是「路径配错 / 镜像没建好」变成一份空历史。所以这里两道都上：
+  // pipefail 兜住管道，rev-list 也不进管道——它的输出先落到变量里、单独查退出码。
+  'set -o pipefail',
+  'G="$1"',
+  // `--git-dir` 而不是 `cd`：与 `gitArgv` 同一约定；而且「配置里的路径是某个仓库的
+  // 子目录」时不会误读父仓（cd 进去再跑 git 会往上找到父仓的 .git）。
+  'git --git-dir="$G" rev-parse --git-dir >/dev/null || exit 10',
+  // $2 为空时 ${2:+...} 一个词都不展开；非空时**必须**整体引用成一个词，
+  // 否则 `--since=2026-07-01 00:00:00` 会被拆成「日期 + 一个叫 00:00:00 的引用」。
+  'mers=$(git --git-dir="$G" rev-list --merges ${2:+"--since=$2"} HEAD) || exit 11',
+  '[ -n "$mers" ] || exit 0',
+  'printf "%s\\n" "$mers" | while read -r m; do',
+  '  at=$(git --git-dir="$G" log -1 --format=%cI "$m")',
+  '  subj=$(git --git-dir="$G" log -1 --format=%s "$m")',
+  '  msgs=$(git --git-dir="$G" log --no-merges --format=%s "$m^1..$m" 2>/dev/null)',
   // 相对**第一父提交**的差异 = 这次合并真正带进来的文件。
-  '  files=$(git diff --name-only "$m^1" "$m" 2>/dev/null | grep -E "\\.(tsx?|jsx?|vue)\\$")',
+  '  files=$(git --git-dir="$G" diff --name-only "$m^1" "$m" 2>/dev/null | grep -E "\\.(tsx?|jsx?|vue)\\$")',
   '  printf "%s\\002%s\\002%s\\002%s\\002%s\\001" "$m" "$at" "$subj" "$msgs" "$files"',
   'done',
 ].join('\n');
+
+/** 脚本自己的退出码 → 一句人话（其余退出码交给 `runFailure` 兜）。 */
+const HISTORY_EXIT: Readonly<Record<number, string>> = {
+  10: '这个路径不是 git 仓库（`--git-dir` 认不出它，镜像可能没建好或路径配错）',
+  11: 'git rev-list 失败（引用不存在、镜像损坏或 --since 不被接受）',
+};
+
+/**
+ * `since` 只收 ISO 8601 的日期/时间（我们的增量逻辑自己给的值）。
+ *
+ * 为什么要在本地校验：`--since=garbage-date` 在 git 里**不报错**——按 approxidate
+ * 猜成一个日期、rev-list 退出 0、输出为空（实测 git 2.39）。也就是说「日期写错」
+ * 与「这个仓没有合并」在 git 那一层长得一模一样，只能在进来之前挡住。
+ */
+const HISTORY_SINCE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 
 /**
  * 脚本的 argv：本地是 `bash -lc <script> bash <path> [since]`，远端只是前面多一段
@@ -964,9 +989,13 @@ export async function mergeHistory(
   if ('ok' in resolved) return resolved;
 
   const since = opts.since?.trim() ?? '';
-  // since 会进远端 shell 的 argv（虽然是被引用的位置参数，仍不让它带换行/NUL）。
-  if (since !== '' && /[\r\n\0]/.test(since)) {
-    return fail('bad_config', `since 不合法：「${since}」（不能含换行）`);
+  // 日期在本地就挡住：git 对 `--since=garbage-date` 是**不报错**的（见 HISTORY_SINCE），
+  // 放进去只会得到一份空历史，和「这个仓没有合并」分不开。
+  if (since !== '' && !HISTORY_SINCE.test(since)) {
+    return fail(
+      'bad_config',
+      `since 不合法：「${since}」（要 ISO 8601，例如 2026-07-01、2026-07-01T00:00:00+08:00）`,
+    );
   }
 
   const argv = historyArgv(resolved.config, resolved.repo.path, since);
@@ -976,27 +1005,30 @@ export async function mergeHistory(
   const run = await runGit(argv, { timeoutMs: HISTORY_TIMEOUT_MS });
 
   const bin = argv[0] ?? 'bash';
-  if (run.spawnError !== null) return fail('git_failed', `${bin} 起不来（${run.spawnError}）`);
-  if (run.timedOut) {
-    return fail('timeout', `读合并历史超时：${HISTORY_TIMEOUT_MS / 1000} 秒内没有返回`);
-  }
+  // 报错必须点名是哪个仓：仓库路径配错是这里最常见的运维失误，一句「读取失败」
+  // 让人根本不知道去看哪一条配置。
+  const label = `${repoId}（${resolved.repo.path}）`;
   if (run.outputLimited) {
-    return fail('git_failed', `合并历史的输出超出缓冲上限（${bin} 的 stdout 被截断）`);
+    return fail('git_failed', `合并历史的输出超出缓冲上限，已拒收半份：${label}`);
   }
-  if (run.exitCode !== 0) {
-    const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
-    const detail = tail(run.stderr);
-    return fail('git_failed', `读合并历史失败（${code}）：${detail === '' ? '（stderr 是空的）' : detail}`);
+  const failure = runFailure(run, HISTORY_TIMEOUT_MS, bin);
+  if (failure !== null) {
+    const hint = run.exitCode === null ? null : HISTORY_EXIT[run.exitCode] ?? null;
+    const why = hint === null ? failure.message : `${hint}；${failure.message}`;
+    return fail(failure.code, `读合并历史失败：${label}：${why}`);
   }
 
   const out: MergeRecord[] = [];
   for (const rec of run.stdout.toString('utf8').split(REC)) {
     if (rec.trim() === '') continue;
     const parts = rec.split(FLD);
+    // 一条记录**恰好** 5 个字段；少一个就是被截断的残行，多一个说明提交标题里
+    // 混进了字段分隔符——两种都不猜，直接丢。
+    if (parts.length !== 5) continue;
     // 登录 shell 的 profile 可能往 stdout 吐一行东西（`bash -lc`）；sha 在字段 1 里
     // 用 40 位十六进制锚定，那一行就不会把第一条记录读歪。
     const sha = /[0-9a-f]{40}/.exec(parts[0] ?? '')?.[0];
-    if (sha === undefined || parts.length < 4) continue;
+    if (sha === undefined) continue;
     const [, at, subject, msgs, files] = parts;
     out.push({
       sha,
