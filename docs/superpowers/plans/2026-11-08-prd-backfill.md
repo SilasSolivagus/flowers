@@ -118,3 +118,132 @@ npx vitest run tests/prd-backfill.test.ts   # 10 条
 把「唯一」放宽成「至少一条」（`= 1` → `>= 1`，等价于「取第一条」的写法），同一个歧义
 场景立刻写成 2 行——证明那个 `= 1` 是承重的，不是防御性代码。种子文件本身也被钉住：
 203 条、标题两两不同、URL 都是 http(s)、标题无首尾空白。
+
+---
+
+## 8. owner 裁定之后的收尾（迁移 0026）
+
+### 8.1 裁定
+
+两个歧义标题各有两个候选，第 3 节「不猜」的结果是 4 条需求一条都没挂 PRD。owner 现在
+逐条判了：
+
+| 标题 | 编号 | 状态 | 裁定 |
+|---|---|---|---|
+| 用户部分权益缩减调整 | **PAN-338** | rejected | **删掉**（软删） |
+| 用户部分权益缩减调整 | **PAN-742** | queue | 保留，**补上** PRD 链接 |
+| 【风控】我的分享违规文件展示逻辑问题 | PAN-27 | live | 保留，**继续没有 PRD**（不填、不删） |
+| 【风控】我的分享违规文件展示逻辑问题 | PAN-206 | live | 保留，**继续没有 PRD**（不填、不删） |
+
+「已拒绝的那条删掉」是这个标题变成唯一的前提：删之前那个标题在表里有 2 行，0025 的
+第 4 道门（`count(*) = 1`）永远数出 2 条；删之后未删的行只剩 PAN-742，规则才成立。
+
+### 8.2 为什么是新开 0026，而不是重跑 `npm run prd:backfill`
+
+**选择：新编号迁移 `0026_prd_backfill_after_ruling.sql`。** 理由是实测出来的两条：
+
+1. **种子文件里没有那个标题**。`src/db/seeds/prd-url-backfill.json` 是 `--emit` 按
+   「需求侧唯一」筛出来的 203 条，两个歧义标题**从来不在里面**（`buildPlan` 把它们
+   收进 `ambiguous`，不进 `pairs`）。所以 `npm run prd:backfill --apply` 重跑 0025 时，
+   种子表里根本没有「用户部分权益缩减调整」这一行 —— 它设计上就是「重放已判定过的那
+   203 条」，不会因为库里的数据变了而自己长出新的配对。
+2. **0025 的判据数的是全表**。就算种子表里有那一行，`(select count(*) ... where
+   r2.title = s.title) = 1` 连软删的行一起数，删掉 PAN-338 之后仍然是 2 → 照样命中
+   0 行。「删一条」本身**不会**让 0025 的规则自动生效，差的是「数哪些行」。
+
+所以 0026 做三件事，各一段、各带守卫：
+
+| 段 | 做什么 | 判据 |
+|---|---|---|
+| 1 | 软删 PAN-338 | `number = 338` **且** `legacy_ref is not null` **且** `state = 'rejected'` **且** 未删；命中不是 1 行就 `raise exception` 停下 |
+| 2 | 把裁定选定的那份文档写进 `prd_url_backfill_seed`（1 行） | `title` 是主键 → 文档侧同题唯一由表的形状保证 |
+| 3 | `update ... from prd_url_backfill_seed` 补 PAN-742 | 0025 的四道门原样，**只把「唯一」从「全表唯一」改成「未删的行唯一」** |
+| 4 | 自检 | 删对了（未删的迁移行里该标题唯一）且填上了（`prd_url` = 裁定 URL） |
+
+第 3 段不按 `number = 742` 点名：判据是「标题全等 + 未删的行唯一」，今天那一条正好是
+PAN-742。哪天再冒出第二条未删的同题需求，这条 `update` 会自己停下（命中 0 行）而不是
+挑一条 —— 与 0025 拒写歧义的理由完全一样。
+
+URL 只出现在第 2 段一处，来源是本文第 3 节记录的那份文档，同日 `ssh dogyun` 只读复核过
+与 Flower `documents.external_url` 原文一致。
+
+**幂等**：第二遍第 1 段走「已经删过」分支（0 行）、第 2 段 `on conflict` 0 行、第 3 段
+`prd_url is null` 不成立（0 行）、第 4 段照旧通过。**空库**（新克隆 / CI）：`number = 338`
+那行不存在 → 第 1 段什么都不做，第 3 段命中 0 行，不报错（与 0025「种子为空 → 0 行」同一种
+正常结果）。但**那行在、判据却对不上**时（不是迁移行 / 不是 rejected）一定抛错：宁可让
+迁移红着，也不猜一条要删掉的真实数据。
+
+### 8.3 动到的两行（执行后实测）
+
+| PAN | `requirements.id` | 动作 | 结果 |
+|---|---|---|---|
+| **PAN-338** | `7b823110-584d-416f-8de0-01ae9101e783` | 软删 | `deleted_at = 2026-11-07 23:34:57.133398+00`，`state` 仍 `rejected`，`legacy_ref` 仍 `123bd3a8-…` |
+| **PAN-742** | `23bc6d1f-fd72-459f-86ec-55f83190bfc1` | 写 `prd_url` | `https://doc.weixin.qq.com/doc/w3_AY0AtQboAD4CNh0SmhkawQQeGX256?scode=ALgASwf6AA00dBNilLAY0AtQboAD4` |
+
+PAN-27 / PAN-206 一个字节没动（`state = live`、`deleted_at` 为空、`prd_url` 仍为 null）。
+
+### 8.4 计数（执行前后，均为实测）
+
+| 时刻 | 未删需求 | 未删且 `legacy_ref` 非空 | `deleted_at` 非空 | `prd_url_backfill_seed` |
+|---|---|---|---|---|
+| 执行前 | 815 | 803 | 0 | 203 |
+| 执行后 | **814** | **802** | **1** | 204 |
+| 0026 第二遍 | 814 | 802 | 1 | 204（0 条变化） |
+
+- `用户部分权益缩减调整`：未删 **1** 条（PAN-742），且 **有** `prd_url`；
+- PAN-27 / PAN-206：都还在（`live`），`prd_url` 都还是 null；
+- 表里总行数仍是 815 —— 软删不动行数，这是它唯一的区别。
+
+### 8.5 软删后留下的孤儿行（清单）
+
+软删不级联，引用 PAN-338 的行全部留在表里。六张带 `requirement_id` 的表逐张数过：
+
+| 表 | 行数 | 说明 |
+|---|---|---|
+| `events` | **1** | `seq 378` · `requirement.migrated` · actor `migrate-flower` · 2026-11-07 16:00:32Z（payload 里 `sourceNumber: 775`、`sourceState: "rejected"`） |
+| `review_assignments` | 0 | — |
+| `uemaster_artifacts` | 0 | — |
+| `uemaster_jobs` | 0 | — |
+| `prd_snapshots` | 0 | — |
+| `locate_runs` | 0 | — |
+| `notify_deliveries` | 0 | 那条事件从未投递过（`event_seq = 378` 无行） |
+
+**这一条孤儿事件不渲染在任何地方。** 逐个读路径实测（`cards` = 看板卡片、`notices` = 铃铛）：
+
+| 读路径 | 结果 |
+|---|---|
+| 看板 `getBoard()` | 814 张卡，**PAN-338 不在**，PAN-742 在 |
+| 抽屉 `getRequirementDetail(PAN-338)` | `null`（404，`:633` 的 `deleted_at is null` 挡住） |
+| 产物 `listArtifacts(PAN-338)` | 0 份 |
+| PRD `readPrd(PAN-338)` | `missing_prd_url`（空链接先于抓取返回，**不会**建出 `prd_snapshots`，也不会记 `prd.fetched`） |
+| 通知 `notificationsFor()` | 7 条里没有 PAN-338；`ALIVE = (r.deleted_at is null or e.requirement_id is null)` 把 `seq 378` 整条滤掉（按同口径数出来 **0 条**，而原表里是 1 条） |
+
+也就是说：**孤儿行只存在于直接 SQL 里**，界面、MCP 列表、通知、导出都看不见它。
+
+### 8.6 顺带查出来的两处口径漏洞（本次未改，记录在案）
+
+1. **`src/core/prd/read.ts:60` 没有 `deleted_at is null`** —— 唯一一处按 id 读需求却不过
+   软删判据的读路径。今天伤不到人（PAN-338 的 `prd_url` 是空的，先撞 `missing_prd_url`），
+   但一条**有** PRD 的软删需求，`readPrd` 仍能抓 doc 并写一份 `prd_snapshots` + 一条
+   `prd.fetched` 事件 —— 那就成了「一条不在板上的需求还在产出快照」。
+2. **`src/core/requirements/lock.ts:51` 的 `lockRequirement` 不带 `deleted_at is null`** ——
+   所有状态动作（提交评审 / 评审 / 排期 / 打回 / 认领 / 转交）都走它，理论上软删的行仍可被
+   推进并写出事件。对 PAN-338 不成立（`state = 'rejected'` 在迁移表里没有出边，任何动作都撞
+   `illegal_transition`），但换个状态被软删就会踩到。
+
+另一件留给后来人的事：`scripts/prd-backfill.ts` 的 `loadRequirements` / `buildPlan` 仍把
+软删的行算进「同题需求」的计数里，所以现在 `npm run prd:backfill:emit` 重新生成种子时，
+「用户部分权益缩减调整」**仍会被判为歧义、不进种子文件**（203 条不变）。这不影响已落库
+的数据（`prd_url` 已有值，`prd_url is null` 那道门永不覆盖），但下次 emit 之后种子文件与
+库会差这一条 —— 要么让 `buildPlan` 也按未删的行分组，要么把这一条单独记住。
+
+### 8.7 复现
+
+```bash
+npm run db:migrate                                  # 0026：空库上是 0 行（不报错）
+docker exec flowers-db-1 psql -U postgres -d flowers -f /dev/stdin \
+  < src/db/migrations/0026_prd_backfill_after_ruling.sql   # 第二遍：0 行
+```
+
+不碰的东西：`src/core/locate/*`、`src/db/reset.ts`、除 0026 外的任何迁移；没跑 `git clean`；
+没有新依赖。
