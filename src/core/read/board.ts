@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
@@ -6,6 +6,7 @@ import { DEADLINE_LABEL, shanghaiDayOf, type DeadlineField } from '../clock/tick
 import { currentMember } from './member.js';
 import { memberByName } from '../auth/members.js';
 import { can } from '../auth/roles.js';
+import { NO_FILTER, type BoardFilter } from './board-filter.js';
 
 /**
  * 看板的 10 列，顺序就是 spec §3 的流程顺序（从左到右走一遍流程）。
@@ -345,11 +346,81 @@ export function lateDeadline(
 }
 
 /**
- * 看板：一条 SQL 取全部需求，按状态分组在 JS 里做。
+ * 一次看板读取的完整结果：十列 + 两个数字（工具条上那行「筛出 N / M」）。
+ *
+ * 为什么不只返回十列：`N` 可以数卡片得到，`M` 不行——它是**全库**未删需求数，
+ * 与这次筛选无关，任何一列里都没有它的痕迹。所以它必须由读模型一起给出，
+ * 页面不许自己再连库算一次（那会是第二份口径，筛完分母对不上分子时没人查得出来）。
+ */
+export type BoardView = {
+  columns: BoardColumn[];
+  /** 筛后还剩几条 = 十列卡片数之和。 */
+  shown: number;
+  /** 全库未删需求总数（分母）。筛选不影响它。 */
+  total: number;
+  /**
+   * 这次 SQL **返回了多少行**。
+   *
+   * 与 `shown` 永远相等——除非哪天有人把过滤搬回 JS：那种实现下 `scanned` 仍是
+   * 全库行数（815），而 `shown` 只有筛出来的十几条，于是两个数自己说了实话。
+   * 它是留给「过滤到底在不在库里」这条用例的证词，页面不显示它。
+   */
+  scanned: number;
+};
+
+/**
+ * 筛选条件 → SQL 的 where。
+ *
+ * 为什么要在 SQL 里做，而不是取回 815 行再 `.filter()`：**列头那个计数**就是被筛的
+ * 那个数。JS 过滤只能改卡片，要改计数就得在页面里再数一遍，于是「这一列有几条」
+ * 有两个来源；而筛选是全局的（筛「未指定负责人」时，收集列从 284 条变成十几条），
+ * 那是一块板子的形状，不是一个列表的截断。
+ *
+ * 三个条件各占一个子句，`sql.join` 拼起来，参数全部走绑定：
+ *
+ * - `q`：只打在 `r.title` 上（`ilike`，ASCII 大小写不敏感、中文原样子串）。
+ *   **不搜编号、不搜六问**——这是 owner 的裁决，理由写在 `board-filter.ts` 文件头。
+ *   搜索词里的 `%` `_` `\` 先转义：用户输入的是**字面量**，一个 `%` 不该变成
+ *   「匹配一切」。
+ * - `owner=me`：用已经 join 上的 `m.name`（`m` 就是 `r.owner_member_id` 那一行）。
+ *   **必须**走这个判断而不是 `r.owner_member_id = <我> and ...` 之类的重写：
+ *   同一条口径写在两处，早晚一处改了另一处没改。
+ * - `owner=<id>`：绑定成 `uuid`。解析器只放行 UUID 形状（`board-filter.ts`），
+ *   所以这里的 `::uuid` 不会因为手改的 URL 而炸。
+ */
+function boardWhere(filter: BoardFilter, viewer: string): SQL {
+  const clauses: SQL[] = [sql`r.deleted_at is null`];
+
+  if (filter.q !== '') {
+    // `%` `_` 是 LIKE 的通配符，`\` 是它的转义符（PG 默认）。三者都要转成字面量，
+    // 否则搜「100%」会匹配到全部。反斜杠必须**先**转（顺序写反会把刚加上的 \ 再转一遍）。
+    const literal = filter.q.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+    clauses.push(sql`r.title ilike ${`%${literal}%`}`);
+  }
+
+  switch (filter.owner.kind) {
+    case 'me':
+      clauses.push(sql`m.name = ${viewer}`);
+      break;
+    case 'none':
+      clauses.push(sql`r.owner_member_id is null`);
+      break;
+    case 'member':
+      clauses.push(sql`r.owner_member_id = ${filter.owner.id}::uuid`);
+      break;
+    case 'all':
+      break;
+  }
+
+  return sql.join(clauses, sql` and `);
+}
+
+/**
+ * 看板：一条 SQL 取（筛后的）全部需求，按状态分组在 JS 里做。
  *
  * 一条 SQL 的理由：10 列 × 每列一次查询 = 11 次往返，而且列之间的排序口径会分叉。
- * 分组、排序、算天数都是纯内存，行数只有几十到几百（这是「一个团队的需求」，
- * 不是日志表）；真涨到需要分页时，改的是这一条 SQL 的 where。
+ * 分组、排序、算天数都是纯内存；筛选不进这一步——它在 where 里（见 `boardWhere`），
+ * 所以到这里的时候，内存里**从来没有**过没筛的行。
  *
  * left join（不是 inner join）：没有负责人、没有版本、没有派单的需求必须出现在看板上
  * ——它们是「还卡在收集 / 等排期」的常态，不是脏数据。
@@ -357,7 +428,9 @@ export function lateDeadline(
  * `me` 不给就向 cookie 要（页面用）；给了就按它算 `mine`（用例与脚本用这个口子，
  * 免得为了测一行标签去伪造一个请求上下文）。
  */
-export async function getBoard(me?: string): Promise<BoardColumn[]> {
+export async function readBoard(
+  me?: string, filter: BoardFilter = NO_FILTER,
+): Promise<BoardView> {
   const who = me ?? (await currentMember());
   const today = shanghaiToday();
   /**
@@ -397,11 +470,30 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
       -- 软删除的版本 join 不上：那条需求的排期字段仍在（历史事实），但版本名与
       -- 开工日不该再出现在卡片上（P4-02 的「删掉的版本从看板标签里消失」）。
       left join releases rel on rel.id = r.release_id and rel.deleted_at is null
-     where r.deleted_at is null
+     where ${boardWhere(filter, who)}
      order by r.number`);
+
+  /**
+   * 分母：全库未删需求数。
+   *
+   * 单独一条而不是塞进上面那条 `count(*) over ()` 或一个相关子查询：窗口函数给的是
+   * **筛后**的计数（那是分子），相关子查询在空结果时连一行都返回不出来——而
+   * 「筛出 0 / 815」正是最需要分母的时刻。两个数本来就是两件事，两条查询各算各的。
+   * where 复用 `boardWhere(NO_FILTER, …)`：两边对「什么算一条需求」只有一个来源，
+   * 否则手改一次判断就会出现「筛出 12 / 814」这种没人说得清的分母。
+   */
+  const totalRes = await db.execute<{ n: number }>(sql`
+    select count(*)::int as n
+      from requirements r
+      left join members m on m.id = r.owner_member_id
+     where ${boardWhere(NO_FILTER, who)}`);
 
   // 列直接建出来，byState 只是它的索引：卡片推进 Map 里的数组，就是推进要返回的那个
   // 数组本身。所以最后一步不必再按 state 查一次，也就不存在「取不到」这条分支。
+  //
+  // 十列**无论筛出几条都要全建**：某列筛完是 0 条时列仍然在（计数显示 0）。
+  // 按结果动态删列会让看板每筛一次就换一个形状，而「收集列还在、只是空的」本身
+  // 就是一条信息（那一步现在没事可做），比「列消失了」有用得多。
   const columns: BoardColumn[] = BOARD_STATES.map((state) => ({
     state,
     label: STATE_LABEL[state],
@@ -451,5 +543,23 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
     });
   }
 
-  return columns;
+  return {
+    columns,
+    shown: res.rows.length,
+    total: Number(totalRes.rows[0]?.n ?? 0),
+    scanned: res.rows.length,
+  };
+}
+
+/**
+ * 只看十列的旧签名（MCP 与用例都在用）。
+ *
+ * `filter` 是可选的第二参数：不传就是「不筛」，与这个文件以前的行为逐字一致。
+ * 新代码要分母（工具条上那行「筛出 N / M」）时用 `readBoard`——它多给两个数字，
+ * 别的没有区别。
+ */
+export async function getBoard(
+  me?: string, filter: BoardFilter = NO_FILTER,
+): Promise<BoardColumn[]> {
+  return (await readBoard(me, filter)).columns;
 }
