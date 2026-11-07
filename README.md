@@ -16,11 +16,12 @@
 git clone <repo> flowers && cd flowers
 npm install
 
-npm run db:up        # 起 postgres（docker compose up -d db）
-npm run db:migrate   # 建表，幂等，可反复跑
-npm run seed         # 灌演示数据（12 条需求铺满 10 列、5 个成员、2 个版本）
+npm run db:up           # 起 postgres（docker compose up -d db）
+npm run db:migrate      # 建成表，幂等，可反复跑（演示库 flowers）
+npm run db:test:setup   # 建测试库 flowers_test + 跑同一批迁移，幂等
+npm run seed            # 灌演示数据（12 条需求铺满 10 列、5 个成员、2 个版本）
 
-npm run dev          # http://localhost:3000
+npm run dev             # http://localhost:3000
 ```
 
 要跑生产构建：
@@ -33,7 +34,8 @@ npm start            # http://localhost:3000
 自检命令：
 
 ```bash
-npx vitest run       # 287 个用例（领域 + 读模型 + 时钟 + 并发 + 重置守卫 + UEmaster 任务包与 attach）
+npx vitest run       # 1223 个用例（1222 通过 + 1 跳过）：领域 + 读模型 + 时钟 + 并发 + 重置守卫 + UEmaster 任务包与 attach
+                     # 跑的是独立库 flowers_test，**不碰演示库 flowers**
 npx tsc --noEmit     # 类型检查
 npm run demo         # 领域冒烟脚本：一条需求从收集走到上线，8 步逐项对齐，退出码 0 = 通过
 ```
@@ -240,14 +242,22 @@ mcp/
 `.js → .ts`，而这条只有 webpack 认。所以 `package.json` 里两个脚本都写死了
 `next dev -p 3000 --webpack` / `next build --webpack`。
 
-**二、`resetDb()` 清空的是 `DATABASE_URL` 指向的那个库；`npm run seed` 不带 `--reset` 会拒绝。**
-`resetDb()` 直接 truncate 六张表（脚本里另有 `current_database()` 守卫，只放行名为 `flowers` 的库）。
-测试用例跑的就是这张 `flowers`，所以 **`npx vitest run` 会把演示数据清掉**——跑完测试或 `npm run demo`
-之后，界面会是空的，要补一次：
+**二、`resetDb()` 清空的是 `DATABASE_URL` 指向的那个库；测试进程连的是另一张库。**
+`resetDb()` 直接 truncate 十一张表，守卫就在 truncate 前面（`src/db/reset.ts`），口径分两条：
+
+- **测试进程**（`VITEST=true` 或 `NODE_ENV=test`）：只放行名字以 `_test` 结尾的库。默认落到
+  `flowers_test`，可用 `TEST_DATABASE_URL` 整条覆盖。**故意不看 `FLOWERS_ALLOW_RESET`**——
+  写错配置指到 `flowers` 时，`resetDb()` 会当场抛错、一张表都不清，而不是悄悄把演示数据截断。
+- **非测试进程**（`scripts/seed.ts`、`scripts/demo.ts`）：库名是 `flowers`，或显式
+  `FLOWERS_ALLOW_RESET=1`。这两个脚本清的是演示库，跑完要补：
 
 ```bash
 npm run seed -- --reset
 ```
+
+于是 `npx vitest run` 与演示库彻底分开：测试前后 `requirements` 的 12 条 id 集合逐条不变，
+`app_settings` 的 provider / 镜像配置也不会被清掉。新克隆仓库先 `npm run db:test:setup` 一次
+（幂等，测试库不在时才建、迁移永远按最新一批补齐）。
 
 `npm run seed` 不加 `--reset` 只在空库上灌，这是刻意的：一个已经有人用的库不该被演示数据覆盖。
 

@@ -25,7 +25,16 @@ P0 排在最前不是洁癖：这一场我被「跑一次测试 → 演示库清
 
 ---
 
-## P0 · 测试用独立数据库
+## P0 · 测试用独立数据库（已完成，见 `2026-11-07-p0-test-db.md`）
+
+**状态**：已实施。与下面这份原计划有三处出入，按实测改写：
+
+1. 库选择抽成纯函数 `resolveDatabaseUrl(env)`（`src/db/url.ts`），`client.ts` 只负责建 Pool。
+2. 守卫**不放在脚本里、放进 `resetDb()` 自身**（truncate 之前），判据不是白名单
+   `['flowers','flowers_test']`，而是「测试进程只放行名字以 `_test` 结尾的库，且故意不看
+   `FLOWERS_ALLOW_RESET`」——白名单只认识一个名字，且挡不住 `FLOWERS_ALLOW_RESET=1` 这条捷径。
+   配置指错时 `resetDb()` 当场抛错、一张表都不清，比「静默截断」强。
+3. 建库脚本是 `scripts/db-test-setup.ts`，命令即计划里的 `npm run db:test:setup`（幂等）。
 
 **目标**：`npx vitest run` 不再碰 `flowers`，改碰 `flowers_test`。
 
@@ -39,7 +48,8 @@ P0 排在最前不是洁癖：这一场我被「跑一次测试 → 演示库清
 - 全量测试绿，且 `flowers` 的 12 条演示数据在测试前后逐条相同（比 id 集合）。
 - `flowers_test` 里表结构与 `flowers` 一致（迁移跑过）。
 
-**风险**：`scripts/*` 里有脚本直连 `flowers`，若它们被测试间接调用会写错库——扫一遍 `db/client` 的引入点。
+**风险**（已扫）：`scripts/*` 里有脚本直连 `flowers`，若它们被测试间接调用会写错库——扫一遍 `db/client` 的引入点。
+实测：脚本只被人工调用，用例里的 `execFile` 只起 `git` / `python3`，没有任何子进程会跑 `scripts/*`；且脚本走的是同一条 `db/client`，测试进程里自然落到 `flowers_test`。清单见报告第 7 节。
 
 ---
 
