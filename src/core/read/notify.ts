@@ -83,11 +83,13 @@ export type Notice = {
   /** 事件类型原文（`requirement.auto_test` 这种）。 */
   type: string;
   /**
-   * 这条通知指向的需求；`null` = **成员级**提醒（P2 的企微绑定自愈）。
+   * 这条通知指向的需求；`null` = **成员级 / 全局级**提醒（P2 的企微绑定自愈，
+   * 2026-11-08 起再加 `clock.tick_skipped`）。
    *
    * 三列一起可空，因为它们回答的是同一件事（「打开哪一条」）。一条
-   * `member.wecom_unlinked` 没有需求可挂——它的动作是「去设置里点查一下」，
-   * 给它编一个 PAN 编号或者挂到某条需求上都会点开一个无关的抽屉。
+   * `member.wecom_unlinked` 没有需求可挂——它的动作是「去设置里点查一下」，给它编一个
+   * PAN 编号或者挂到某条需求上都会点开一个无关的抽屉。一条 `clock.tick_skipped` 说的是
+   * 「这一轮有 N 条钟推不动」，挂到其中一条上只会点开那一行，而要看的是那一批。
    */
   requirementId: string | null;
   number: number | null;
@@ -199,7 +201,47 @@ export function memberLineOf(type: string, payload: Payload): string {
     }
     return `「${name}」还没对上企微账号，通知发不出去——去设置里点一次「查一下」`;
   }
+  if (type === 'clock.tick_skipped') {
+    // 一行说清三件事：有多少条钟推不动、分别是哪几条（点名，超管才找得到）、
+    // 以及「它不会自己好」。只报一个数字等于把诊断丢给人，他要的是下一步动作。
+    const count = typeof payload.count === 'number' ? payload.count : 0;
+    const numbers = Array.isArray(payload.numbers)
+      ? payload.numbers.filter((value): value is number => typeof value === 'number')
+      : [];
+    const more = typeof payload.more === 'number' ? payload.more : 0;
+    const named = numbers.map((number) => `PAN-${number}`).join('、');
+    const range = more > 0 ? `${named}…（另有 ${more} 条）` : named;
+    const reasons = reasonSummary(payload.reasons);
+    const tail = reasons === null ? '' : `：${reasons}`;
+    return `时钟跳过 ${count} 条需求${range === '' ? '' : `（${range}）`}${tail}——这几行的日期或排期版本坏了，不补就永远不会自己往前走`;
+  }
   return '有一条成员提醒';
+}
+
+/**
+ * `{ 缺少提测日: 21, 没有排期版本: 17 }` → `缺少提测日 21 · 没有排期版本 17`。
+ *
+ * 读不懂（老形状、手改的坏值）就返回 null 而不是猜：一句错的原因比没有原因更坏。
+ * 顺序按条数降序，让「主要是哪一类坏」先出来。
+ */
+function reasonSummary(raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const pairs = Object.entries(raw as Record<string, unknown>)
+    .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if (pairs.length === 0) return null;
+  return pairs.map(([reason, count]) => `${reason} ${count}`).join(' · ');
+}
+
+/**
+ * 成员级 / 全局级提醒在企微消息里的抬头。
+ *
+ * 与 `memberLineOf` 同一个理由：两类提醒共用一个「第一行」，写死一句「企微绑定提醒」
+ * 会让时钟跳过的那条推送顶着错误的标题——而这两件事要读者做的事完全不同。
+ */
+export function memberHeadlineOf(type: string): string {
+  if (type === 'clock.tick_skipped') return '时钟推进提醒';
+  return '企微绑定提醒';
 }
 
 /** 铃铛里的一整行：编号 + 标题 + 句子；没有需求的那一类只给句子。 */
@@ -290,11 +332,13 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
     ? sql`(e.requirement_id is not null and e.actor <> ${member.name}${inMyLine})`
     : sql`false`;
 
-  // 成员级提醒（P2「企微绑定自愈」）：**只有超管收**。它没有「谁的线」可锚——绑不上的
-  // 人属于名册，不属于某条需求；而能修它的人是超管（设置页的「查一下」）。
+  // 成员级 / 全局级提醒（P2「企微绑定自愈」，2026-11-08 起再加时钟跳过）：**只有超管收**。
+  // 它们没有「谁的线」可锚——绑不上的人属于名册、推不动的行属于数据，都不属于某条需求；
+  // 而能修它们的人都是超管（设置页的「查一下」/ 排期里的日期与版本）。
   // 并且刻意**不**排除自己做的动作：这一条是 `actor = 'system'` 写下的，不属于任何人。
   const memberAlert = admin
-    ? sql`(e.requirement_id is null and e.type = 'member.wecom_unlinked')`
+    ? sql`(e.requirement_id is null
+           and e.type in ('member.wecom_unlinked', 'clock.tick_skipped'))`
     : sql`false`;
 
   return sql`((${base} or ${fanout} or ${memberAlert}) and ${levelFilter(level)})`;
@@ -430,10 +474,11 @@ export async function pendingDeliveries(
   return res.rows.map((row) => {
     const payload = parsePayload(row.payload);
     const number = row.number === null ? null : Number(row.number);
-    // 成员级提醒：没有需求编号可加粗，第一行给一个「这是什么」的抬头，第二行仍是
-    // 同一句话（铃铛里那一行的 `memberLineOf`）——两个频道说同一句话那条规矩不变。
+    // 成员级 / 全局级提醒：没有需求编号可加粗，第一行给一个「这是什么」的抬头，
+    // 第二行仍是同一句话（铃铛里那一行的 `memberLineOf`）——两个频道说同一句话那条
+    // 规矩不变。抬头按事件类型分（绑定自愈 vs 时钟跳过），否则推送会顶错标题。
     const headline = number === null || row.title === null
-      ? '企微绑定提醒'
+      ? memberHeadlineOf(row.type)
       : keyOf(number, row.title);
     const sentence = number === null
       ? memberLineOf(row.type, payload)

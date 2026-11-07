@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import type { Member } from '../auth/roles.js';
 import { tick } from '../clock/tick.js';
+import type { Skipped } from '../clock/skips.js';
 import { pendingDeliveries, type DeliveryCandidate } from '../read/notify.js';
 import { prefsOf, type Level } from './prefs.js';
 import { checkWecomBindings, type BindingAlert } from './self-heal.js';
@@ -319,9 +320,15 @@ function clampLimit(value: number | undefined): number {
  */
 export async function tickThenDispatch(
   database: Db, now: Date, opts: DispatchOptions = {},
-): Promise<{ moved: number; summary: DispatchSummary; alerts: BindingAlert[] }> {
-  const { moved } = await tick(database, now);
+): Promise<{
+  moved: number;
+  /** 这一轮被跳过的坏行（原因在每一行上）。空数组 = 全场都推进了或还没到点。 */
+  skipped: Skipped[];
+  summary: DispatchSummary;
+  alerts: BindingAlert[];
+}> {
+  const { moved, skipped } = await tick(database, now);
   const summary = await dispatchWecom(database, opts);
   const alerts = opts.dryRun === true ? [] : await checkWecomBindings(database, now);
-  return { moved: moved.length, summary, alerts };
+  return { moved: moved.length, skipped, summary, alerts };
 }

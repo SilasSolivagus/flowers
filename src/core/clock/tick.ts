@@ -6,6 +6,11 @@ import {
   STATE_LABEL, assertTrigger, clockTransitions, type State,
 } from '../state-machine.js';
 import { moveTo } from '../requirements/lock.js';
+import { notifySkipped, type SkipField, type Skipped } from './skips.js';
+
+/** 跳过的那一行的形状（定义在 `skips.ts`，与那条提醒共用一份）。 */
+export type { SkipField, Skipped } from './skips.js';
+export { EVENT_CLOCK_SKIPPED } from './skips.js';
 
 type Moved = { id: string; from: State; to: State };
 
@@ -101,10 +106,10 @@ export function startOfShanghaiDay(day: string): Date {
 /**
  * 读取一行上某个日期列对应的「天」，缺失或解析不出来就抛 AppError。
  *
- * 不静默跳过：被跳过的行是**永远不推进**的需求——它停在「待开发/开发中/测试中」
- * 却没有任何人会被提醒。缺 release_id、缺提测日、缺承诺完成日都只可能来自
- * 越过了 schedule / bounce 的直接写库（或数据损坏），值得让 tick 整次失败、
- * 在日志里喊出来，而不是每 15 分钟安静地放过它。
+ * 抛的是**这一行**的问题，不是这一轮的问题：`tick` 接住它、把这一行记进 `skipped`
+ * 然后继续（见 `judgeRow` 与下方 tick 的注释）。缺 release_id、缺提测日、缺承诺
+ * 完成日都只可能来自越过 schedule / bounce 的直接写库（或数据损坏），所以必须喊
+ * 出来——但喊的方式是「记一行账 + 给超管一条提醒」，不是「整轮停摆」。
  */
 export function deadlineDay(
   raw: string | null,
@@ -134,6 +139,8 @@ export function deadlineDay(
  * 单看开工日会漏掉一格：`dev` / `test` 行不看 `window_start`，所以 `release_id = null`
  * 的 dev 行会一路被推到 test、再到 live —— 没有开工日就意味着没有版本，这一类行是
  * 损坏数据，不是「还不到点」。所以版本先查，三个状态一视同仁地报出来。
+ *
+ * 与 `deadlineDay` 一样，这里抛的是**这一行**的问题；由 tick 接住并记进 `skipped`。
  */
 function assertHasRelease(
   releaseId: string | null,
@@ -145,6 +152,76 @@ function assertHasRelease(
       `需求 ${ctx.requirementId} 处于「${STATE_LABEL[ctx.state]}」但没有排期版本，无法自动推进`,
     );
   }
+}
+
+/**
+ * 这两个 code 表示「**这一行的数据**坏了」，不是「这一轮跑不动」：
+ * 缺版本 / 缺那一格日期 / 日期解析不出来。tick 接住它们之后只跳过这一行；
+ * 其余任何错误（库连不上、SQL 写错、状态机配置错）照旧抛出、整轮回滚。
+ *
+ * 拿 code 判而不是拿 `instanceof` 判完就算：`clockEdges()` 也会抛
+ * `clock_missing_deadline`（状态机表里多出一条没有日期列的 clock 边），那是**代码**
+ * 问题、必须致命。它抛在取行之前、也不经过这里，所以两件事不会混。
+ */
+function isRowDataError(error: unknown): error is AppError {
+  return error instanceof AppError
+    && (error.code === 'clock_missing_deadline' || error.code === 'clock_bad_deadline');
+}
+
+/** 一行在这一次 tick 里的判定：推一步 / 还没到点 / 跳过。 */
+type Verdict =
+  | { kind: 'advance'; to: State }
+  | { kind: 'wait' }
+  | { kind: 'skip'; field: SkipField; reason: string };
+
+/**
+ * 判定一行。**唯一会把「行的问题」翻译成「跳过」的地方。**
+ *
+ * 三种结果对应三种处置：
+ * - `advance`：写状态 + 一条事件；
+ * - `wait`：今天还没到点，什么也不做（这是绝大多数行的答案）；
+ * - `skip`：这一行的数据坏了一格，记一行原因，**这一行原样不动**，其余行照常推进。
+ *
+ * 为什么不是「抛出去让整轮失败」：迁移 `0024` 之前 803 条迁入行没有 `release_id`，
+ * 于是 tick 从迁移那天起一轮都没跑完过——状态不动、超时提醒不响、推送不发、自愈
+ * 检查轮不到。一条坏数据停掉了全场的钟，而看板看起来只是「今天没活」。
+ * 所以：坏行只影响它自己（裁定 2026-11-08）。
+ *
+ * 导出是给用例用的：`clock.test.ts` 要钉住「日期读不懂」那一格（列是 timestamptz，
+ * 真库里写不进坏字符串，只能对着这个纯判定断言）。
+ */
+export function judgeRow(
+  row: {
+    id: string; state: State; release_id: string | null;
+    window_start: string | null; commit_test_at: string | null; commit_due_at: string | null;
+  },
+  edge: { from: State; to: State; field: DeadlineField },
+  today: number,
+): Verdict {
+  try {
+    assertHasRelease(row.release_id, { requirementId: row.id, state: row.state });
+  } catch (error) {
+    if (!isRowDataError(error)) throw error;
+    return { kind: 'skip', field: 'release_id', reason: '没有排期版本' };
+  }
+
+  let day: number;
+  try {
+    day = deadlineDay(row[edge.field], {
+      requirementId: row.id, state: row.state, field: edge.field,
+    });
+  } catch (error) {
+    if (!isRowDataError(error)) throw error;
+    const label = DEADLINE_LABEL[edge.field];
+    return {
+      kind: 'skip',
+      field: edge.field,
+      // 「缺」与「填了但读不懂」是两种修法（补日期 / 改日期），所以分开说。
+      reason: error.code === 'clock_bad_deadline' ? `${label}不是有效时间` : `缺少${label}`,
+    };
+  }
+
+  return today < day ? { kind: 'wait' } : { kind: 'advance', to: edge.to };
 }
 
 
@@ -163,8 +240,23 @@ function assertHasRelease(
  * 的行（READ COMMITTED 的 EPQ 语义），于是看到 dev 且提测日未到、什么也不推，
  * 而不是两个事务都按 ready 处理、各写一条事件、把状态推两步。
  * order by id 固定加锁顺序，避免多行时两个 tick 交叉加锁死等。
+ *
+ * ── 坏行只影响它自己（裁定 2026-11-08：一条坏数据不许停掉全场）
+ *
+ * 每一行先过 `judgeRow`：数据坏的行走 `skipped`（带中文原因、原样不动），其余行
+ * 照常推进。理由不是「宽容」，是血：迁移 `0024` 之前 803 条迁入行没有 `release_id`，
+ * 于是 tick 从迁移那天起**一轮都没跑完过**——状态不推进、超时提醒不响、推送不发、
+ * 企微自检永远轮不到。全场停摆，而症状只是「看板不动」。迁移把 34 条缺日期的行退回
+ * queue，顺手清掉了现场，但机制没动：下一行坏数据会再停一次。
+ *
+ * 跳过**不是静默**：一轮里有跳过就在最后给超管写一条提醒（`skips.ts`，每天最多一条，
+ * 点名条数与需求编号），并且 `skipped` 作为返回值的一部分交给调用方（测试、脚本、
+ * 报告都读它）。真正的**整轮**错误仍然致命：`now` 不合法、库连不上、取行 SQL 写错、
+ * 状态机表多出一条没有日期列的 clock 边（`clockEdges`）、`assertTrigger` 不认这条边、
+ * moveTo / recordEvent 失败——这些都不是「某一行数据坏了」，跳过它们等于把系统性的
+ * 错误藏起来。
  */
-export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
+export async function tick(db: Db, now: Date): Promise<{ moved: Moved[]; skipped: Skipped[] }> {
   // now 是 Invalid Date 时所有比较都是 false，表现为「什么都没到点」——最坏的一种
   // 静默失败（时钟停了但日志一片安静），所以在入口就拦掉。
   const nowMs = now.getTime();
@@ -180,19 +272,22 @@ export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
   // 当普通参数发出、PG 推不出 text[] 类型；逐个参数 join 成 in (...) 才是确定的。
   const states = sql.join(edges.map((e) => sql`${e.from}`), sql`, `);
 
-  return db.transaction(async (tx) => {
+  const round = await db.transaction(async (tx) => {
     const moved: Moved[] = [];
+    const skipped: Skipped[] = [];
 
     // 要看哪些状态，也由 clockEdges 决定：表里没有 clock 行的状态不该被取出来。
     // left join + 把 rel.id 也取出来：没有 release_id 的行（三个状态都一样）必须
-    // 被取出来报错。inner join 会让它从结果里消失——正是「静默跳过」。
+    // 被取出来判定。inner join 会让它从结果里消失——正是「静默跳过」。
     // 只看 rel.window_start 不够：dev / test 行不读 window_start，release_id 为 null
     // 的 dev 行会被一路推到 live，连一声响都没有。
+    // `r.number` 是给跳过提醒点名用的（「PAN-12 缺提测日」），不是判定依据。
     const due = await tx.execute<{
-      id: string; state: State; release_id: string | null;
+      id: string; number: number | null; state: State; release_id: string | null;
       window_start: string | null; commit_test_at: string | null; commit_due_at: string | null;
     }>(sql`
-      select r.id, r.state, rel.id as release_id, rel.window_start, r.commit_test_at, r.commit_due_at
+      select r.id, r.number, r.state, rel.id as release_id, rel.window_start,
+             r.commit_test_at, r.commit_due_at
         from requirements r
         left join releases rel on rel.id = r.release_id
        -- 软删除的需求不再被时钟推进（P4-02）：它对外已经不存在，推进它只会往
@@ -202,29 +297,45 @@ export async function tick(db: Db, now: Date): Promise<{ moved: Moved[] }> {
          for update of r`);
 
     for (const row of due.rows) {
-      assertHasRelease(row.release_id, { requirementId: row.id, state: row.state });
       // 查询条件就是从 edgeByFrom 派生的，这里取不到只可能是并发改了 state——
       // 不推，交回状态机（下一次 tick 会按新状态重新判断）。
       const edge = edgeByFrom.get(row.state);
       if (!edge) continue;
-      const day = deadlineDay(row[edge.field], {
-        requirementId: row.id, state: row.state, field: edge.field,
-      });
-      if (today < day) continue;
+
+      const verdict = judgeRow(row, edge, today);
+      if (verdict.kind === 'wait') continue;
+      if (verdict.kind === 'skip') {
+        // 这一行原样不动：不写状态、不写事件。只记一笔账，最后统一报给超管。
+        skipped.push({
+          id: row.id,
+          number: row.number === null ? null : Number(row.number),
+          state: row.state,
+          field: verdict.field,
+          reason: verdict.reason,
+        });
+        continue;
+      }
 
       // 先确认这条边由时钟负责，再写状态：顺序与各服务一致。
-      assertTrigger(row.state, edge.to, 'clock');
+      assertTrigger(row.state, verdict.to, 'clock');
 
       // state_entered_at 落在注入的 at 上，而不是 now()：时间轴要与被 tick 的
       // 「今天」一致，否则排期甘特与事件时刻会差出一次 cron 的间隔。
-      await moveTo(tx, row.id, edge.to, undefined, at);
+      await moveTo(tx, row.id, verdict.to, undefined, at);
       await recordEvent(tx, {
-        requirementId: row.id, actor: 'system', type: `requirement.auto_${edge.to}`,
-        payload: { from: row.state, to: edge.to, at },
+        requirementId: row.id, actor: 'system', type: `requirement.auto_${verdict.to}`,
+        payload: { from: row.state, to: verdict.to, at },
       });
-      moved.push({ id: row.id, from: row.state, to: edge.to });
+      moved.push({ id: row.id, from: row.state, to: verdict.to });
     }
 
-    return { moved };
+    return { moved, skipped };
   });
+
+  // 报账排在状态提交**之后**、另起一个事务：提醒写失败不该把这一轮已经推进的行
+  // 回滚——那等于让「报告跳过」变成新的全场停机点，只是绕了一圈。库真的挂了时
+  // 这一步仍然抛（那时什么也做不了，静默才是更坏的选择）。
+  await notifySkipped(db, { day: today, skipped: round.skipped });
+
+  return round;
 }

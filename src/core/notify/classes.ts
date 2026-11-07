@@ -66,6 +66,16 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
    */
   'member.wecom_unlinked': 'action',
 
+  /**
+   * 时钟跳过坏行（2026-11-08 裁定「一条坏数据不许停掉全场」）：这一轮有 N 条需求
+   * 的日期 / 版本坏了、钟推不动，超管要去把数据补上。
+   *
+   * 为什么是 `action` 而不是 `change`：跳过期间的后果是**这些需求永远不会自己往前走**
+   * ——超时提醒不响、推送不发，而且看板上它只是「没到点」。归到 `change` 会让默认档
+   * `key` 的超管在铃铛里看不到它（`key` = 动手 + 结果），等于白报。
+   */
+  'clock.tick_skipped': 'action',
+
   // ── outcome：有结果 ─────────────────────────────────────────────────────
   'requirement.review_passed': 'outcome',   // 评审通过
   'requirement.review_rejected': 'outcome', // 评审打回

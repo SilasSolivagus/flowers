@@ -27,6 +27,9 @@ import {
 
 type Args = { dryRun: boolean; limit: number; tick: boolean };
 
+/** stdout 里逐条打多少行跳过。803 条坏行不该把日志刷成一万行（完整清单在通知与返回值里）。 */
+const SKIP_LINES = 5;
+
 function parseArgs(argv: string[]): Args {
   const args: Args = { dryRun: false, limit: DEFAULT_PER_MEMBER_LIMIT, tick: false };
   for (let i = 0; i < argv.length; i += 1) {
@@ -97,11 +100,22 @@ const args = parseArgs(process.argv.slice(2));
 
 try {
   if (args.tick) {
-    const { moved, summary, alerts } = await tickThenDispatch(db, new Date(), {
+    const { moved, skipped, summary, alerts } = await tickThenDispatch(db, new Date(), {
       dryRun: args.dryRun,
       perMemberLimit: args.limit,
     });
-    process.stdout.write(`时钟推进：${moved} 条需求前进了一步\n`);
+    // 跳过这一行必须一直打出来（哪怕是 0 条）：一次「没有坏行」与一次「这项报告被
+    // 删掉了」在日志里必须长得不一样，否则下一轮全场停摆时没人分得清。
+    process.stdout.write(
+      `时钟推进：${moved} 条需求前进了一步 · 跳过 ${skipped.length} 条\n`,
+    );
+    for (const row of skipped.slice(0, SKIP_LINES)) {
+      const tag = row.number === null ? row.id : `PAN-${row.number}`;
+      process.stdout.write(`  跳过 ${tag}（${row.state}）：${row.reason}\n`);
+    }
+    if (skipped.length > SKIP_LINES) {
+      process.stdout.write(`  ……还有 ${skipped.length - SKIP_LINES} 条（见这轮的通知 / 返回值）\n`);
+    }
     report(summary);
     // 自检也打一行：一次「0 条提醒」与一次「没跑自检」在日志里必须长得不一样，
     // 否则过两周没人说得清是绑定都好，还是这项检查被删掉了。
