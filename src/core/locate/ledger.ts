@@ -23,6 +23,20 @@ import type { LocateResult } from './types.js';
 type Outcome = 'absent' | 'none' | 'low';
 
 /**
+ * 一轮一案的分仓明细，原样进 `locate_runs.detail`（jsonb）。
+ *
+ * 键是仓 id，值是该仓这一轮的 `kind` 与（仅 `absent` 时）原因原句。
+ * 形状与库里的列一致：`{"repos":{"123pan-pc":{"kind":"absent","why":"…"}}}`。
+ *
+ * 为什么 `why` 必须逐字进库（2026-11-07 修复二波，推翻「一轮一行、不留细节」）：
+ * 合出来的 `why` 是「仓 id：原句」拼成的一句话，那是给 PM 看的文案；**句子不进库，
+ * 读回来就没了**。而「哪个仓没读到」正是以后要拿去催运维的那条线索。
+ */
+export type LocateDetail = {
+  repos: Record<string, { kind: LocateResult['kind']; why?: string }>;
+};
+
+/**
  * kind → outcome，**显式写全**，不写成 `result.kind as Outcome`。
  *
  * 强转能通过编译（`candidates` 也在字符串里），但会往库里写一个不存在的 outcome：
@@ -47,6 +61,10 @@ const OUTCOME_BY_KIND: Record<LocateResult['kind'], Outcome> = {
  * 那一秒我们无从知道**——候选是人去确认的。它由评估那一步回填。这里若先填一个
  * `false`，「还没评」就会被算成「评错了」，准确率的分母里从此混着没评过的行。
  *
+ * `detail` 是**可选**的：给得出分仓明细的调用点（走查一轮两仓）写进去，给不出的
+ * （评审那一轮只有一个合起来的结论）就留 null。null 的语义是「这一行没有分仓信息」，
+ * 与「两仓都全见」不是一回事，所以统计脚本必须把 null 单独一档，不许当 0 处理。
+ *
  * 失败一律往上抛（不 try/catch、不降级成一条「记不上就算了」的日志）：这一层不产生
  * 业务结论，没有可以退回去的地方；而一次静默丢失在攒数阶段是不可见的——报告里只会
  * 显示「案例比预期少几条」，没有人会去数应该有多少条。
@@ -57,6 +75,7 @@ export async function recordLocate(
     requirementId: string | null;
     stage: 'inspect' | 'review';
     result: LocateResult;
+    detail?: LocateDetail | null;
   },
 ): Promise<void> {
   const { result } = input;
@@ -65,8 +84,14 @@ export async function recordLocate(
   // 而不是 null：统计要能放心 `avg(candidates)`，两种「没有」在这里不需要再分。
   const candidates = result.kind === 'candidates' ? result.items.length : 0;
 
+  // 显式 `JSON.stringify` 再 `::jsonb`：让绑定参数永远是文本或 null，不指望驱动的
+  // 对象序列化（那是一条隐式约定，`pg` 与将来任何驱动都可能不一样）。
+  const detail = input.detail === undefined || input.detail === null
+    ? null
+    : JSON.stringify(input.detail);
+
   await db.execute(sql`
-    insert into locate_runs (requirement_id, stage, outcome, candidates, hit)
+    insert into locate_runs (requirement_id, stage, outcome, candidates, hit, detail)
     values (${input.requirementId}, ${input.stage}, ${OUTCOME_BY_KIND[result.kind]},
-            ${candidates}, null)`);
+            ${candidates}, null, ${detail}::jsonb)`);
 }

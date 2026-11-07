@@ -677,6 +677,39 @@ describe('inspect：PRD ⇄ 真实代码', () => {
       select outcome, stage, candidates from locate_runs order by created_at`);
     expect(rows.rows).toHaveLength(1);
     expect(rows.rows[0]).toMatchObject({ outcome: 'absent', stage: 'inspect', candidates: 0 });
+
+    // 5) 单看 outcome 只知道「有个仓没读到」，`detail` 才点名是哪一个（修复二波）。
+    //    这一轮是「一仓 absent + 一仓 none」，不是半盲的 low——所以下面那条 low 的用例
+    //    才需要 `detail` 兜底。
+    const detail = await db.execute<{
+      detail: { repos: Record<string, { kind: string; why?: string }> };
+    }>(sql`select detail from locate_runs`);
+    expect(detail.rows[0]!.detail.repos[blindRepo]).toEqual({
+      kind: 'absent',
+      why: '读合并历史失败：镜像 ssh 连接超时',
+    });
+  }, 30_000);
+
+  /**
+   * 修复二波：记账挪到产物之后（与评审那条路同口径）。
+   *
+   * 原来的写法在两次模型调用之前就落库，于是 `walkmap_rejected` 之后库里留着一条指向
+   * **从未存在过的材料**的行——而 `locate_runs` 是算准确率的分母。
+   *
+   * 变异：把 `recordInspectRound` 挪回 `locateRoundForInspect`（判完就记）→ 这条红。
+   */
+  it('材料构建失败（walkmap_rejected）→ 库里一行都不留', async () => {
+    const r = await inspectable();
+    fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+    const error = await caught(inspect(db, '吕品', { requirementId: r.id }, deps({
+      build: async () => ({ ok: false, errors: ['build.py 起不来'], warnings: [] }),
+    })));
+
+    expect(error.code).toBe('walkmap_rejected');
+    expect(await artifactCount()).toBe(0);
+    const rows = await db.execute<{ stage: string }>(sql`select stage from locate_runs`);
+    expect(rows.rows).toEqual([]);
   }, 30_000);
 
   it('两个仓的历史都读不到 → **照样出材料**，横幅第一句是「代码读到了、合并历史没读到」，且不下任何现状判断', async () => {

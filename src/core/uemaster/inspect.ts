@@ -20,7 +20,7 @@ import { injectBanner } from '../locate/banner.js';
 import {
   ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
 } from '../locate/copy.js';
-import { recordLocate } from '../locate/ledger.js';
+import { recordLocate, type LocateDetail } from '../locate/ledger.js';
 import type { LocateResult } from '../locate/types.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
@@ -374,7 +374,8 @@ const QUOTED = /[「“"']([^「」“”"'\n]{2,12})[」”"']/g;
  * PRD 里的样板词。
  *
  * 为什么必须有这张表：一份 16k 的 PRD 里「可以」「需要」「进行」各出现几十次，按频次
- * 排序它们会稳居前八，于是阶段一拿这八个词去 grep，得到的是「谁没写过可以」。
+ * 排序它们会稳居前八，于是交给模型的那八个词全是胶水词——`structurePrompt` 把它们当
+ * 「这条需求的业务词」列给模型看，模型照着自己编，写出来的流程节点就是「进行」与「确认」。
  * 表里只放**产品文档的胶水词**，业务名词（搜索、面包屑、分享、审核、埋点…）一个都不放。
  */
 const STOPWORDS: ReadonlySet<string> = new Set([
@@ -429,16 +430,23 @@ function ngrams(run: string, map: Map<string, number>, weight: number): void {
 /**
  * 从 PRD 正文 + 需求标题里抽关键词，**纯函数**，同一个输入永远同一份输出。
  *
+ * 这些词现在只去两个地方，**都不再是「拿词去 grep」**：
+ * - 走查：进 `structurePrompt`，作为「这条需求的业务词」给模型看（历史检索只传标题，
+ *   见 `locateQuery`）；
+ * - 评审：当模型扩展词失败时的回落词表，进结构索引检索（`locateFromStructure` →
+ *   `locateAcross`，拿路径 / 路由 / 导出名去比）。
+ *
  * 三条信号，权重从高到低：
  * 1. 引号里的界面文案（`「全部文件」`/`“请输入关键词”`）：PRD 用引号写的就是**用户能
- *    看见的字**，而界面上的字在代码里几乎一定能被 grep 到。权重 3。
+ *    看见的字**，而这些字要落到代码里时，通常原样出现在文件路径、组件名或导出名里——
+ *    正是结构检索要比的那几处。权重 3。
  * 2. 标题里的词：标题是这条需求最短的一句话，权重 2。
  * 3. 正文里的 n-gram 频次：权重 1，按 `次数 × 长度` 排序——长词比短词更具体，
- *    「分享页搜索」命中的文件比「搜索」命中的少得多，而那正是我们要的。
+ *    「分享页搜索」能命中的文件比「搜索」少得多，而那正是我们要的。
  *
  * 去重规则：已经选中的词如果**包含**或被包含于新的候选，新候选就不要了。理由很实际：
- * `分享页搜索` 与 `搜索` 同时去 grep，后者只会把前者已经命中的文件再命中一遍，
- * 白白多花一次 ssh 往返，还让「命中次数」这张表失去区分度。
+ * `分享页搜索` 与 `搜索` 同时进检索，后者只会把前者已经命中的那批文件再命中一遍，
+ * 同一批候选的分被算两次、多花一趟匹配，而排出来的名次看起来还更可信。
  */
 export function keywordsFrom(markdown: string, title: string, max = MAX_KEYWORDS): string[] {
   const counts = new Map<string, number>();
@@ -556,22 +564,27 @@ export async function locateForInspect(db: Db, input: InspectLocateInput): Promi
 }
 
 /**
- * 一轮走查的定位：每个仓各判一次，**把两仓的结果合成一条**再记账一条。
+ * 一轮走查的定位：每个仓各判一次，**把两仓的结果合成一条**（记账见 `recordInspectRound`）。
  *
  * 为什么是「合成一条」而不是每仓一条（终审 Minor 3）：`locate_runs` 是拿来算准确率的
  * 分母，而分母的单位是**案例**——PM 每一轮走查看到的是一份材料，不是一个仓一份。
  * 原来走查每轮写两行（每仓一行）、评审每轮写一行，于是「攒够 30 条案例」这个门槛上，
  * 走查的案例被算了两遍：30 行里可能只有 15 轮。这里统一成「一轮一行」，两种阶段同口径。
  *
+ * 一轮一行丢掉的仓粒度由 `locate_runs.detail` 补回来（修复二波，见 `recordInspectRound`）。
+ *
  * 合成的规则（`mergeLocateRound`）只有一条：**candidates > absent > none**。
  * 选出别的顺序都有害：把 `none` 放在 `absent` 之上，等于让「一个仓没读到」被
  * 「另一个仓读到了但没找到」盖住——那正是本次改造要消灭的那种合并。
+ *
+ * 这个函数**不写库**：它只回答「两个仓各是什么、合起来是什么」。写库在材料产出之后
+ * （`recordInspectRound`），理由见那里。
  */
 export async function locateRoundForInspect(
   db: Db,
   inputs: readonly InspectLocateInput[],
   deps: LocateDeps,
-): Promise<{ parts: Array<{ repo: string; result: LocateResult }>; merged: LocateResult }> {
+): Promise<InspectRound> {
   const first = inputs[0];
   if (first === undefined) throw new Error('locateRoundForInspect 至少要一个仓：空输入说明仓清单坏了');
 
@@ -579,15 +592,54 @@ export async function locateRoundForInspect(
   for (const input of inputs) {
     parts.push({ repo: input.repoId, result: await locateForInspect(db, input) });
   }
-  const merged = mergeLocateRound(parts);
-  // 记账那一步的失败**一路抛出去**：这一层不产生业务结论，没有可以退回去的地方；
-  // 而静默少记一条在攒数阶段不可见（报告里只会显示「案例比预期少几条」）。
+  return { parts, merged: mergeLocateRound(parts) };
+}
+
+/** 一轮走查的定位结果：每仓一份原结论 + 合成后的那一条（给材料与记账用）。 */
+export type InspectRound = {
+  parts: Array<{ repo: string; result: LocateResult }>;
+  merged: LocateResult;
+};
+
+/**
+ * 把一轮走查记成**一行**账，并带上分仓明细。**由调用点在材料写出来之后调。**
+ *
+ * 两件事，各自都有一条裁定：
+ *
+ * 1. **时机**（修复二波，与评审那条路同口径）：这一行描述的是「PM 真拿到了一份材料」，
+ *    而 `locate_runs` 是算准确率的分母。原来的写法在**两次模型调用之前**就落库，于是
+ *    `inspect_invalid` / `inspect_rejected` / `flow_rejected` / `walkmap_rejected`
+ *    这些失败都会留下一条指向从未存在过的材料的行。现在记账只在 `inspect()` 拿到
+ *    `attach` 之后发生——「有行必有材料」不再靠注释，靠位置。
+ * 2. **明细**（修复二波，推翻「一轮一行、不留细节」）：`outcome` 只记「材料上那句话
+ *    怎么说的」，而「哪个仓没读到」必须落进 `detail`。否则「一仓 absent + 一仓
+ *    candidates」合成的那条 `low` 会让盲仓在分母里彻底消失——将来算准确率时，半盲的
+ *    样本会被当成全见的样本。剔除办法写在 `locate_runs.detail` 的列注释里。
+ *
+ * 记账失败**一路抛出去**：这一层不产生业务结论，没有可以退回去的地方；而静默少记一条
+ * 在攒数阶段不可见（报告里只会显示「案例比预期少几条」）。
+ */
+export async function recordInspectRound(
+  db: Db,
+  input: { requirementId: string | null; parts: readonly { repo: string; result: LocateResult }[] },
+  deps: Pick<LocateDeps, 'recordLocate'>,
+): Promise<LocateResult> {
+  const merged = mergeLocateRound(input.parts);
+  const repos: LocateDetail['repos'] = {};
+  for (const part of input.parts) {
+    // `why` 只在 `absent` 时写：其余两种没有原因可写，写一句空字符串会让
+    // 「有没有原因」这件事变得要靠 `kind` 再判一次。
+    repos[part.repo] = part.result.kind === 'absent'
+      ? { kind: 'absent', why: part.result.why }
+      : { kind: part.result.kind };
+  }
   await deps.recordLocate(db, {
-    requirementId: first.requirementId,
+    requirementId: input.requirementId,
     stage: 'inspect',
     result: merged,
+    detail: { repos },
   });
-  return { parts, merged };
+  return merged;
 }
 
 /**
@@ -1476,8 +1528,9 @@ export async function inspect(
   // 是核对证据的基础），但候选只来自历史。**不**在 `none` 时退回结构候选——那会把刚拿掉
   // 的噪音装回去，还会让「没读到」看起来像「定位过了」。
   const query = queryOfRequirement(req);
-  // 一轮定位：每仓各判一次，结果**合成一条**记账（终审 Minor 3：分母的单位是「案例」，
-  // 一轮走查 PM 看到的是**一份**材料，不是一仓一份）。
+  // 一轮定位：每仓各判一次，结果**合成一条**（终审 Minor 3：分母的单位是「案例」，
+  // 一轮走查 PM 看到的是**一份**材料，不是一仓一份）。这里只是**判**，不写库——
+  // 记账在材料写出来之后（见本函数末尾的 `recordInspectRound`）。
   const round = await locateRoundForInspect(
     db,
     structures.map((struct) => ({
@@ -1697,6 +1750,13 @@ export async function inspect(
 
   stats.bytes = Buffer.byteLength(html, 'utf8');
   stats.ms = Date.now() - started;
+
+  // 记账放在**材料写出来之后**（修复二波，与评审那条路同口径）。这一行描述的是「PM 真拿到了
+  // 一份材料」，而 `locate_runs` 是算准确率的分母：`inspect_invalid` / `inspect_rejected` /
+  // `flow_rejected` / `walkmap_rejected` 那几处失败都不会走到这里，所以「有行必有材料」
+  // 不是靠注释，是靠位置。原来这一行写在两次模型调用之前，`walkmap_rejected` 之后库里就留着
+  // 一条指向从未存在过的材料的行。
+  await recordInspectRound(db, { requirementId, parts: round.parts }, full.locateDeps);
 
   return { url, stats, artifactId: artifact.id };
 }

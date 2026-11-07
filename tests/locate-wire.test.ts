@@ -17,8 +17,8 @@ import {
   descriptionOf, gatherBaseline, type ReviewLocateDeps, type ReviewPrd,
 } from '../src/core/uemaster/review.js';
 import {
-  keywordsFrom, locateForInspect, locateQuery, locateRoundForInspect, renderLocate,
-  type LocateDeps,
+  keywordsFrom, locateForInspect, locateQuery, locateRoundForInspect, recordInspectRound,
+  renderLocate, type LocateDeps,
 } from '../src/core/uemaster/inspect.js';
 import { resetDb } from './helpers/db.js';
 
@@ -59,13 +59,35 @@ function depsOf(over: Partial<LocateDeps>): LocateDeps {
   };
 }
 
-type Row = { stage: string; outcome: string; candidates: number; requirement_id: string | null };
+type Row = {
+  stage: string;
+  outcome: string;
+  candidates: number;
+  requirement_id: string | null;
+  detail: { repos: Record<string, { kind: string; why?: string }> } | null;
+};
 
-/** 全表按写入顺序读回来。 */
+/** 全表按写入顺序读回来。`detail` 原样读（它是 jsonb，驱动会解成对象）。 */
 async function ledger(): Promise<Row[]> {
   const res = await db.execute<Row>(sql`
-    select stage, outcome, candidates, requirement_id from locate_runs order by created_at`);
+    select stage, outcome, candidates, requirement_id, detail
+      from locate_runs order by created_at`);
   return res.rows;
+}
+
+/**
+ * 一轮走查的**完整**两段：先判（`locateRoundForInspect`，不写库），再记账
+ * （`recordInspectRound`，材料写出来之后）。产品里也是这两段，中间隔着两次模型调用
+ * 与产物落盘——这里把它连着调，是为了让「记了什么」能被单独断言。
+ */
+async function roundAndRecord(
+  inputs: Parameters<typeof locateRoundForInspect>[1],
+  requirementId: string | null,
+  deps = depsOf({}),
+): Promise<Awaited<ReturnType<typeof locateRoundForInspect>>> {
+  const round = await locateRoundForInspect(db, inputs, deps);
+  await recordInspectRound(db, { requirementId, parts: round.parts }, deps);
+  return round;
 }
 
 beforeEach(async () => {
@@ -240,18 +262,22 @@ describe('材里那句话：三种情况各说各的', () => {
 });
 
 /**
- * 记账的单位是**一轮案例**，不是一次仓内检索（终审 Minor 3）。
+ * 记账的单位是**一轮案例**，不是一次仓内检索（终审 Minor 3）；一行里还要带上**分仓明细**
+ * （修复二波，推翻「一轮一行、不留细节」）。
  *
  * 走查每一轮要判两个仓，原来写两行；评审每轮写一行。`locate_runs` 是算准确率的分母，
  * 而分母的单位是「PM 拿到的一份材料」——两仓两行会让「攒够 30 条案例」这个门槛把走查
- * 算双份。现在两边同口径：**一轮一行**，两仓的结论由 `mergeLocateRound` 合成。
+ * 算双份。所以：**一轮一行**，两仓的结论由 `mergeLocateRound` 合成。
+ *
+ * 但一行的 `outcome` 只有一个词，于是「一仓读不到 + 一仓有候选」被合成 `low`——盲仓在
+ * 分母里彻底消失。`detail` 就是补这一块：每仓的 `kind`，`absent` 的仓连 `why` 原句一起。
  */
-describe('记账：一轮一条，outcome 对得上（终审统一口径）', () => {
+describe('记账：一轮一条 + detail 分仓明细（修复二波）', () => {
   it('两仓合成一条：全 none → none，阶段是 inspect', async () => {
-    await locateRoundForInspect(db, [
+    await roundAndRecord([
       { repoId: 'pc', query: '发票报销审批流', requirementId: null, deps: depsOf({}) },
       { repoId: 'uni', query: '发票报销审批流', requirementId: null, deps: depsOf({}) },
-    ], depsOf({}));
+    ], null);
 
     const rows = await ledger();
     expect(rows).toHaveLength(1);
@@ -259,10 +285,10 @@ describe('记账：一轮一条，outcome 对得上（终审统一口径）', ()
   });
 
   it('两仓合成一条：都有候选 → low，候选数相加', async () => {
-    await locateRoundForInspect(db, [
+    await roundAndRecord([
       { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
       { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
-    ], depsOf({}));
+    ], null);
 
     const rows = await ledger();
     expect(rows).toHaveLength(1);
@@ -272,7 +298,7 @@ describe('记账：一轮一条，outcome 对得上（终审统一口径）', ()
   });
 
   it('一个仓没读到 + 另一个仓 none → absent：没读到的那半不许被「没找到」盖住', async () => {
-    const got = await locateRoundForInspect(db, [
+    const got = await roundAndRecord([
       {
         repoId: 'pc',
         query: 'x',
@@ -280,7 +306,7 @@ describe('记账：一轮一条，outcome 对得上（终审统一口径）', ()
         deps: depsOf({ ensureHistory: async () => ({ ok: false, code: 'git_failed', message: REASON }) }),
       },
       { repoId: 'uni', query: 'x', requirementId: null, deps: depsOf({}) },
-    ], depsOf({}));
+    ], null);
 
     expect(got.merged.kind).toBe('absent');
     if (got.merged.kind === 'absent') {
@@ -293,22 +319,82 @@ describe('记账：一轮一条，outcome 对得上（终审统一口径）', ()
     expect(rows[0]!.outcome).toBe('absent');
   });
 
-  it('需求 id 原样落库（null 就是 null，不编一个）', async () => {
+  /**
+   * 这一条是修复二波的核心：**半盲的样本必须能从库里认出来**。
+   *
+   * 一仓 absent + 一仓有候选，合成口径（candidates > absent > none）会把这一轮记成
+   * `low`——只看 `outcome` 的话，它与「两仓都读了、都找到候选」完全一样，将来算准确率
+   * 就会拿半盲的样本当全见的样本。所以 `detail` 必须点名那个盲仓，连 `why` 一起。
+   *
+   * 变异：insert 里删掉 `detail` → 这条红（`detail` 是 null，`repos` 取不到）。
+   */
+  it('一仓 absent + 一仓有候选 → outcome=low，detail 点名盲仓与它的 why', async () => {
+    await roundAndRecord([
+      {
+        repoId: '123pan-uni-app',
+        query: 'x',
+        requirementId: null,
+        deps: depsOf({ ensureHistory: async () => ({ ok: false, code: 'git_failed', message: REASON }) }),
+      },
+      { repoId: '123pan-pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+    ], null);
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    // 材料上那句话：有候选，所以是 low
+    expect(rows[0]!.outcome).toBe('low');
+
+    const repos = rows[0]!.detail?.repos;
+    expect(repos).toBeDefined();
+    // 盲仓：kind + 原因原句。why 是「以后拿去催运维」的线索，不许只剩 kind。
+    expect(repos!['123pan-uni-app']).toEqual({ kind: 'absent', why: REASON });
+    // 见到的那个仓：kind 用 LocateResult 的词（candidates），不是本表 outcome 的 low
+    expect(repos!['123pan-pc']).toEqual({ kind: 'candidates' });
+
+    // 「按 detail 剔除盲样本」这句话在库里真的能执行：全见样本 0 条，半盲 1 条
+    const seen = await db.execute<{ blind: number; all_seen: number }>(sql`
+      select count(*) filter (where exists (
+               select 1 from jsonb_each(detail->'repos') e where e.value->>'kind' = 'absent'
+             ))::int as blind,
+             count(*) filter (where not exists (
+               select 1 from jsonb_each(detail->'repos') e where e.value->>'kind' = 'absent'
+             ))::int as all_seen
+        from locate_runs`);
+    expect(seen.rows[0]).toEqual({ blind: 1, all_seen: 0 });
+  });
+
+  /**
+   * 判与记是**两段**：`locateRoundForInspect` 只判、不写库。
+   *
+   * 产品的写法是「判 → 两次模型调用 → 产物落盘 → 记」（见 `inspect()` 末尾）。
+   * 若有人把写库塞回判的那一步，`walkmap_rejected` 之后库里就会留一条指向不存在材料的行。
+   */
+  it('只判不记：locateRoundForInspect 之后库里还是空的', async () => {
     await locateRoundForInspect(db, [
       { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
       { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
     ], depsOf({}));
+    expect(await ledger()).toEqual([]);
+  });
+
+  it('需求 id 原样落库（null 就是 null，不编一个）', async () => {
+    await roundAndRecord([
+      { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+      { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+    ], null);
     const rows = await ledger();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.requirement_id).toBeNull();
   });
 
   it('记账失败往上抛，不降级成一条「记不上就算了」', async () => {
-    await expect(locateRoundForInspect(db, [
-      { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
-      { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
-    ], depsOf({ recordLocate: async () => { throw new Error('locate_runs 写不进去'); } })))
-      .rejects.toThrow('locate_runs 写不进去');
+    const parts = [
+      { repo: 'pc', result: { kind: 'none' } as const },
+      { repo: 'uni', result: { kind: 'none' } as const },
+    ];
+    await expect(recordInspectRound(db, { requirementId: null, parts }, {
+      recordLocate: async () => { throw new Error('locate_runs 写不进去'); },
+    })).rejects.toThrow('locate_runs 写不进去');
   });
 });
 

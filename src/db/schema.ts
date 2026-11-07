@@ -597,5 +597,21 @@ export const locateRuns = pgTable('locate_runs', {
   outcome: text('outcome').notNull(),
   candidates: integer('candidates').notNull(),
   hit: boolean('hit'),
+  /**
+   * 一轮一案的分仓明细：`{"repos":{"123pan-pc":{"kind":"absent","why":"…"},"123pan-uni-app":{"kind":"none"}}}`。
+   *
+   * 为什么必须落库（2026-11-07 修复二波，推翻「一轮一行、不留细节」）：走查一轮要判两个仓，
+   * 一行只有 `outcome` 一个词，于是「一仓读不到 + 一仓有候选」被记成 `low`——**盲仓在准确率
+   * 分母里彻底消失**，将来算准确率会拿半盲的样本当全见样本用。`why` 里虽然按仓拼了原因，
+   * 但那是给人看的一句话，句子不进库，读回来就没了。
+   *
+   * 怎么用它剔除盲样本：`detail->'repos'` 里出现任一 `absent` 即为半盲，
+   * `where not exists (select 1 from jsonb_each(detail->'repos') e where e.value->>'kind' = 'absent')`
+   * 就是「全见的样本」。`detail` 为 null 的行（评审那一轮）没有分仓信息，不能按这条筛。
+   *
+   * `outcome` **不因此改变含义**：它仍然是「材料上那句话怎么说的」（`absent` / `none` / `low`），
+   * 分仓明细只回答「这句话背后两个仓各是什么状态」。
+   */
+  detail: jsonb('detail'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({ at: index('locate_runs_created_at').on(t.createdAt) }));
