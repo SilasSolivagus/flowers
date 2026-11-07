@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_COOKIE, signSession, verifySession } from './session-token.js';
+import { SESSION_COOKIE, signSession, verifySession, type SessionTicket } from './session-token.js';
 
 /**
  * 会话 cookie 的读写：`next/headers` 那一层胶水。签名/验签本身在 `session-token.ts`
@@ -57,8 +57,8 @@ export function resetSessionSecretCache(): void {
 }
 
 /** 签发一个值（不写 cookie）。给用例与需要自己 Set-Cookie 的地方用。 */
-export function sessionValue(name: string, now: number = Date.now()): string {
-  return signSession(name, sessionSecret(), now);
+export function sessionValue(name: string, epoch: number, now: number = Date.now()): string {
+  return signSession(name, epoch, sessionSecret(), now);
 }
 
 /**
@@ -66,7 +66,8 @@ export function sessionValue(name: string, now: number = Date.now()): string {
  * 这里，而它们与「没带 cookie」是同一件事。坏值同理——一个手改过的 cookie 只该等于
  * 「没登录」，不该让整页 500。
  */
-export async function readSessionName(): Promise<string | null> {
+/** 解出整张票（名字 + 签发时的会话纪元）。校验纪元在 `read/member.ts`。 */
+export async function readSessionTicket(): Promise<SessionTicket | null> {
   try {
     const { cookies } = await import('next/headers');
     const jar = await cookies();
@@ -74,6 +75,11 @@ export async function readSessionName(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** 只要名字。 */
+export async function readSessionName(): Promise<string | null> {
+  return (await readSessionTicket())?.name ?? null;
 }
 
 /**
@@ -95,10 +101,10 @@ export async function hasSignedSession(): Promise<boolean> {
  * 表单是站内 POST，不受影响），而点一个外链过来仍然是已登录的。`secure` 跟着协议走：
  * 本地 http 若写死 secure，浏览器会直接丢掉它，开发时永远登不进去。
  */
-export async function setSessionCookie(name: string): Promise<void> {
+export async function setSessionCookie(name: string, epoch: number): Promise<void> {
   const { cookies } = await import('next/headers');
   const jar = await cookies();
-  jar.set(SESSION_COOKIE, sessionValue(name), {
+  jar.set(SESSION_COOKIE, sessionValue(name, epoch), {
     httpOnly: true,
     sameSite: 'lax',
     path: '/',

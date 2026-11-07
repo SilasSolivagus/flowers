@@ -525,3 +525,11 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .fields dd .ownline{margin-left:4px;color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
 .fields dd .claim{display:inline}
 .fields dd .claim .dfail{margin-left:8px;color:var(--c-danger);font:400 var(--t-caption) var(--f-sans)}
+
+/* 卡片上的「认领」：和编号同一行、同一档字，右侧。它不是按钮外形——
+   一张卡上出现一个描边按钮，会把「这是一张卡」变成「这是一个表单」。 */
+.card .claim{margin:0 0 0 auto}
+.card .claimbtn{padding:0;border:0;background:none;cursor:pointer;
+  font:500 var(--t-caption) var(--f-sans);color:var(--c-accent)}
+.card .claimbtn:hover{text-decoration:underline}
+.card .claimbtn:disabled{color:var(--c-text-3);cursor:default;text-decoration:none}

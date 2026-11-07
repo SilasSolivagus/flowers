@@ -57,6 +57,15 @@ export const members = pgTable('members', {
   passwordHash: text('password_hash'),
   passwordUpdatedAt: timestamp('password_updated_at', { withTimezone: true }),
   /**
+   * 会话纪元：签发 cookie 时那一瞬间的值会写进票据，每次请求都拿它跟这一列比。
+   *
+   * 为什么需要它：cookie 是**无状态**的，签名一发出就管 12 小时。改角色、改条线、
+   * 重置口令这些事在那 12 小时里发生了，旧 cookie 仍然能验过——实测就是房超被改成
+   * PM 之后仍然是登录态，直到他自己重新登录。降权不及时等于没降权。
+   * 改这些字段时把这一列往前推（`now()`），旧票立刻对不上，等于把人踢下线。
+   */
+  sessionEpoch: timestamp('session_epoch', { withTimezone: true }).notNull().defaultNow(),
+  /**
    * JSON 文本，P4-07 起是**两个频道 × 三档**：`{"site":"key","wecom":"key"}`。
    *
    * 解释权在 `src/core/notify/prefs.ts`：读不懂 / 缺字段 / 老形状一律回落到 `key`，

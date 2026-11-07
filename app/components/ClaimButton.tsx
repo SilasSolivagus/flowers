@@ -1,34 +1,46 @@
 'use client';
 
 import { useActionState } from 'react';
-import { claimAction, type ActionResult } from '../actions';
 
-/**
- * 「认领」（P4-06）：抽屉「信息」段负责人那一行，当这条需求还没有负责人时出现。
- *
- * 只有 `detail.permissions.claim` 为真时才挂出来——那是 `can('claim')` 的结论：
- * 没有负责人，而且这个人是 PM / 条线负责人 / 超管。按钮显不显示是一个判断，
- * 能不能真认领是另一个判断（服务层 `claimRequirement` 再判一次），两个都来自同一格。
- *
- * 没有弹窗：认领不需要填任何东西（不像转交要挑人），多一层确认只会让「立个项」
- * 变成三次点击。失败的那句话落在按钮旁边，因为它是关于这一行的（「这条需求已经有
- * 负责人了」——你看到它的时候，那一行的名字通常已经变了）。
- */
+import { claimAction, type ActionResult } from '../actions';
 
 const IDLE: ActionResult = { ok: true };
 
+/** `useActionState` 要的是 `(prev, formData)` 的形状，`claimAction` 只有 formData。 */
 async function submit(_prev: ActionResult, formData: FormData): Promise<ActionResult> {
   return claimAction(formData);
 }
 
+/**
+ * 卡片上的「认领」。
+ *
+ * 它是**卡片链接里面的一个按钮**，所以两件事必须自己处理：
+ * - `preventDefault` + `stopPropagation`：不这么做，点下去会先跳进抽屉，
+ *   再做认领——一次点击两个动作，而其中一个会把另一个的状态盖掉；
+ * - 按钮自己提交一个 server action（不是链接），认领成功由 revalidate 把这张卡
+ *   从「收集」搬到「待设计」，卡片跟着消失。
+ *
+ * 认领的权限判断**不在这里**：`BoardCard.claimable` 由读模型问过 `can()`。
+ * 这里只负责「点了会发生什么」，不负责「该不该出现」。
+ */
 export function ClaimButton({ id }: { id: string }) {
   const [state, formAction, pending] = useActionState(submit, IDLE);
 
   return (
-    <form className="claim" action={formAction}>
+    <form
+      action={formAction}
+      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+      className="claim"
+    >
       <input type="hidden" name="id" value={id} />
-      <button className="owner-pick" type="submit" disabled={pending}>认领</button>
-      {!state.ok && <span className="dfail">{state.message}</span>}
+      <button
+        type="submit"
+        className="claimbtn"
+        disabled={pending}
+        onClick={(event) => event.stopPropagation()}
+      >
+        {pending ? '认领中' : (state.ok ? '认领' : state.message)}
+      </button>
     </form>
   );
 }

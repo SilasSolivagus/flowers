@@ -235,10 +235,16 @@ const ATTACH_LABEL: Record<string, string> = {
 export function actionsFor(state: State): DetailAction[] {
   switch (state) {
     case 'inbox':
-      // 没有「评估」：它不是一个点一下就能完成的动作（材料要生成），一个必然失败的
-      // 按钮比一个空的动作条更坏。入口在「参考」段评估材料那一行的「生成」。
-      // 收进、拒绝、搁置照旧。
-      return ['submitReview', 'reject', 'shelve'];
+      // 「立项」= inbox → 待设计，触发是 `evaluate`（状态机里那条边就叫这个名字）。
+      //
+      // 它一度被拿掉，理由是「评估材料要生成，一个点一下就能完成的按钮是假的」。
+      // 认领进来之后这个理由不成立了：认领只给了负责人，**状态没动**，而收集状态的
+      // 唯一出口就是立项——不把它放回来，认领完就卡死在收集列，只能直接提交 PRD
+      // 跳过设计。评估材料仍然是可选的（参考段那一行照旧）。
+      //
+      // 谁能点由 `can('edit')` 过滤：无主时谁都不行（先认领），有主时只有负责人 /
+      // 条线负责人 / 超管。
+      return ['evaluate', 'submitReview', 'reject', 'shelve'];
     case 'design':
       return ['submitReview', 'shelve'];
     case 'review':

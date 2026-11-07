@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { BoardCard } from '../../src/core/read/board';
+import { ClaimButton } from './ClaimButton';
 
 /**
  * 需求编号在界面上的写法：`PAN-` + 库里的 `number` 原值（`PAN-8`、`PAN-12`）。
@@ -39,7 +40,11 @@ export function Card({ card }: { card: BoardCard }) {
       <div className={card.late ? 'w neg' : 'w'}>{card.waiting}</div>
       <div className="m">
         <span className="k">{requirementKey(card.number)}</span>
-        <span className="d">{card.days} 天</span>
+        {card.claimable
+          // 无主的卡给一个「认领」：这一步原来只藏在抽屉里，而收集列正是最需要它的地方
+          // （看到一条没人接的需求，第一反应是接，不是先打开再看）。
+          ? <ClaimButton id={card.id} />
+          : <span className="d">{card.days} 天</span>}
       </div>
     </Link>
   );

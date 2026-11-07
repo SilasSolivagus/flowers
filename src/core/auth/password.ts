@@ -125,7 +125,7 @@ export async function setPassword(
   const password = assertPassword(plain);
   const hash = await hashPassword(password);
   const res = await db.execute(sql`
-    update members set password_hash = ${hash}, password_updated_at = now()
+    update members set password_hash = ${hash}, password_updated_at = now(), session_epoch = now()
      where id = ${memberId}
      returning id`);
   if (res.rows.length === 0) throw new AppError('not_found', '成员不存在');

@@ -192,12 +192,12 @@ function parseInput<T extends z.ZodTypeAny>(schema: T, raw: unknown): z.infer<T>
  * `Record<DetailAction, …>` 不是 `Record<string, …>`：`DetailAction` 加了成员而这里没跟，
  * 编译就失败——比测试早一步。
  *
- * `evaluate` 刻意留空数组：`actionsFor` 从不返回它（评估要生成材料，不是一个点一下就能
- * 完成的动作，见 detail.ts 的注释）。这张表如实写着「没有任何状态给出它」，所以也
- * 没有对应的工具——不然就是一个 UI 上不存在的动作在 API 上存在。
+ * `evaluate` 是「立项」：inbox → 待设计。它曾经刻意留空（当时把它当成「生成评估材料」，
+ * 而那不是一个点一下就能完成的动作）。P4-08 认领上线之后它回来了——认领只给负责人、
+ * 不动状态，而收集状态的唯一出口就是这条边；不把工具放出来，agent 认领完同样卡死。
  */
 export const LEGAL_FROM: Record<DetailAction, readonly State[]> = {
-  evaluate: [],
+  evaluate: ['inbox'],
   submitReview: ['inbox', 'design'],
   reject: ['inbox'],
   shelve: ['inbox', 'design', 'review', 'queue', 'ready', 'dev', 'test', 'live'],
@@ -487,6 +487,18 @@ async function shelveTool(identity: Identity, raw: unknown): Promise<string[]> {
   return [JSON.stringify(got, null, 2)];
 }
 
+/**
+ * 「立项」= 收集 → 待设计。
+ *
+ * 认领（`requirement_claim`）只把负责人换成你，**不动状态**；收集状态的唯一出口是
+ * 这一条边。没有它，agent 认领完就卡在收集列，只能直接提交 PRD 跳过设计。
+ */
+async function startDesignTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId } = parseInput(restoreInput, raw);
+  const got = await SERVICES.evaluate(db, identity.member, { requirementId });
+  return [JSON.stringify(got, null, 2)];
+}
+
 async function restoreTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId } = parseInput(restoreInput, raw);
   const got = await SERVICES.restoreRequirement(db, identity.member, { requirementId });
@@ -634,6 +646,16 @@ export const TOOLS: readonly ToolDef[] = [
     purpose: '把还在「收集」的需求毙掉（终态）。原因必填。已经评估过的需求不能走这条——'
       + '那已经是评审意见，用 requirement_review_reject。',
     call: rejectTool,
+  }),
+  tool({
+    name: 'requirement_start_design',
+    title: '立项（收集 → 待设计）',
+    scope: 'write',
+    action: 'evaluate',
+    inputSchema: restoreInput,
+    purpose: '接手之后往下走一步：从「收集」进「待设计」，意思是「我去出正式 PRD」。'
+      + '无主的需求要先 requirement_claim；有主之后只有负责人 / 条线负责人 / 超管能立项。',
+    call: startDesignTool,
   }),
   tool({
     name: 'requirement_shelve',

@@ -81,6 +81,11 @@ function RefRow({
         {/* 新鲜度：**只有两个标签**，没有一句话解释（P4-02 的「labels only」）。
             它是算出来的（当前描述的指纹 vs 产物存下来的那一个），不是存下来的——
             所以改完描述保存回来，这一行自己就变了，不需要任何一次额外写入。 */}
+        {/* 最新版也要有标记：只有「需求已更新」而反过来没有「最新」时，读者分不出
+            「这份就是当前那版」和「这里少了一块」。两者是一对。 */}
+        {item.present && item.freshness === 'fresh' && (
+          <span className="pill ok">最新</span>
+        )}
         {item.present && item.freshness === 'stale' && (
           <span className="pill warn">需求已更新</span>
         )}

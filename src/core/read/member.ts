@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { firstProductOwner, loadMembers, memberByName, type Exec } from '../auth/members.js';
+import { readSessionTicket } from '../auth/session.js';
 import { isAdmin, type Member } from '../auth/roles.js';
 import { readSessionName } from '../auth/session.js';
 
@@ -79,10 +80,20 @@ export async function currentMember(): Promise<string> {
  * 状态，是最难解释的 bug）。
  */
 export async function hasActiveSession(): Promise<boolean> {
-  const name = await readSessionName();
-  if (name === null) return false;
-  const member = await memberByName(db, name);
-  return member !== null && member.deactivatedAt === null;
+  const ticket = await readSessionTicket();
+  if (ticket === null) return false;
+  const member = await memberByName(db, ticket.name);
+  if (member === null || member.deactivatedAt !== null) return false;
+  // 纪元对不上 = 这张票签的时候他还有那个权限，之后被改过角色 / 条线 / 口令。
+  // 实测过：房超被改成 PM 之后仍然是登录态，直到他自己退出。降权不及时等于没降权。
+  return epochMatches(ticket.epoch, member);
+}
+
+/** 票里的纪元与库里那一列是不是同一时刻（容忍 1 秒：PG 的微秒在 ms 上会舍入）。 */
+function epochMatches(ticketEpoch: number, member: Member): boolean {
+  const stored = member.sessionEpoch?.getTime();
+  if (stored === undefined) return true; // 老行没这一列：不因此把人踢下线
+  return Math.abs(stored - ticketEpoch) < 1_000;
 }
 
 /**
@@ -94,10 +105,12 @@ export async function hasActiveSession(): Promise<boolean> {
  * 「又变回了默认身份」，而不是「一个已停用的人还在改需求」。
  */
 export async function currentMemberRow(exec: Exec = db): Promise<Member> {
-  const fromSession = await readSessionName();
-  if (fromSession !== null) {
-    const member = await memberByName(exec, fromSession);
-    if (member !== null && member.deactivatedAt === null) return member;
+  const ticket = await readSessionTicket();
+  if (ticket !== null) {
+    const member = await memberByName(exec, ticket.name);
+    if (member !== null && member.deactivatedAt === null && epochMatches(ticket.epoch, member)) {
+      return member;
+    }
 
     /**
      * 有一个**验得过签名**的会话，但那个人已经不在名册上 / 已被停用：这是「会话过期」，

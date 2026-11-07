@@ -217,7 +217,11 @@ export function GenerateButton({
         }}
         disabled={pending}
       >
-        {error === null ? (present ? '重新生成' : '生成') : '重试'}
+        {/* 会存成第几版直接写在按钮上，不靠悬停：重新生成是一次覆盖，
+            覆盖第几版是按下之前就该知道的事。 */}
+        {error !== null
+          ? '重试'
+          : (present ? `重新生成 · 第 ${versions + 1} 版` : '生成')}
       </button>
       {asking && (
         <div

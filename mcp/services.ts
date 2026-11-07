@@ -1,3 +1,4 @@
+import { evaluate } from '../src/core/requirements/evaluate.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
@@ -39,6 +40,7 @@ export type Services = {
   bounce: typeof bounce;
   rejectRequirement: typeof rejectRequirement;
   shelveRequirement: typeof shelveRequirement;
+  evaluate: typeof evaluate;
   restoreRequirement: typeof restoreRequirement;
   attachArtifact: typeof attachArtifact;
   getRequirementDetail: typeof getRequirementDetail;
@@ -57,6 +59,7 @@ export const SERVICES: Services = {
   bounce,
   rejectRequirement,
   shelveRequirement,
+  evaluate,
   restoreRequirement,
   attachArtifact,
   getRequirementDetail,

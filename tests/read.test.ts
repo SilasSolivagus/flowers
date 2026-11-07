@@ -540,10 +540,10 @@ describe('getRequirementDetail', () => {
 
   it('动作随状态变，终态只剩恢复', async () => {
     const inbox = await seedInbox('房超');
-    // 收集（inbox）里没有「评估」：D1 之后它不可能成功，入口搬到了参考段的评估材料行。
-    // 收进的直提评审这条路仍然开着（spec §6：评估是加速器，不是关卡）。
+    // 收集（inbox）里现在有「立项」：认领只给负责人、不动状态，而收集状态的唯一出口
+    // 就是 inbox → 待设计。收进的直提评审那条路仍然开着（spec §6：评估是加速器，不是关卡）。
     expect((await getRequirementDetail(inbox.id))!.actions).toEqual([
-      'submitReview', 'reject', 'shelve',
+      'evaluate', 'submitReview', 'reject', 'shelve',
     ]);
 
     const review = await seedInReview('commercial');

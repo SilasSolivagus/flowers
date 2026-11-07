@@ -164,7 +164,10 @@ export async function updateMember(db: Db, actor: string, raw: unknown): Promise
   }>(sql`
     update members set
       role = ${role},
-      line = ${line}
+      line = ${line},
+      -- 改角色 / 条线就推进会话纪元：旧票立刻作废，等于把这个人踢下线再让他重登。
+      -- 不推的话，降权要等他那张 12 小时的票自然过期才生效。
+      session_epoch = now()
       ${prefs === undefined ? sql`` : sql`, notify_prefs = ${prefs}`}
       ${deactivated === undefined
     ? sql``
@@ -196,7 +199,7 @@ export async function deactivateMember(db: Db, actor: string, raw: unknown): Pro
   if (target.deactivatedAt !== null) return target;
 
   await assertCanDeactivate(db, me, target);
-  await db.execute(sql`update members set deactivated_at = now() where id = ${memberId}`);
+  await db.execute(sql`update members set deactivated_at = now(), session_epoch = now() where id = ${memberId}`);
   await revokeTokensOf(db, memberId);
 
   return { ...target, deactivatedAt: new Date() };

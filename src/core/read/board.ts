@@ -4,6 +4,8 @@ import { AppError } from '../errors.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { shanghaiDayOf } from '../clock/tick.js';
 import { currentMember } from './member.js';
+import { memberByName } from '../auth/members.js';
+import { can } from '../auth/roles.js';
 
 /**
  * 看板的 10 列，顺序就是 spec §3 的流程顺序（从左到右走一遍流程）。
@@ -57,6 +59,14 @@ export type BoardCard = {
    * 都不是 mine，哪怕你是负责人。
    */
   mine: boolean;
+  /**
+   * 这张卡现在能不能被你认领（P4-08）。
+   *
+   * 只有「无主 + 收集」的卡为 true，且**由服务层的 `can('claim')` 算**——看板不自己
+   * 推这一段。把它放在读模型里而不是让组件去判断的理由与 `mine` 相同：同一个问题
+   * 只能有一个答案，抽屉里那个「认领」按钮与卡片上这个必须同时出现、同时消失。
+   */
+  claimable: boolean;
 };
 
 export type BoardColumn = { state: State; label: string; cards: BoardCard[] };
@@ -172,7 +182,10 @@ function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Wai
       // on 仍是 'person'（确实在等人，不是等时钟），who 为 null（还没人认领，谁都不框）。
       return row.requester_is_member
         ? { text: `${row.requester} 补必填`, on: 'person', who: row.requester }
-        : { text: '待接单', on: 'person', who: null };
+        // 有主就不再是「待接单」——认领之后它挂在负责人身上，下一步是立项。
+        : (row.owner !== null
+          ? { text: `${row.owner} 立项`, on: 'person', who: row.owner }
+          : { text: '待接单', on: 'person', who: null });
     case 'design':
       return row.owner === null
         ? { text: '负责人出正式 PRD', on: 'none', who: null }
@@ -273,6 +286,14 @@ export function lateDeadline(
 export async function getBoard(me?: string): Promise<BoardColumn[]> {
   const who = me ?? (await currentMember());
   const today = shanghaiToday();
+  /**
+   * 「我能不能认领无主需求」——一次算好，逐卡复用。
+   *
+   * 判据与抽屉里那个按钮同源（`can(..., 'claim')`），所以卡片上出现「认领」时，
+   * 打开抽屉也一定有「认领」；反过来也一样。权限在别处再推一遍，就会长出两个答案。
+   */
+  const viewer = await memberByName(db, who);
+  const canClaim = can(viewer, { ownerMemberId: null, ownerLine: null, state: 'inbox' }, 'claim');
 
   const res = await db.execute<Row>(sql`
     select r.id,
@@ -346,6 +367,9 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
       // 所以主色框与「等谁」那一行说的是同一件事（旧写法 owner||reviewer 会让
       // 「等 吕正豪 评审」的卡被框给负责人）。
       mine: waiting.on === 'person' && waiting.who !== null && waiting.who === who,
+      // 认领：无主 + 收集 + 我确实有 claim 权限。**不在这里推权限**——直接问 `can()`，
+      // 与抽屉里那个「认领」按钮问的是同一个函数（两个入口不可能一个有一个没有）。
+      claimable: row.owner === null && row.state === 'inbox' && canClaim,
     });
   }
 

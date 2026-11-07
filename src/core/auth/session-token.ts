@@ -33,7 +33,9 @@ export const SESSION_COOKIE = 'flowers_session';
 /** 12 小时。一个工作日之内不用重复登录；下班关掉浏览器也不会留一个永久的凭证。 */
 export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
-const VERSION = 'v1';
+// v2：载荷里多了「会话纪元」（见下）。版本号变一次，旧 cookie 全部作废——
+// 这正是我们要的：改版前签出去的凭证不该继续有效。
+const VERSION = 'v2';
 
 function b64url(text: string): string {
   return Buffer.from(text, 'utf8').toString('base64url');
@@ -52,16 +54,28 @@ function mac(secret: string, payload: string): Buffer {
 }
 
 /** 签发。返回 cookie 的值（不含 `name=`）。 */
+/**
+ * 签发。`epoch` 是**这个人的会话纪元**（`members.session_epoch` 的毫秒值）。
+ *
+ * 为什么载荷里要带它：cookie 是**无状态**的，签名一旦发出就管 12 小时。改角色、
+ * 改条线、重置口令这些事在那 12 小时里发生了，旧 cookie 仍然能验过——实测就是
+ * 房超被改成 PM 之后仍然是登录态。把纪元放进来，服务端每次都能拿它跟库里的比：
+ * 对不上就是「这张凭证签的时候你还有权限，现在没有了」，直接当没登录。
+ */
 export function signSession(
   name: string,
+  epoch: number,
   secret: string,
   now: number = Date.now(),
   ttl: number = SESSION_TTL_MS,
 ): string {
   const exp = now + ttl;
-  const payload = `${VERSION}.${b64url(name)}.${exp}`;
+  const payload = `${VERSION}.${b64url(name)}.${epoch}.${exp}`;
   return `${payload}.${mac(secret, payload).toString('base64url')}`;
 }
+
+/** 验签出来的一张票：名字 + 签发时的会话纪元。 */
+export type SessionTicket = { name: string; epoch: number };
 
 /**
  * 验签。返回那个名字，任何一处不对都是 null（**不抛**）。
@@ -74,16 +88,18 @@ export function verifySession(
   token: string | null | undefined,
   secret: string,
   now: number = Date.now(),
-): string | null {
+): SessionTicket | null {
   if (typeof token !== 'string' || token === '') return null;
   const parts = token.split('.');
-  if (parts.length !== 4 || parts[0] !== VERSION) return null;
-  const [, encodedName, expText, signature] = parts as [string, string, string, string];
+  if (parts.length !== 5 || parts[0] !== VERSION) return null;
+  const [, encodedName, epochText, expText, signature] = parts as [string, string, string, string, string];
 
   const exp = Number(expText);
   if (!Number.isFinite(exp) || exp <= now) return null;
+  const epoch = Number(epochText);
+  if (!Number.isFinite(epoch) || epoch <= 0) return null;
 
-  const payload = `${VERSION}.${encodedName}.${expText}`;
+  const payload = `${VERSION}.${encodedName}.${epochText}.${expText}`;
   const expected = mac(secret, payload);
   let actual: Buffer;
   try {
@@ -98,5 +114,5 @@ export function verifySession(
   if (name === null) return null;
   const trimmed = name.trim();
   // 空名字当成没有会话：签名对但名字是空串的行只可能来自手工构造。
-  return trimmed === '' ? null : trimmed;
+  return trimmed === '' ? null : { name: trimmed, epoch };
 }

@@ -31,7 +31,7 @@ const IDLE: ActionResult = { ok: true };
  * （`inbox → design` 是合法迁移，seed 就走它）。
  */
 const LABEL: Record<DetailAction, string> = {
-  evaluate: '评估',
+  evaluate: '立项',
   submitReview: '提交评审',
   reviewPass: '通过',
   reviewReject: '打回',

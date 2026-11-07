@@ -83,7 +83,7 @@ export async function attemptLogin(
   name: string,
   password: string,
   now: number = Date.now(),
-): Promise<{ name: string }> {
+): Promise<{ name: string; epoch: number }> {
   const trimmed = name.trim();
   if (lockedFor(trimmed, now) > 0) throw new AppError('rate_limited', RATE_LIMITED);
 
@@ -107,7 +107,7 @@ export async function attemptLogin(
   if (!ok) return fail();
 
   buckets.delete(trimmed);
-  return { name: member.name };
+  return { name: member.name, epoch: (member.sessionEpoch ?? new Date(0)).getTime() };
 }
 
 async function storedHash(db: Db, memberId: string): Promise<string | null> {
@@ -130,7 +130,7 @@ export async function login(
   now: number = Date.now(),
 ): Promise<{ name: string }> {
   const result = await attemptLogin(db, name, password, now);
-  await setSessionCookie(result.name);
+  await setSessionCookie(result.name, result.epoch);
   return result;
 }
 

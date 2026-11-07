@@ -119,6 +119,11 @@ export type Member = {
    * 设置页的「查一下」会读它。
    */
   wecomUserId?: string | null;
+  /**
+   * 会话纪元（`members.session_epoch`）。票据里带一份、这里读一份，对不上就是「这张
+   * 凭证签的时候你还有权限」。可选的理由同上：权限结论不依赖它，只有会话校验读它。
+   */
+  sessionEpoch?: Date;
 };
 
 /**

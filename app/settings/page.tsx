@@ -22,9 +22,9 @@ import { MemberKeyRow } from './MemberKeyRow';
 import { MemberAdmin } from './MemberAdmin';
 import { NotifyChannels, PasswordRow } from './MeSecurity';
 import { endpointFromHeaders } from './mcp-endpoint';
-import { LINE_LEAD, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
 import { Shell } from '../components/Shell';
+import { roleLabel } from './roles';
 
 /**
  * 设置页：`/settings` 一个路由，两个 tab。
@@ -55,27 +55,20 @@ type TabId = 'me' | 'project' | 'members';
  * 手改 `?tab=members` 也只会拿到 404（见下面 `notFound()`）。不是把他领回「我的」——
  * 一个被悄悄改写的 URL 会让人以为自己看到的就是他要的那一页。
  */
+// 只有「我的」常驻；「成员」只给超管（见下）。
+//
+// 原有一个「项目」栏（生成器 / 条线负责人 / 工作流），owner 的判断是**不需要**：
+// 工作流那十行就是看板十列的另一种写法；条线负责人那张表在「成员」里已经按人列过；
+// 而唯一有写操作的那一格（平台模型）本来就该在管理员那一页。三块并成一块之后，
+// 设置页只剩「我对我自己」和「超管对全平台」，不再有一个谁都能点进去看的杂物间。
 const TABS: ReadonlyArray<{ id: TabId; href: string; label: string }> = [
   { id: 'me', href: '/settings?tab=me', label: '我的' },
-  { id: 'project', href: '/settings?tab=project', label: '项目' },
 ];
 
 const MEMBERS_TAB: { id: TabId; href: string; label: string } = {
   id: 'members', href: '/settings?tab=members', label: '成员',
 };
 
-/**
- * 工作流的十行，按状态机顺序。
- *
- * 顺序取自 `BOARD_STATES`（src/core/read/board.ts）：那是仓库里唯一一处把「十个状态谁在前」
- * 写成显式契约的地方，看板的列序也用它，用例独立钉住了它（tests/read.test.ts 抄的是
- * spec 里的十个数）。那份常量自己的注释已经拒绝了「从 `STATE_LABEL` 的键派生」这条路：
- * JS 对象的键序是**声明序**，今天恰好也是流程序，但那是没人维护的巧合。
- *
- * 所以这里一行顺序都不抄：顺序问 `BOARD_STATES`，中文名问 `STATE_LABEL`。
- * 状态机改了它们跟着改，改错了会在同一次改动里暴露（而不是在这一页悄悄走样）。
- */
-const WORKFLOW: ReadonlyArray<{ state: State; label: string }> =
   BOARD_STATES.map((state) => ({ state, label: STATE_LABEL[state] }));
 
 /**
@@ -103,9 +96,7 @@ export default async function SettingsPage({
 }) {
   const { tab } = await searchParams;
   // 没带参数、带了个手改出来的值，都落回「我的」：一个坏链接不该让设置页白屏。
-  const active: TabId = tab === 'project'
-    ? 'project'
-    : (tab === 'members' ? 'members' : 'me');
+  const active: TabId = tab === 'members' ? 'members' : 'me';
 
   const [members, actor] = await Promise.all([listMembers(), currentMember()]);
 
@@ -174,9 +165,14 @@ export default async function SettingsPage({
               tokens={tokenRows}
             />
           )
-          : (active === 'members'
-            ? <><MemberAdmin rows={memberRows ?? []} /></>
-            : <ProjectPanel members={members} generator={generator} />)}
+          : (
+            <>
+              {/* 平台模型：超管那一页唯一一个可写的平台级配置。它原来在「项目」栏里，
+                  「项目」删掉之后并到这里——同一个页面里既管人、也管这台机器用什么模型。 */}
+              <GeneratorRow view={generator} />
+              <MemberAdmin rows={memberRows ?? []} />
+            </>
+          )}
       </div>
       </main>
     </Shell>
@@ -258,61 +254,3 @@ function MePanel({
   );
 }
 
-/**
- * 项目。
- *
- * 两段：评审线、工作流，加上生成器那一格。都不涉及「人怎么管」——成员管理在
- * 「成员」那一栏（只给超管），这里不再放一份只读的名册：同一份事实两个入口，
- * 改完一处另一处就会看起来没变。
- */
-function ProjectPanel({
-  members, generator,
-}: { members: Member[]; generator: GeneratorView }) {
-  return (
-    <>
-      {/* 生成器：这一页上唯一一个可写的格子。它必须可写——「谁在跑」是这台机器的
-          事实，不是代码里的常量；而写不写对只有「测试」能回答（见 settings.ts）。 */}
-      <GeneratorRow view={generator} />
-
-      {/* 「谁能改一条需求由负责人的条线决定」（P4-06）在界面上的那一半：
-          条线 → 那条线的负责人 → 他管的是这条线上所有人名下的需求。界面上不派单，
-          只把这条规则摊开。
-
-          P4-06 之前这里写的是「哪个类型配哪条线」。那种说法现在会误导：一条商业类
-          需求由功能线 PM 负责时，签它的是功能线负责人——类型与评审人已经没有关系。
-
-          值里带上**角色名**：只写「赵越」的话，读者得滚回上面的成员表才能知道他是
-          哪条线的负责人。角色名在前、人名在后；同一角色多人时仍全部列出
-          （见 memberNamesOfRole）。没人配这个角色时只说「未配置」——
-          那时角色名也一样是空话，而「未配置」恰好是这一条线谁都不能动。 */}
-      <section className="sg">
-        <div className="h">条线负责人</div>
-        {LINE_LEAD.map((line) => {
-          const names = memberNamesOfRole(members, line.role);
-          return (
-            <div className="i" key={line.line}>
-              <div className="l"><b>{line.label}</b></div>
-              <div className="v">
-                {names.length === 0 ? '未配置' : `${roleLabel(line.role)} · ${names.join('、')}`}
-              </div>
-            </div>
-          );
-        })}
-      </section>
-
-      {/* 十个状态，按状态机顺序，只读。序号（01–10）就是顺序本身——它不来自数据库，
-          来自 BOARD_STATES；这一列存在的理由只是让「这是有序的」看得见。 */}
-      <section className="sg">
-        <div className="h">工作流</div>
-        <ol className="wf">
-          {WORKFLOW.map((item, index) => (
-            <li className="i" key={item.state}>
-              <span className="n">{String(index + 1).padStart(2, '0')}</span>
-              <div className="l"><b>{item.label}</b></div>
-            </li>
-          ))}
-        </ol>
-      </section>
-    </>
-  );
-}

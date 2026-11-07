@@ -146,24 +146,27 @@ describe('actionsFor 对齐（漂移探测器）', () => {
     }
   });
 
-  it('`evaluate` 没有任何状态给出它——所以 MCP 也没有这个工具', async () => {
+  it('`evaluate`（立项）只在收集状态给出，MCP 也有对应工具', async () => {
     const ids = await onePerState();
     for (const state of BOARD_STATES) {
       const detail = await getRequirementDetail(ids.get(state)!);
-      expect(detail!.actions).not.toContain('evaluate');
+      if (state === 'inbox') expect(detail!.actions).toContain('evaluate');
+      else expect(detail!.actions).not.toContain('evaluate');
     }
-    expect(LEGAL_FROM.evaluate).toEqual([]);
-    expect(TOOLS.some((def) => def.action === 'evaluate')).toBe(false);
+    // 认领只给负责人、不动状态；收集状态的唯一出口就是这条边，所以 agent 也要能走。
+    expect(LEGAL_FROM.evaluate).toEqual(['inbox']);
+    expect(TOOLS.filter((def) => def.action === 'evaluate')).toHaveLength(1);
   });
 
-  it('每个 DetailAction（除 evaluate）都有恰好一个工具', () => {
+  it('每个 DetailAction 都有恰好一个工具', () => {
     const declared = TOOLS.flatMap((def) => (def.action === null ? [] : [def.action]));
     expect(new Set(declared).size).toBe(declared.length);
 
     const covered = [...new Set(declared)].sort();
-    // `DetailAction` 的九个成员里，八个有工具；`evaluate` 刻意没有（见上一条）。
+    // `DetailAction` 的九个成员各有一个工具——包括 `evaluate`（立项）。
     expect(covered).toEqual([
-      'bounce', 'reject', 'restore', 'reviewPass', 'reviewReject', 'schedule', 'shelve', 'submitReview',
+      'bounce', 'evaluate', 'reject', 'restore', 'reviewPass', 'reviewReject', 'schedule',
+      'shelve', 'submitReview',
     ]);
     for (const action of covered) expect(LEGAL_FROM[action].length).toBeGreaterThan(0);
   });

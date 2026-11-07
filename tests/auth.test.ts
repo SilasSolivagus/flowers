@@ -35,6 +35,7 @@ import {
 import { notificationsFor } from '../src/core/read/notify.js';
 import { runTool, toolByName } from '../mcp/tools.js';
 import type { Identity } from '../mcp/tokens.js';
+import { memberByName } from '../src/core/auth/members.js';
 import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
 
@@ -69,6 +70,8 @@ const ADMIN = '房超';
 const FEATURE_LEAD = '吕正豪';
 const COMMERCIAL_LEAD = '赵越';
 const PM = '吕品';
+/** 会话纪元：签发与校验都带上它（P4-08 起票据含纪元）。 */
+const EPOCH = 1_700_000_000_000;
 const PM_OTHER = '李嘉';
 const PM_COMMERCIAL = '罗丹';
 
@@ -737,7 +740,7 @@ describe('登录', () => {
 
   it('口令正确就通过，并且大小写/空白按原样（登录名去首尾空白）', async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
-    expect(await attemptLogin(db, ` ${PM} `, 'correct-horse')).toEqual({ name: PM });
+    expect((await attemptLogin(db, ` ${PM} `, 'correct-horse')).name).toBe(PM);
   });
 
   it(`连续失败 ${MAX_FAILURES} 次后锁 ${LOCK_MS / 60000} 分钟：正确口令也进不来`, async () => {
@@ -751,8 +754,7 @@ describe('登录', () => {
     expect(await caught(attemptLogin(db, PM, 'correct-horse', now)))
       .toMatchObject({ code: 'rate_limited' });
     // 窗口过去之后又能试了（不是永久封）
-    expect(await attemptLogin(db, PM, 'correct-horse', now + LOCK_MS + 1))
-      .toEqual({ name: PM });
+    expect((await attemptLogin(db, PM, 'correct-horse', now + LOCK_MS + 1)).name).toBe(PM);
   });
 
   it('成功一次清零：4 次失败 + 1 次成功 + 4 次失败 = 还没锁', async () => {
@@ -812,27 +814,29 @@ describe('口令存储', () => {
 // ─── 6. 会话 ────────────────────────────────────────────────────────────────
 
 describe('会话 cookie', () => {
-  it('签发 → 验签拿回同一个名字', () => {
-    const token = signSession(PM, 'secret', 1_000);
-    expect(verifySession(token, 'secret', 1_000)).toBe(PM);
+  it('签发 → 验签拿回同一个名字与会话纪元', () => {
+    const token = signSession(PM, EPOCH, 'secret', 1_000);
+    expect(verifySession(token, 'secret', 1_000)).toEqual({ name: PM, epoch: EPOCH });
   });
 
   it('换一个密钥 / 改一个字 / 过期 / 改过期时间：全部不认', () => {
-    const token = signSession(PM, 'secret', 1_000);
+    const token = signSession(PM, EPOCH, 'secret', 1_000);
     expect(verifySession(token, 'other-secret', 1_000)).toBeNull();
-    // 改签名里的一个字符（名字是 base64、又不在签名串里，直接替换原文是无效篡改）
-    const [version, name, exp, signature] = token.split('.') as [string, string, string, string];
-    const flipped = signature[0] === 'A' ? `B${signature.slice(1)}` : `A${signature.slice(1)}`;
-    expect(verifySession([version, name, exp, flipped].join('.'), 'secret', 1_000)).toBeNull();
+    // 载荷是 v2.name.epoch.exp，最后一段是签名
+    const parts = token.split('.');
+    expect(parts).toHaveLength(5);
+    const flipped = parts[4]![0] === 'A' ? `B${parts[4]!.slice(1)}` : `A${parts[4]!.slice(1)}`;
+    expect(verifySession([...parts.slice(0, 4), flipped].join('.'), 'secret', 1_000)).toBeNull();
     // 换名字（签名覆盖它）
     expect(verifySession(
-      [version, Buffer.from('李嘉').toString('base64url'), exp, signature].join('.'),
+      [parts[0], Buffer.from('李嘉').toString('base64url'), parts[2], parts[3], parts[4]].join('.'),
       'secret', 1_000,
     )).toBeNull();
     expect(verifySession(token, 'secret', 1_000 + SESSION_TTL_MS + 1)).toBeNull();
-    const parts = token.split('.');
-    parts[2] = String(Number(parts[2]) + 10_000);
-    expect(verifySession(parts.join('.'), 'secret', 1_000)).toBeNull();
+    // 把纪元往前推（等价于「库里改过权限了」）：签名覆盖它，改了就验不过
+    const bumped = [...parts];
+    bumped[2] = String(Number(parts[2]) + 10_000);
+    expect(verifySession(bumped.join('.'), 'secret', 1_000)).toBeNull();
     expect(verifySession(null, 'secret', 1_000)).toBeNull();
     expect(verifySession('v1.abc', 'secret', 1_000)).toBeNull();
   });
@@ -843,8 +847,8 @@ describe('会话 cookie', () => {
     process.env.FLOWERS_SESSION_SECRET = 'from-env';
     resetSessionSecretCache();
     try {
-      const value = sessionValue(PM);
-      expect(verifySession(value, 'from-env')).toBe(PM);
+      const value = sessionValue(PM, EPOCH);
+      expect(verifySession(value, 'from-env')).toEqual({ name: PM, epoch: EPOCH });
       expect(verifySession(value, 'something-else')).toBeNull();
     } finally {
       if (before === undefined) delete process.env.FLOWERS_SESSION_SECRET;
@@ -917,7 +921,7 @@ describe('成员管理', () => {
     });
     expect(created.member.role).toBe('pm');
     expect(created.member.line).toBe('commercial');
-    expect(await attemptLogin(db, '新同学', created.password)).toEqual({ name: '新同学' });
+    expect((await attemptLogin(db, '新同学', created.password)).name).toBe('新同学');
 
     expect(await caught(createMember(db, ADMIN, {
       name: '新同学', role: 'pm', line: 'feature',
@@ -967,7 +971,7 @@ describe('成员管理', () => {
   it('重置口令：新口令能登，旧口令不能', async () => {
     await setPassword(db, idOf(PM), 'old-password');
     const result = await resetPassword(db, ADMIN, { memberId: idOf(PM) });
-    expect(await attemptLogin(db, PM, result.password)).toEqual({ name: PM });
+    expect((await attemptLogin(db, PM, result.password)).name).toBe(PM);
     expect(await caught(attemptLogin(db, PM, 'old-password')))
       .toMatchObject({ code: 'bad_credentials' });
   });
@@ -1117,5 +1121,47 @@ describe('通知扇出：条线 / 超管 / 偏好', () => {
     expect(types).not.toContain('requirement.created');
     // 搁置 / 拒绝属于「有结果」，key 档要收
     expect(types).toContain('requirement.shelved');
+  });
+});
+
+// ─── 7. 会话纪元：改了权限就踢人 ─────────────────────────────────────────────
+
+describe('会话纪元', () => {
+  /**
+   * 这一组盯的是一个真实观察到的问题：房超被改成 PM 之后，他那张 12 小时的旧票
+   * 仍然验得过——**降权要等他自己重新登录才生效**。计时器一响，「已经降权」和
+   * 「还能改任何人」之间没有任何东西。
+   */
+  it('改角色 → 纪元推进，旧票立刻对不上', async () => {
+    const created = await createMember(db, ADMIN, {
+      name: '纪元甲', role: 'pm', line: 'feature', password: 'pw-epoch-1',
+    });
+    const ticket = await attemptLogin(db, '纪元甲', 'pw-epoch-1');
+    const before = await memberByName(db, '纪元甲');
+    expect(before!.sessionEpoch!.getTime()).toBe(ticket.epoch);
+
+    await updateMember(db, ADMIN, { memberId: created.member.id, role: 'feature_reviewer', line: 'feature' });
+
+    const after = await memberByName(db, '纪元甲');
+    expect(after!.sessionEpoch!.getTime()).not.toBe(ticket.epoch);
+  });
+
+  it('重置口令 → 纪元也推进（旧票作废）', async () => {
+    await createMember(db, ADMIN, {
+      name: '纪元乙', role: 'pm', line: 'commercial', password: 'pw-epoch-2',
+    });
+    const before = await memberByName(db, '纪元乙');
+    await resetPassword(db, ADMIN, { memberId: before!.id });
+    const after = await memberByName(db, '纪元乙');
+    expect(after!.sessionEpoch!.getTime()).toBeGreaterThanOrEqual(before!.sessionEpoch!.getTime());
+  });
+
+  it('停用 → 纪元推进，旧票也过不了「还在名册上」那一关', async () => {
+    const created = await createMember(db, ADMIN, {
+      name: '纪元丙', role: 'pm', line: 'feature', password: 'pw-epoch-4',
+    });
+    await deactivateMember(db, ADMIN, { memberId: created.member.id });
+    const after = await memberByName(db, '纪元丙');
+    expect(after!.deactivatedAt).not.toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { db } from '../src/db/client';
 import { getBoard } from '../src/core/read/board';
 import { getRequirementDetail } from '../src/core/read/detail';
+import { requireSession, withSession } from './session-guard';
 import { currentMemberRow, listMembers, ownerCandidates } from '../src/core/read/member';
 import { listReleases } from '../src/core/read/version';
 import { generatorView } from '../src/core/uemaster/settings';
@@ -50,7 +51,11 @@ export default async function BoardPage({
   // 不需要知道生成器的存在。
   // `generator` 要问**当前成员**（P2.12）：他自己配了 key，抽屉里那三行「生成」的
   // 结论就得按他那一份算，而不是按平台的算。与 `getBoard()` 内部取的是同一个 cookie。
-  const [columns, viewer] = await Promise.all([getBoard(), currentMemberRow()]);
+  // 先过门再取数：page 与 layout 并行渲染，Shell 那道 redirect 拦不住这里的取数。
+  await requireSession();
+  const [columns, viewer] = await withSession(
+    () => Promise.all([getBoard(), currentMemberRow()]),
+  );
   /**
    * 抽屉的动作条要**这个人**的权限（P4-05）：`detail.actions` 是
    * `actionsFor(state) ∩ can(actor, …)`，`permissions` 是描述「编辑」、负责人「改」、
