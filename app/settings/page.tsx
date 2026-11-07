@@ -6,7 +6,7 @@ import { db } from '../../src/db/client';
 import { listTokens } from '../../mcp/tokens';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
-import { can } from '../../src/core/auth/roles';
+import { can, NO_REQUIREMENT } from '../../src/core/auth/roles';
 import { prefsOf } from '../../src/core/read/notify';
 import { memberAdminView } from '../../src/core/read/member-admin';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
@@ -22,7 +22,7 @@ import { MemberKeyRow } from './MemberKeyRow';
 import { MemberAdmin } from './MemberAdmin';
 import { NotifyRow, PasswordRow } from './MeSecurity';
 import { endpointFromHeaders } from './mcp-endpoint';
-import { REVIEW_LINE, memberNamesOfRole, roleLabel } from './roles';
+import { LINE_LEAD, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
 import { Shell } from '../components/Shell';
 
@@ -115,7 +115,7 @@ export default async function SettingsPage({
 
   // 「成员管理」的入口判据就是 `can('manageMembers')`——不在这里写 role === '...'，
   // 否则「谁能管成员」会长出第二份答案（服务层那一份才是权威）。
-  const admin = self !== null && can(self, { type: '', ownerMemberId: null }, 'manageMembers');
+  const admin = self !== null && can(self, NO_REQUIREMENT, 'manageMembers');
   const tabs = admin ? [...TABS, MEMBERS_TAB] : TABS;
   // 没有入口，也没有路由：手改 URL 的人拿到的是一张 404，而不是一张只读的名册。
   if (active === 'members' && !admin) notFound();
@@ -273,21 +273,23 @@ function ProjectPanel({
           事实，不是代码里的常量；而写不写对只有「测试」能回答（见 settings.ts）。 */}
       <GeneratorRow view={generator} />
 
-      {/* 「评审人由类型决定」（spec §2）在界面上的那一半：
-          类型 → 覆盖它的角色 → 那个角色现在是谁。界面上不做派单，只把这条规则摊开。
+      {/* 「谁能改一条需求由负责人的条线决定」（P4-06）在界面上的那一半：
+          条线 → 那条线的负责人 → 他管的是这条线上所有人名下的需求。界面上不派单，
+          只把这条规则摊开。
 
-          值里带上**角色名**（评审 M1，`REVIEW_LINE[].role` 之前是个只写不读的字段）：
-          只写「赵越」的话，读者得滚回上面的成员表才能知道他是哪条线的评审人——
-          而这一节要说的恰恰是「哪个类型配哪条线」。角色名在前、人名在后，
-          顺序就是规则本身的顺序；同角色多人时仍全部列出（见 memberNamesOfRole）。
-          没人配这个角色时只说「未配置」：那时角色名也一样是空话。
-          `roleLabel` 与成员表共用同一份中文名（M2），两处不会说法不一。 */}
+          P4-06 之前这里写的是「哪个类型配哪条线」。那种说法现在会误导：一条商业类
+          需求由功能线 PM 负责时，签它的是功能线负责人——类型与评审人已经没有关系。
+
+          值里带上**角色名**：只写「赵越」的话，读者得滚回上面的成员表才能知道他是
+          哪条线的负责人。角色名在前、人名在后；同一角色多人时仍全部列出
+          （见 memberNamesOfRole）。没人配这个角色时只说「未配置」——
+          那时角色名也一样是空话，而「未配置」恰好是这一条线谁都不能动。 */}
       <section className="sg">
-        <div className="h">评审线</div>
-        {REVIEW_LINE.map((line) => {
+        <div className="h">条线负责人</div>
+        {LINE_LEAD.map((line) => {
           const names = memberNamesOfRole(members, line.role);
           return (
-            <div className="i" key={line.type}>
+            <div className="i" key={line.line}>
               <div className="l"><b>{line.label}</b></div>
               <div className="v">
                 {names.length === 0 ? '未配置' : `${roleLabel(line.role)} · ${names.join('、')}`}

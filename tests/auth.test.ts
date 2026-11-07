@@ -28,6 +28,7 @@ import {
 } from '../src/core/requirements/terminal.js';
 import { deleteRequirement, updateRequirement } from '../src/core/requirements/manage.js';
 import { reassignOwner } from '../src/core/requirements/assign.js';
+import { claimRequirement } from '../src/core/requirements/claim.js';
 import {
   createMember, deactivateMember, resetPassword, saveNotifyPrefs, updateMember,
 } from '../src/core/members/manage.js';
@@ -94,113 +95,173 @@ async function caught(promise: Promise<unknown>): Promise<{ code: string; messag
   throw new Error('这次调用本该被拒绝，却成功了');
 }
 
-// ─── 1. 真值表 ────────────────────────────────────────────────────────────────
+// ─── 1. 真值表（P4-06：锚点是负责人的条线） ──────────────────────────────────
 
 /**
- * 表里的三种需求：
+ * 四种需求，全部在「待评审」，区别只在**负责人是谁**：
  *
- * | 代号 | 类型 | 负责人 | 派单评审人 | 状态 |
- * |---|---|---|---|---|
- * | `own` | 功能 | 吕品（PM，功能线） | 吕正豪 | 待评审 |
- * | `featureOther` | 功能 | 李嘉（PM，功能线） | 吕正豪 | 待评审 |
- * | `commercial` | 商业 | 罗丹（PM，商业线） | 赵越 | 待评审 |
+ * | 代号 | 类型 | 负责人 | 负责人条线 | 派单 | 这一格要证明什么 |
+ * |---|---|---|---|---|---|
+ * | `pan5` | 商业 | 吕品 | 功能线 | 吕正豪 | 商业类 + 功能线 PM：功能线负责人管得着，商业线负责人管不着 |
+ * | `ownedByBusiness` | 功能 | 罗丹 | 商业线 | 赵越 | 镜像：类型是功能，签它的是商业线负责人——类型不再是锚点 |
+ * | `noLineOwner` | 商业 | 房超 | 无 | 无派单 | 负责人没有条线：只有超管能动 |
+ * | `unowned` | 功能 | 无 | — | 无派单 | 没有负责人：谁都改不了，但谁都能认领 |
  *
- * 四个角色各占一行：超管、两条线的负责人、两个 PM（一个"自己的"、一个"别人的"）。
+ * 六个演员：超管、两条线的负责人、三个 PM（一个功能线「自己」、一个功能线「别人」、
+ * 一个商业线）。
  */
+
 const FACTS = {
-  own: { type: 'feature', ownerMemberId: null as string | null, state: 'review', reviewerMemberId: null as string | null },
-  featureOther: { type: 'feature', ownerMemberId: null as string | null, state: 'review', reviewerMemberId: null as string | null },
-  commercial: { type: 'commercial', ownerMemberId: null as string | null, state: 'review', reviewerMemberId: null as string | null },
+  pan5: {
+    ownerMemberId: null as string | null,
+    ownerLine: 'feature' as string | null,
+    state: 'review',
+    reviewerMemberId: null as string | null,
+  },
+  ownedByBusiness: {
+    ownerMemberId: null as string | null,
+    ownerLine: 'commercial' as string | null,
+    state: 'review',
+    reviewerMemberId: null as string | null,
+  },
+  noLineOwner: {
+    ownerMemberId: null as string | null,
+    ownerLine: null as string | null,
+    state: 'review',
+    reviewerMemberId: null as string | null,
+  },
+  unowned: {
+    ownerMemberId: null as string | null,
+    ownerLine: null as string | null,
+    state: 'review',
+    reviewerMemberId: null as string | null,
+  },
 };
 
-function factsOf(key: keyof typeof FACTS) {
+type CaseKey = keyof typeof FACTS;
+
+function factsOf(key: CaseKey) {
   const base = FACTS[key];
-  if (key === 'own') {
-    return { ...base, ownerMemberId: idOf(PM), reviewerMemberId: idOf(FEATURE_LEAD) };
+  switch (key) {
+    case 'pan5':
+      return { ...base, ownerMemberId: idOf(PM), reviewerMemberId: idOf(FEATURE_LEAD) };
+    case 'ownedByBusiness':
+      return { ...base, ownerMemberId: idOf(PM_COMMERCIAL), reviewerMemberId: idOf(COMMERCIAL_LEAD) };
+    case 'noLineOwner':
+      return { ...base, ownerMemberId: idOf(ADMIN), reviewerMemberId: null };
+    case 'unowned':
+      return { ...base, ownerMemberId: null, reviewerMemberId: null };
   }
-  if (key === 'featureOther') {
-    return { ...base, ownerMemberId: idOf(PM_OTHER), reviewerMemberId: idOf(FEATURE_LEAD) };
-  }
-  return { ...base, ownerMemberId: idOf(PM_COMMERCIAL), reviewerMemberId: idOf(COMMERCIAL_LEAD) };
 }
 
-type Row = [actor: string, ability: Ability, req: keyof typeof FACTS, expected: boolean];
+const ABILITIES: Ability[] = ['edit', 'review', 'reassignOwner', 'claim', 'admin', 'manageMembers'];
+
+type ActorKey = 'admin' | 'featureLead' | 'commercialLead' | 'pm' | 'otherPm' | 'businessPm';
+
+const ACTOR_NAME: Record<ActorKey, string> = {
+  admin: ADMIN,
+  featureLead: FEATURE_LEAD,
+  commercialLead: COMMERCIAL_LEAD,
+  pm: PM,
+  otherPm: PM_OTHER,
+  businessPm: PM_COMMERCIAL,
+};
+
+/** 只写 `true` 的格；没写的格一律断言 false（默认拒绝，写错的代价是红的）。 */
+type Truth = Partial<Record<Ability, true>>;
 
 /**
- * 真值表本体。**每一格都在这里**，一行不改地断言 `can()`。
+ * 真值表本体。**每一格都在下面的 it.each 里断言**（144 行），这里只写「哪些是 true」。
  *
- * 读法：一个超管在三种需求上五种能力全是 true（评审要求状态是 review，这里都是）；
- * 功能线负责人对功能类的 edit / review / reassignOwner 是 true、商业类全是 false；
- * PM 只在自己的需求上 edit 是 true，其余一律 false。
+ * 三句读法：
+ * - 超管一行全是 true（`claim` 除外：有主的需求不能认领，超管也一样）；
+ * - 每条线的负责人只在自己那一条「负责人线」上是 true，另一条线一格都没有；
+ * - PM 只有 `edit` 自己那一条是 true，`claim` 只对**没有负责人**的需求成立。
  */
-const TABLE: Row[] = [
-  // 超管：一切、任何一条
-  [ADMIN, 'admin', 'own', true],
-  [ADMIN, 'manageMembers', 'own', true],
-  [ADMIN, 'edit', 'own', true],
-  [ADMIN, 'edit', 'featureOther', true],
-  [ADMIN, 'edit', 'commercial', true],
-  [ADMIN, 'review', 'own', true],
-  [ADMIN, 'review', 'featureOther', true],
-  [ADMIN, 'review', 'commercial', true],
-  [ADMIN, 'reassignOwner', 'own', true],
-  [ADMIN, 'reassignOwner', 'featureOther', true],
-  [ADMIN, 'reassignOwner', 'commercial', true],
+const EXPECT: Record<ActorKey, Record<CaseKey, Truth>> = {
+  admin: {
+    pan5: { edit: true, review: true, reassignOwner: true, admin: true, manageMembers: true },
+    ownedByBusiness: { edit: true, review: true, reassignOwner: true, admin: true, manageMembers: true },
+    noLineOwner: { edit: true, review: true, reassignOwner: true, admin: true, manageMembers: true },
+    unowned: { edit: true, review: true, reassignOwner: true, claim: true, admin: true, manageMembers: true },
+  },
+  featureLead: {
+    pan5: { edit: true, review: true, reassignOwner: true },
+    ownedByBusiness: {},
+    noLineOwner: {},
+    unowned: { claim: true },
+  },
+  commercialLead: {
+    pan5: {},
+    ownedByBusiness: { edit: true, review: true, reassignOwner: true },
+    noLineOwner: {},
+    unowned: { claim: true },
+  },
+  pm: {
+    // 吕品：pan5 的负责人本人；ownedByBusiness 是别人的；unowned 可以认领。
+    pan5: { edit: true },
+    ownedByBusiness: {},
+    noLineOwner: {},
+    unowned: { claim: true },
+  },
+  otherPm: {
+    pan5: {},
+    ownedByBusiness: {},
+    noLineOwner: {},
+    unowned: { claim: true },
+  },
+  businessPm: {
+    pan5: {},
+    ownedByBusiness: { edit: true },
+    noLineOwner: {},
+    unowned: { claim: true },
+  },
+};
 
-  // 功能线负责人：本线全权，另一条线一点都没有
-  [FEATURE_LEAD, 'admin', 'own', false],
-  [FEATURE_LEAD, 'manageMembers', 'own', false],
-  [FEATURE_LEAD, 'edit', 'own', true],
-  [FEATURE_LEAD, 'edit', 'featureOther', true],
-  [FEATURE_LEAD, 'edit', 'commercial', false],
-  [FEATURE_LEAD, 'review', 'own', true],
-  [FEATURE_LEAD, 'review', 'featureOther', true],
-  [FEATURE_LEAD, 'review', 'commercial', false],
-  [FEATURE_LEAD, 'reassignOwner', 'own', true],
-  [FEATURE_LEAD, 'reassignOwner', 'featureOther', true],
-  [FEATURE_LEAD, 'reassignOwner', 'commercial', false],
+const TABLE: Array<[ActorKey, Ability, CaseKey, boolean]> = [];
+for (const actor of Object.keys(EXPECT) as ActorKey[]) {
+  for (const ability of ABILITIES) {
+    for (const req of Object.keys(FACTS) as CaseKey[]) {
+      TABLE.push([actor, ability, req, EXPECT[actor][req][ability] === true]);
+    }
+  }
+}
 
-  // 商业线负责人：镜像
-  [COMMERCIAL_LEAD, 'admin', 'own', false],
-  [COMMERCIAL_LEAD, 'manageMembers', 'own', false],
-  [COMMERCIAL_LEAD, 'edit', 'own', false],
-  [COMMERCIAL_LEAD, 'edit', 'featureOther', false],
-  [COMMERCIAL_LEAD, 'edit', 'commercial', true],
-  [COMMERCIAL_LEAD, 'review', 'own', false],
-  [COMMERCIAL_LEAD, 'review', 'featureOther', false],
-  [COMMERCIAL_LEAD, 'review', 'commercial', true],
-  [COMMERCIAL_LEAD, 'reassignOwner', 'own', false],
-  [COMMERCIAL_LEAD, 'reassignOwner', 'commercial', true],
-
-  // PM（吕品，功能线）：只碰自己的
-  [PM, 'admin', 'own', false],
-  [PM, 'manageMembers', 'own', false],
-  [PM, 'edit', 'own', true],
-  [PM, 'edit', 'featureOther', false],
-  [PM, 'edit', 'commercial', false],
-  [PM, 'review', 'own', false],
-  [PM, 'review', 'featureOther', false],
-  [PM, 'review', 'commercial', false],
-  [PM, 'reassignOwner', 'own', false],
-  [PM, 'reassignOwner', 'featureOther', false],
-
-  // 另一个 PM（李嘉）：own 是别人的
-  [PM_OTHER, 'edit', 'own', false],
-  [PM_OTHER, 'edit', 'featureOther', true],
-  [PM_OTHER, 'edit', 'commercial', false],
-];
-
-describe('can() 真值表', () => {
+describe('can() 真值表：锚点是负责人所在条线', () => {
   it.each(TABLE)('%s × %s × %s = %s', (actor, ability, req, expected) => {
-    expect(can(memberOf(actor), factsOf(req), ability)).toBe(expected);
+    expect(can(memberOf(ACTOR_NAME[actor]), factsOf(req), ability)).toBe(expected);
   });
 
   /**
-   * 评审这一步还有三条**状态 / 派单**条件，不该混进上面那张按角色看的表里：
-   * 不在这三种状态下 / 派单不是自己的，都没有签字权。
+   * 变更的起因，逐字钉死：同一个 PM（吕品，功能线）名下的**商业类**需求。
+   * 功能线负责人既能改、也能签；商业线负责人一个字都不能动（不是「看得到但不能签」，
+   * 是整格都是 false，动作条上什么都不会出现）。
+   */
+  it('商业类 + 功能线 PM：功能线负责人可改可签，商业线负责人一格都没有', () => {
+    const pan5 = factsOf('pan5');
+    expect(can(memberOf(FEATURE_LEAD), pan5, 'edit')).toBe(true);
+    expect(can(memberOf(FEATURE_LEAD), pan5, 'review')).toBe(true);
+    expect(can(memberOf(FEATURE_LEAD), pan5, 'reassignOwner')).toBe(true);
+
+    expect(can(memberOf(COMMERCIAL_LEAD), pan5, 'edit')).toBe(false);
+    expect(can(memberOf(COMMERCIAL_LEAD), pan5, 'review')).toBe(false);
+    expect(can(memberOf(COMMERCIAL_LEAD), pan5, 'reassignOwner')).toBe(false);
+  });
+
+  it('镜像：功能类 + 商业线 PM，签它的是商业线负责人（类型不参与判断）', () => {
+    const facts = factsOf('ownedByBusiness');
+    expect(can(memberOf(COMMERCIAL_LEAD), facts, 'edit')).toBe(true);
+    expect(can(memberOf(COMMERCIAL_LEAD), facts, 'review')).toBe(true);
+    expect(can(memberOf(FEATURE_LEAD), facts, 'edit')).toBe(false);
+    expect(can(memberOf(FEATURE_LEAD), facts, 'review')).toBe(false);
+  });
+
+  /**
+   * 评审这一步还有三条**状态 / 派单**条件，不该混进上面那张按人看的表里：
+   * 状态不是 review / 派单不是自己的，都没有签字权。
    */
   it('review 只认「状态是 review」+「派单是自己」', () => {
-    const facts = factsOf('featureOther');
+    const facts = factsOf('pan5');
     // 状态不是 review：这条线的负责人也不行
     expect(can(memberOf(FEATURE_LEAD), { ...facts, state: 'inbox' }, 'review')).toBe(false);
     expect(can(memberOf(FEATURE_LEAD), { ...facts, state: 'queue' }, 'review')).toBe(false);
@@ -215,21 +276,54 @@ describe('can() 真值表', () => {
     expect(can(memberOf(ADMIN), { ...facts, state: 'inbox' }, 'review')).toBe(false);
   });
 
+  it('负责人没有条线：只有超管能动（不是「谁都可以」）', () => {
+    const facts = factsOf('noLineOwner');
+    for (const who of [FEATURE_LEAD, COMMERCIAL_LEAD, PM, PM_OTHER, PM_COMMERCIAL]) {
+      for (const ability of ['edit', 'review', 'reassignOwner', 'claim'] as Ability[]) {
+        expect({ who, ability, allowed: can(memberOf(who), facts, ability) })
+          .toEqual({ who, ability, allowed: false });
+      }
+    }
+    expect(can(memberOf(ADMIN), facts, 'edit')).toBe(true);
+    expect(can(memberOf(ADMIN), facts, 'review')).toBe(true);
+  });
+
+  it('没有负责人：谁都改不了，但 PM / 条线负责人 / 超管都能认领', () => {
+    const facts = factsOf('unowned');
+    for (const who of [FEATURE_LEAD, COMMERCIAL_LEAD, PM, PM_OTHER, PM_COMMERCIAL]) {
+      expect(can(memberOf(who), facts, 'edit')).toBe(false);
+      expect(can(memberOf(who), facts, 'review')).toBe(false);
+      expect(can(memberOf(who), facts, 'reassignOwner')).toBe(false);
+      expect(can(memberOf(who), facts, 'claim')).toBe(true);
+    }
+  });
+
   it('停用的人什么都不行（角色还写着 pm 也一样）', () => {
     const deactivated: Member = { ...memberOf(PM), deactivatedAt: new Date() };
-    for (const ability of ['edit', 'review', 'reassignOwner', 'admin', 'manageMembers'] as Ability[]) {
-      expect(can(deactivated, factsOf('own'), ability)).toBe(false);
+    for (const ability of ABILITIES) {
+      expect(can(deactivated, factsOf('pan5'), ability)).toBe(false);
     }
     // 查询层也把他当不存在
-    expect(can(null, factsOf('own'), 'edit')).toBe(false);
+    expect(can(null, factsOf('pan5'), 'edit')).toBe(false);
   });
 });
 
 // ─── 2. 服务层：八种动作都过同一张表 ─────────────────────────────────────────
 
+/** 负责人 → 他所在条线的负责人。**派单跟着人走，不跟类型走**（P4-06）。 */
+const LEAD_OF: Record<string, string> = {
+  [PM]: FEATURE_LEAD,
+  [PM_OTHER]: FEATURE_LEAD,
+  [PM_COMMERCIAL]: COMMERCIAL_LEAD,
+  [ADMIN]: ADMIN,
+};
+
 /**
  * 造一条属于 `owner` 的需求，并推到指定状态。**每一步都由 owner 自己做**（规则 1 +
  * 「PM 只能改自己的」）——所以这个助手本身就是一条正向用例。
+ *
+ * 签字那一步必须由 owner 所在条线的负责人做：`LEAD_OF` 是这句话的测试侧写法
+ * （写死名字，不从实现反查——实现错了这里要红）。
  */
 async function makeFor(owner: string, type: 'feature' | 'commercial', state: string): Promise<string> {
   const created = await createRequirement(db, owner, {
@@ -248,7 +342,8 @@ async function makeFor(owner: string, type: 'feature' | 'commercial', state: str
   await submitReview(db, owner, { requirementId: created.id, prdUrl: 'https://docs.example/prd' });
   if (state === 'review') return created.id;
 
-  const reviewer = type === 'feature' ? FEATURE_LEAD : COMMERCIAL_LEAD;
+  const reviewer = LEAD_OF[owner];
+  if (reviewer === undefined) throw new Error(`不知道 ${owner} 在哪条线`);
   await reviewPass(db, reviewer, { requirementId: created.id });
   if (state === 'queue') return created.id;
 
@@ -396,11 +491,28 @@ describe('服务层：九种动作都过 can()', () => {
     });
   }
 
-  it('另一条线的负责人也不行（商业负责人碰功能需求）', async () => {
+  it('另一条线的负责人也不行（商业负责人碰功能线 PM 的需求）', async () => {
     const id = await makeFor(PM_OTHER, 'feature', 'inbox');
     expect(await caught(updateRequirement(db, COMMERCIAL_LEAD, {
       requirementId: id, title: '改个标题',
     }))).toMatchObject({ code: 'forbidden' });
+  });
+
+  /**
+   * 变更的起因在服务层的那一半：一条**商业类**需求由功能线 PM 负责。
+   * 旧规则下它派给商业线负责人；新规则下商业线负责人连改都改不了，功能线负责人能改能签。
+   */
+  it('商业类需求归功能线 PM：功能线负责人能改能签，商业线负责人被拒', async () => {
+    const id = await makeFor(PM, 'commercial', 'review');
+
+    expect(await caught(updateRequirement(db, COMMERCIAL_LEAD, {
+      requirementId: id, title: '越线改',
+    }))).toMatchObject({ code: 'forbidden' });
+    expect(await caught(reviewPass(db, COMMERCIAL_LEAD, { requirementId: id })))
+      .toMatchObject({ code: 'not_reviewer' });
+
+    await updateRequirement(db, FEATURE_LEAD, { requirementId: id, title: '本线改' });
+    expect((await reviewPass(db, FEATURE_LEAD, { requirementId: id })).state).toBe('queue');
   });
 
   it('名字不在名册上 → forbidden（不是 500，也不泄露名册）', async () => {
@@ -421,7 +533,8 @@ describe('评审：只有派单的评审人能签字', () => {
   });
 
   it('派单上的那位可以签，签完状态走到 queue', async () => {
-    const id = await makeFor(PM_OTHER, 'commercial', 'review');
+    // 商业类需求、负责人罗丹（商业线）→ 派给商业线负责人赵越。类型与锚点在这条里一致。
+    const id = await makeFor(PM_COMMERCIAL, 'commercial', 'review');
     expect((await reviewPass(db, COMMERCIAL_LEAD, { requirementId: id })).state).toBe('queue');
   });
 });
@@ -444,12 +557,13 @@ describe('规则 1：录入即负责人', () => {
     }))).toMatchObject({ code: 'forbidden' });
   });
 
-  it('条线负责人只能指定本线的人', async () => {
+  it('条线负责人只能指定本线的人（与需求类型无关）', async () => {
+    // 两条都写成**商业类**：一条挂本线、一条挂另一条线。允许与拒绝都不看类型。
     const ok = await createRequirement(db, FEATURE_LEAD, {
-      title: '本线', type: 'feature', requester: '孙建宏', ownerMemberId: idOf(PM_OTHER),
+      title: '本线', type: 'commercial', requester: '孙建宏', ownerMemberId: idOf(PM_OTHER),
     });
     const cross = await caught(createRequirement(db, FEATURE_LEAD, {
-      title: '跨线', type: 'feature', requester: '孙建宏', ownerMemberId: idOf(PM_COMMERCIAL),
+      title: '跨线', type: 'commercial', requester: '孙建宏', ownerMemberId: idOf(PM_COMMERCIAL),
     }));
     expect(cross).toMatchObject({ code: 'forbidden', message: '只能把需求交给本线的人' });
     expect(ok.id).toBeTruthy();
@@ -480,6 +594,78 @@ describe('规则 1：录入即负责人', () => {
     const row = await db.execute<{ owner_member_id: string }>(sql`
       select owner_member_id from requirements where title = 'agent 建的需求'`);
     expect(row.rows[0]!.owner_member_id).toBe(idOf(PM_OTHER));
+  });
+});
+
+// ─── 3.5 立项（认领）：无主的需求落到人身上，然后跟着他的条线 ─────────────────
+
+describe('立项：任何 PM 都能认领，认领即成为负责人', () => {
+  /** 超管显式留空造出来的「待接单」卡（种子 #1 就是它）。 */
+  async function unownedRequirement(): Promise<string> {
+    const created = await createRequirement(db, ADMIN, {
+      title: '待接单', type: 'commercial', requester: '孙建宏', ownerMemberId: null,
+    });
+    const row = await db.execute<{ owner_member_id: string | null }>(
+      sql`select owner_member_id from requirements where id = ${created.id}`);
+    expect(row.rows[0]!.owner_member_id).toBeNull();
+    return created.id;
+  }
+
+  it('PM 认领之后成为负责人，写一条 owner_assigned 事件（from 为 null）', async () => {
+    const id = await unownedRequirement();
+    const result = await claimRequirement(db, PM, { requirementId: id });
+    expect(result).toMatchObject({ owner: PM, changed: true });
+
+    const row = await db.execute<{ owner_member_id: string }>(
+      sql`select owner_member_id from requirements where id = ${id}`);
+    expect(row.rows[0]!.owner_member_id).toBe(idOf(PM));
+
+    const events = await db.execute<{ actor: string; payload: string }>(sql`
+      select actor, payload from events
+       where requirement_id = ${id} and type = 'requirement.owner_assigned'`);
+    expect(events.rows).toHaveLength(1);
+    expect(events.rows[0]!.actor).toBe(PM);
+    expect(JSON.parse(events.rows[0]!.payload)).toEqual({ from: null, to: PM });
+  });
+
+  it('认领之后：只有他的条线负责人 / 超管 / 他自己能动，别的线一格都没有', async () => {
+    const id = await unownedRequirement();
+    await claimRequirement(db, PM, { requirementId: id });
+
+    // 他自己（PM）能改
+    await updateRequirement(db, PM, { requirementId: id, title: '认领后改' });
+    // 他的条线负责人能改
+    await updateRequirement(db, FEATURE_LEAD, { requirementId: id, title: '本线负责人改' });
+    // 另一条线的负责人不能
+    expect(await caught(updateRequirement(db, COMMERCIAL_LEAD, {
+      requirementId: id, title: '越线改',
+    }))).toMatchObject({ code: 'forbidden' });
+    // 别的 PM 不能
+    expect(await caught(updateRequirement(db, PM_OTHER, {
+      requirementId: id, title: '别人改',
+    }))).toMatchObject({ code: 'forbidden' });
+  });
+
+  it('有主之后不能再认领（超管也不行，那是转交）', async () => {
+    const id = await unownedRequirement();
+    await claimRequirement(db, PM, { requirementId: id });
+    expect(await caught(claimRequirement(db, PM_OTHER, { requirementId: id })))
+      .toMatchObject({ code: 'forbidden', message: '这条需求已经有负责人了' });
+    expect(await caught(claimRequirement(db, ADMIN, { requirementId: id })))
+      .toMatchObject({ code: 'forbidden', message: '这条需求已经有负责人了' });
+  });
+
+  it('认领后再提交评审，派单跟到认领人的条线', async () => {
+    const id = await unownedRequirement();
+    await claimRequirement(db, PM_COMMERCIAL, { requirementId: id });
+    await evaluate(db, PM_COMMERCIAL, { requirementId: id });
+    await submitReview(db, PM_COMMERCIAL, { requirementId: id, prdUrl: 'https://x/prd' });
+
+    const assigned = await db.execute<{ name: string }>(sql`
+      select m.name from review_assignments ra
+        join members m on m.id = ra.reviewer_member_id
+       where ra.requirement_id = ${id} and ra.verdict = 'handed'`);
+    expect(assigned.rows.map((r) => r.name)).toEqual([COMMERCIAL_LEAD]);
   });
 });
 
@@ -809,6 +995,16 @@ describe('转交负责人', () => {
     }))).toMatchObject({ code: 'forbidden', message: '只能把需求交给本线的人' });
   });
 
+  it('商业类需求归功能线 PM 时，转交人也是功能线负责人（不是商业线）', async () => {
+    const id = await makeFor(PM, 'commercial', 'inbox');
+    expect(await caught(reassignOwner(db, COMMERCIAL_LEAD, {
+      requirementId: id, ownerMemberId: idOf(PM_COMMERCIAL),
+    }))).toMatchObject({ code: 'forbidden' });
+    expect((await reassignOwner(db, FEATURE_LEAD, {
+      requirementId: id, ownerMemberId: idOf(PM_OTHER),
+    })).owner).toBe(PM_OTHER);
+  });
+
   it('转给同一个人是空操作：不产生事件', async () => {
     const id = await makeFor(PM_OTHER, 'feature', 'inbox');
     const result = await reassignOwner(db, ADMIN, {
@@ -842,12 +1038,16 @@ describe('转交负责人', () => {
 // ─── 8. 通知扇出 ────────────────────────────────────────────────────────────
 
 describe('通知扇出：条线 / 超管 / 偏好', () => {
-  it('条线负责人只收本线，超管两条线都收', async () => {
-    const feature = await createRequirement(db, PM_OTHER, {
-      title: '功能需求', type: 'feature', requester: '孙建宏',
+  it('条线负责人只收「自己线上的人负责」的需求，超管全都收', async () => {
+    // 三张卡的**类型与负责人故意错开**：类型不再是扇出的判据。
+    const byFeaturePm = await createRequirement(db, PM_OTHER, {
+      title: '功能线 PM 的功能类', type: 'feature', requester: '孙建宏',
     });
-    const commercial = await createRequirement(db, PM_COMMERCIAL, {
-      title: '商业需求', type: 'commercial', requester: '孙建宏',
+    const commercialTypeByFeaturePm = await createRequirement(db, PM, {
+      title: '功能线 PM 的商业类', type: 'commercial', requester: '孙建宏',
+    });
+    const byBusinessPm = await createRequirement(db, PM_COMMERCIAL, {
+      title: '商业线 PM 的商业类', type: 'commercial', requester: '孙建宏',
     });
 
     const ids = (notices: Array<{ requirementId: string }>) => notices.map((n) => n.requirementId);
@@ -855,12 +1055,18 @@ describe('通知扇出：条线 / 超管 / 偏好', () => {
     const commercialLead = ids(await notificationsFor(db, memberOf(COMMERCIAL_LEAD)));
     const admin = ids(await notificationsFor(db, memberOf(ADMIN)));
 
-    expect(featureLead).toContain(feature.id);
-    expect(featureLead).not.toContain(commercial.id);
-    expect(commercialLead).toContain(commercial.id);
-    expect(commercialLead).not.toContain(feature.id);
-    expect(admin).toContain(feature.id);
-    expect(admin).toContain(commercial.id);
+    // 功能线负责人：两个功能线 PM 名下的都收，包括那条**商业类**的。
+    expect(featureLead).toContain(byFeaturePm.id);
+    expect(featureLead).toContain(commercialTypeByFeaturePm.id);
+    expect(featureLead).not.toContain(byBusinessPm.id);
+    // 商业线负责人：只收商业线 PM 名下那条。
+    expect(commercialLead).toContain(byBusinessPm.id);
+    expect(commercialLead).not.toContain(byFeaturePm.id);
+    expect(commercialLead).not.toContain(commercialTypeByFeaturePm.id);
+    // 超管：全部。
+    for (const id of [byFeaturePm.id, commercialTypeByFeaturePm.id, byBusinessPm.id]) {
+      expect(admin).toContain(id);
+    }
   });
 
   it('拒绝 / 搁置：条线负责人与超管收到（规则 3）', async () => {

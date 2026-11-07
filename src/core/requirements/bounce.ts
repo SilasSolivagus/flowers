@@ -81,7 +81,7 @@ export async function bounce(
     const row = await lockRequirement(tx, requirementId);
     // 权限先于状态门（见 evaluate.ts 的同一段注释）。
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
     // 只按配对判断不够：ready → dev 也是合法配对（那是时钟的路子），光看配对
     // 会让「打回」替时钟推掉第一步、把 window_start 那段窗口静默跳过。

@@ -150,7 +150,7 @@ async function toReview(target: Created): Promise<void> {
   });
 }
 
-/** 走到待排期（评审由该类型的评审人签）。 */
+/** 走到待排期（评审由**负责人所在条线**的负责人签；负责人没有条线时由超管自己签）。 */
 async function toQueue(target: Created, reviewer: string): Promise<void> {
   await toReview(target);
   await reviewPass(db, reviewer, { requirementId: target.id });
@@ -249,20 +249,23 @@ async function main() {
   await evaluate(db, PM, { requirementId: design.id });
   log(`${padTo(`#${design.number}`, 5)}${padTo('连续包月下单后短信通知', 26)}create → evaluate`);
 
-  // 3 待评审：功能类 → 派给功能线（吕正豪）。
+  // 3 待评审：负责人王妍在**商业线** → 派给商业线负责人赵越（P4-06：锚点是人的条线，
+  //   与它的「功能类」无关）。
   const reviewFeature = await create('导出任务队列改造', 'feature', '孙建宏', '王妍');
   await toReview(reviewFeature);
-  log(`${padTo(`#${reviewFeature.number}`, 5)}${padTo('导出任务队列改造', 26)}… → submitReview（功能线）`);
+  log(`${padTo(`#${reviewFeature.number}`, 5)}${padTo('导出任务队列改造', 26)}… → submitReview（负责人王妍 → 商业线赵越）`);
 
-  // 4 待评审：商业类 → 派给商业线（赵越）。同一列，等的人不同。
+  // 4 待评审：负责人是超管房超，**没有条线** → 不派单，只有超管能签（P4-06 第 1 条）。
+  //   同一列，等的不是同一种人：一条等条线负责人，一条等超管。
   const reviewCommercial = await create('直链分享限速（二期）', 'commercial', '房超', '房超');
   await toReview(reviewCommercial);
-  log(`${padTo(`#${reviewCommercial.number}`, 5)}${padTo('直链分享限速（二期）', 26)}… → submitReview（商业线）`);
+  log(`${padTo(`#${reviewCommercial.number}`, 5)}${padTo('直链分享限速（二期）', 26)}… → submitReview（负责人无条线 → 等超管）`);
 
   // 5 / 6 待排期（都 mine）：评审通过了，等排期。
+  // 商业类，但负责人是功能线的吕品 → 由**功能线**负责人吕正豪签（P4-06 换锚点）。
   const queueA = await create('权益套餐产品结构改造', 'commercial', '李思远', '吕品');
-  await toQueue(queueA, '赵越');
-  log(`${padTo(`#${queueA.number}`, 5)}${padTo('权益套餐产品结构改造', 26)}… → reviewPass（赵越）`);
+  await toQueue(queueA, '吕正豪');
+  log(`${padTo(`#${queueA.number}`, 5)}${padTo('权益套餐产品结构改造', 26)}… → reviewPass（吕正豪）`);
 
   const queueB = await create('分享页搜索补齐 H5 / APP', 'feature', '王妍', '吕品');
   await toQueue(queueB, '吕正豪');
@@ -270,13 +273,13 @@ async function main() {
 
   // 7 待开发：排进下月版本，开工日还没到（等开工日 day(+7)）。时钟不会碰它。
   const ready = await create('PC 端支持打开分享页', 'feature', '房超', '房超');
-  await toQueue(ready, '吕正豪');
+  await toQueue(ready, '房超');
   await scheduleInto(ready, releaseId(RELEASE_2), day(9), day(12));
   log(`${padTo(`#${ready.number}`, 5)}${padTo('PC 端支持打开分享页', 26)}… → schedule（${RELEASE_2}，等开工日）`);
 
   // 8 开发中：排进当月版本，提测日还在未来 —— 时钟走过开工日，把它推到开发中。
   const devOnTime = await create('分享创建页改版', 'feature', '房超', '王妍');
-  await toQueue(devOnTime, '吕正豪');
+  await toQueue(devOnTime, '赵越');
   await scheduleInto(devOnTime, releaseId(RELEASE_1), day(2), day(5));
   log(`${padTo(`#${devOnTime.number}`, 5)}${padTo('分享创建页改版', 26)}… → schedule（${RELEASE_1}，提测日未到）`);
 
@@ -288,7 +291,7 @@ async function main() {
 
   // 11 已上线：承诺完成日已过 —— 时钟推它到 live（历史，甘特上还看得见）。
   const live = await create('直链分享限速策略', 'feature', '房超', '房超');
-  await toQueue(live, '吕正豪');
+  await toQueue(live, '房超');
   await scheduleInto(live, releaseId(RELEASE_1), day(-6), day(-2));
   log(`${padTo(`#${live.number}`, 5)}${padTo('直链分享限速策略', 26)}… → schedule（${RELEASE_1}，承诺日已过）`);
 
@@ -309,7 +312,7 @@ async function main() {
   // 但两者都是时钟（`on: 'clock'`、没有名字）：日期过了只是「等的东西过期了」，
   // 不是「谁欠一个动作」，所以这张卡不被框（同一列的「等谁」也不该是「等人提测」）。
   const devLate = await create('支付宝投诉自动退款', 'commercial', '王妍', '吕品');
-  await toQueue(devLate, '赵越');
+  await toQueue(devLate, '吕正豪');
   await scheduleInto(devLate, releaseId(RELEASE_1), day(-2), day(4));
   log(`${padTo(`#${devLate.number}`, 5)}${padTo('支付宝投诉自动退款', 26)}… → schedule（${RELEASE_1}，提测日已过）`);
   await tickAt(day(0), '补一次 tick：把它推进开发中（一步）');

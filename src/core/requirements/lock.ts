@@ -24,6 +24,16 @@ export type Locked = {
    * 既然已经 `for update` 锁了这一行，顺手取回来比再查一次便宜、也不会读到半旧的行。
    */
   owner_member_id: string | null;
+  /**
+   * 负责人所在条线（P4-06）。权限的锚点从「需求类型」换成「人的归属」之后，
+   * **每一处判权限的地方都要它**，而它只能来自负责人那一行（`members.line`）。
+   * 与负责人同一行、同一次锁里取回来：分两次查会出现「负责人已经换了、条线还是旧值」
+   * 的半旧读法，而 `can()` 是一个布尔判断，它不会告诉你它读到了两个时刻。
+   *
+   * 左边 join：没有负责人（null）与负责人没有条线（null）都要能读出来——前者可认领，
+   * 后者只有超管能动，两件事必须分开判断（见 roles.ts）。
+   */
+  owner_line: string | null;
 };
 
 /**
@@ -36,8 +46,15 @@ export type Locked = {
  * 行不存在就抛 not_found（消息各服务统一）：锁不到的行不能被假装推进一步。
  */
 export async function lockRequirement(tx: Tx, requirementId: string): Promise<Locked> {
-  const cur = await tx.execute<Locked>(
-    sql`select state, type, prd_url, owner_member_id from requirements where id = ${requirementId} for update`);
+  // `for update of r`：join 进来的是 members（左侧是 r），不加 `of r` 的
+  // `for update` 在 PG 里会撞上「FOR UPDATE cannot be applied to the nullable side
+  // of an outer join」——而这里锁的本来也只是需求那一行。
+  const cur = await tx.execute<Locked>(sql`
+    select r.state, r.type, r.prd_url, r.owner_member_id, m.line as owner_line
+      from requirements r
+      left join members m on m.id = r.owner_member_id
+     where r.id = ${requirementId}
+       for update of r`);
   const row = cur.rows[0];
   if (!row) throw new AppError('not_found', '找不到这条需求');
   return row;

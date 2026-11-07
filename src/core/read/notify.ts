@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import type { Db } from '../../db/client.js';
 import { currentMemberRow, type Member } from './member.js';
+import { leadLineOf } from '../auth/roles.js';
 
 /**
  * 站内通知（「找过我的」）读模型。
@@ -30,8 +31,13 @@ import { currentMemberRow, type Member } from './member.js';
  * | 观众 | 收什么 | 条件 |
  * |---|---|---|
  * | 超管（`product_owner`） | 全部需求事件 | 只排除他自己做的事（`e.actor <> 我`） |
- * | 条线负责人（`*_reviewer`） | 本线（`r.type` = 他那一线）全部事件 | 同上 |
+ * | 条线负责人（`line` + `role` 都对得上） | 「本线」= **负责人在这条线上**的全部事件 | 同上 |
  * | 任何人 | 拒绝 / 搁置 | 与上一档同一条扇出规则；这一档由 `rejected` 这个开关单独控制 |
+ *
+ * P4-06：「本线」的判据从 `r.type`（需求类型）换成了**负责人那一行的 `line`**。
+ * 一条商业类需求由功能线 PM 负责时，它属于功能线；功能线负责人收它的全部变更，
+ * 商业线负责人收不到。这条规则与 `can()` 的锚点是同一句话，所以两处不可能给出
+ * 两个答案——「能改它的人」与「收它通知的人」必须是同一批人。
  *
  * 三条细节：
  *
@@ -39,8 +45,8 @@ import { currentMemberRow, type Member } from './member.js';
  *    不做这件事的后果是，超管每改一条需求都会收到一条「你可能该看看」——一个永远
  *    亮着的红点，等于没有红点。
  * 2. **PM 不在扇出里**。PM 的观众身份仍然是「提出人 / 负责人 / 被派单的评审人」
- *    （上面那张老表），条线不给他任何额外的可见性。条线是组织归属，不是权限
- *    （见 `core/auth/roles.ts` 的注释）。
+ *    （上面那张老表），条线不给他任何额外的可见性。条线是人的归属，它授予权限的
+ *    方式只有一条：它让**那条线的负责人**成为「能改这条需求的人」，扇出跟着那句话走。
  * 3. **关掉就是关掉**（`notify_prefs`）。一个关了通知的超管**什么都收不到**，而不是
  *    「只收重要的」：这条规则的唯一用途是「我不看」，替人判断哪条重要是另一种不听话。
  *
@@ -201,19 +207,27 @@ const REJECTED_TYPES = sql`('requirement.rejected', 'requirement.shelved')`;
 function addressed(member: Member): SQL {
   const prefs = prefsOf(member.notifyPrefs);
   const admin = member.role === 'product_owner';
-  const leadLine = member.role === 'feature_reviewer'
-    ? 'feature'
-    : (member.role === 'commercial_reviewer' ? 'commercial' : null);
+  // 「我是哪条线的负责人」用 roles.ts 的那一个定义（role 与 line 同时成立），
+  // 不在这里再写一遍角色名——那份映射长过腿，正是这一轮要拆掉的东西。
+  const leadLine = leadLineOf(member);
   const fancied = admin || leadLine !== null;
+
+  // 「这条需求的负责人是不是我这条件线上的人」。用 exists 而不是 join：`addressed`
+  // 已经拼在 events × requirements 的查询里，再 join 一张 members 会让别名与行数都
+  // 变得不可预期（一条需求没有负责人时不该因为 join 放大任何一行）。
+  const inMyLine = leadLine === null
+    ? sql``
+    : sql` and exists (select 1
+                         from members owner
+                        where owner.id = r.owner_member_id
+                          and owner.line = ${leadLine})`;
 
   const fanout: SQL[] = [];
   if (fancied && prefs.changed) {
-    fanout.push(sql`(e.type not in ${REJECTED_TYPES} and e.actor <> ${member.name}${
-      leadLine === null ? sql`` : sql` and r.type = ${leadLine}`})`);
+    fanout.push(sql`(e.type not in ${REJECTED_TYPES} and e.actor <> ${member.name}${inMyLine})`);
   }
   if (fancied && prefs.rejected) {
-    fanout.push(sql`(e.type in ${REJECTED_TYPES} and e.actor <> ${member.name}${
-      leadLine === null ? sql`` : sql` and r.type = ${leadLine}`})`);
+    fanout.push(sql`(e.type in ${REJECTED_TYPES} and e.actor <> ${member.name}${inMyLine})`);
   }
 
   const base = sql`(

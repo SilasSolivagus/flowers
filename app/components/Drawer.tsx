@@ -9,6 +9,7 @@ import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
 import { GenerateButton } from './GenerateButton';
 import { AttachForm } from './AttachForm';
+import { ClaimButton } from './ClaimButton';
 import { OwnerPicker } from './OwnerPicker';
 
 /**
@@ -163,13 +164,22 @@ export function Drawer({
             <h3>信息</h3>
             <dl className="fields">
               <dt>提出人</dt><dd>{info.requester ?? '—'}</dd>
-              {/* 负责人这一行是「改」的入口（P4-05）。控件只在有转交权时挂出来，
-                  候选也由读模型筛过（超管全名册 / 条线负责人只看本线）。 */}
+              {/* 负责人这一行是「改」的入口（P4-05），也是 P4-06 锚点的可见形态：
+                  姓名后面跟着他的条线——谁能改这条需求，从这个括号就能读出来。
+                  控件只在有转交权时挂出来，候选也由读模型筛过（超管全名册 / 条线负责人
+                  只看本线）。没有负责人时这一行不是「—」：它写着「待接单」，并给出
+                  「认领」——无主的需求必须有一个能变成有主的入口。 */}
               <dt>负责人</dt>
               <dd>
-                {info.owner ?? '—'}
+                {info.owner ?? '待接单'}
+                {info.ownerLineLabel !== null && (
+                  <span className="ownline">（{info.ownerLineLabel}）</span>
+                )}
                 {detail.permissions.reassignOwner && owners.length > 0 && (
                   <OwnerPicker id={detail.id} owner={info.owner} members={owners} />
+                )}
+                {info.owner === null && detail.permissions.claim && (
+                  <ClaimButton id={detail.id} />
                 )}
               </dd>
               <dt>类型</dt><dd>{info.typeLabel}</dd>

@@ -178,10 +178,16 @@ function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Wai
         ? { text: '负责人出正式 PRD', on: 'none', who: null }
         : { text: `${row.owner} 出正式 PRD`, on: 'person', who: row.owner };
     case 'review':
-      // 评审人由类型派单决定（spec §2），不是负责人：所以待评审的卡框评审人，不框负责人。
-      return row.reviewer === null
+      // 评审人由**负责人所在条线**派单决定（P4-06），不是需求类型：所以待评审的卡
+      // 框评审人，不框负责人。
+      if (row.reviewer !== null) {
+        return { text: `等 ${row.reviewer} 评审`, on: 'person', who: row.reviewer };
+      }
+      // 没有派单行：P4-06 之后唯一合法的原因，是负责人自己**没有条线**（超管提的需求），
+      // 而超管不受派单限制——签它的是超管。写「等派单评审人」会让人以为系统还会派一次。
+      return row.owner === null
         ? { text: '等派单评审人', on: 'none', who: null }
-        : { text: `等 ${row.reviewer} 评审`, on: 'person', who: row.reviewer };
+        : { text: '等超管评审', on: 'none', who: null };
     case 'queue':
       return row.owner === null
         ? { text: '等排期', on: 'none', who: null }

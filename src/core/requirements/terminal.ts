@@ -69,7 +69,7 @@ export async function rejectRequirement(db: Db, actor: string, raw: unknown) {
      * 通知是从 `events` 派生的（见 `core/read/notify.ts`），写一条事件就够了。
      */
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
     if (row.state !== 'inbox') throw new AppError('illegal_transition', ONLY_INBOX_REJECT);
 
@@ -109,7 +109,7 @@ export async function shelveRequirement(db: Db, actor: string, raw: unknown) {
     const row = await lockRequirement(tx, requirementId);
     // 同上（规则 3）：负责人 / 条线负责人 / 超管都能搁置，三档都由 `edit` 回答。
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
 
     if (!isShelvable(row.state)) throw new AppError('illegal_transition', TERMINAL_SHELVE);
@@ -156,7 +156,7 @@ export async function restoreRequirement(db: Db, actor: string, raw: unknown) {
   return db.transaction(async (tx) => {
     const row = await lockRequirement(tx, requirementId);
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
     assertTransition(row.state, 'inbox');
 

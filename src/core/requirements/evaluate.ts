@@ -59,7 +59,7 @@ export async function evaluate(db: Db, actor: string, raw: unknown) {
     // 权限之外还泄露多少东西。锁行之后判，读到的就是这一事务将要改的那一行。
     const row = await lockRequirement(tx, requirementId);
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
     return evaluateInTx(tx, actor, requirementId, row);
   });

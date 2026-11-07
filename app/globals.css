@@ -517,3 +517,11 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .fields dd .owner-pick{margin-left:8px;height:22px;padding:0 8px;border:0;border-radius:var(--r-xs);background:transparent;color:var(--c-accent);font:500 var(--t-caption) var(--f-sans);cursor:pointer}
 .fields dd .owner-pick:hover{background:var(--c-surface-2)}
 .fields dd .owner-pick:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+
+/* P4-06：负责人后面的条线，以及「待接单」时的「认领」。
+   条线用弱一档的文字——它解释的是「谁能改这条」，不是第二个值；括号本身够清楚，
+   不必再加一个标签。认领是行内按钮，与「改」同形，因为它做的是同一类事：
+   改这一行的人。 */
+.fields dd .ownline{margin-left:4px;color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
+.fields dd .claim{display:inline}
+.fields dd .claim .dfail{margin-left:8px;color:var(--c-danger);font:400 var(--t-caption) var(--f-sans)}

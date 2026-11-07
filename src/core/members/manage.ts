@@ -4,7 +4,7 @@ import { AppError } from '../errors.js';
 import { activeMemberByName, memberByName, type Exec } from '../auth/members.js';
 import { assertCan, requireActor } from '../auth/guard.js';
 import {
-  isLine, isRole, ROLE_LABEL, type Line, type Member, type Role,
+  isLine, isRole, NO_REQUIREMENT, ROLE_LABEL, type Line, type Member, type Role,
 } from '../auth/roles.js';
 import { assertPassword, generatePassword, hashPassword, setPassword } from '../auth/password.js';
 import { requirePlainObject, asText, parseId } from '../validate.js';
@@ -79,7 +79,7 @@ export async function createMember(
   db: Db, actor: string, raw: unknown,
 ): Promise<CreatedMember> {
   const input = requirePlainObject(raw);
-  await assertCan(db, actor, { type: '', ownerMemberId: null }, 'manageMembers');
+  await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
 
   const name = asText(input.name)?.trim() ?? '';
   if (name === '') throw new AppError('invalid', BAD_NAME);
@@ -129,7 +129,7 @@ export type UpdateMemberInput = {
  */
 export async function updateMember(db: Db, actor: string, raw: unknown): Promise<Member> {
   const input = requirePlainObject(raw);
-  const me = await assertCan(db, actor, { type: '', ownerMemberId: null }, 'manageMembers');
+  const me = await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
   const memberId = parseId(String(input.memberId ?? ''), MEMBER_NOT_FOUND);
 
   const target = await loadMember(db, memberId);
@@ -184,7 +184,7 @@ export async function updateMember(db: Db, actor: string, raw: unknown): Promise
 /** 停用（删除的软版本）。规矩与 `updateMember({active:false})` 完全一致。 */
 export async function deactivateMember(db: Db, actor: string, raw: unknown): Promise<Member> {
   const input = requirePlainObject(raw);
-  const me = await assertCan(db, actor, { type: '', ownerMemberId: null }, 'manageMembers');
+  const me = await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
   const memberId = parseId(String(input.memberId ?? ''), MEMBER_NOT_FOUND);
   const target = await loadMember(db, memberId);
   if (target === null) throw new AppError('not_found', MEMBER_NOT_FOUND);
@@ -241,7 +241,7 @@ export async function resetPassword(
   db: Db, actor: string, raw: unknown,
 ): Promise<{ member: string; password: string }> {
   const input = requirePlainObject(raw);
-  await assertCan(db, actor, { type: '', ownerMemberId: null }, 'manageMembers');
+  await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
   const memberId = parseId(String(input.memberId ?? ''), MEMBER_NOT_FOUND);
 
   const target = await loadMember(db, memberId);
@@ -271,7 +271,7 @@ export async function saveNotifyPrefs(
     ? me.id
     : parseId(String(input.memberId), MEMBER_NOT_FOUND);
   if (wantedId !== me.id) {
-    await assertCan(db, actor, { type: '', ownerMemberId: null }, 'manageMembers');
+    await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
   }
 
   const prefsInput = input.prefs;

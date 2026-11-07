@@ -64,6 +64,25 @@ function shiftDay(day: string, delta: number): string {
   return new Date(new Date(day).getTime() + delta * DAY_MS).toISOString().slice(0, 10);
 }
 
+/**
+ * 签字人 = 负责人所在条线的负责人（P4-06）。负责人没有条线（房超）时由他自己签——
+ * 那一条只有超管能动，而超管不受派单限制。写死名字，不从实现反查。
+ */
+function signerFor(owner: string): string {
+  switch (owner) {
+    case '吕品':
+    case '李嘉':
+      return '吕正豪';
+    case '王妍':
+    case '罗丹':
+      return '赵越';
+    case '房超':
+      return '房超';
+    default:
+      throw new Error(`不知道 ${owner} 在哪条线`);
+  }
+}
+
 /** 读模型把日期格式化成 'MM-DD'；'YYYY-MM-DD'.slice(5) 是同一天的同一种写法。 */
 function md(day: string): string {
   return day.slice(5);
@@ -95,7 +114,7 @@ async function seedOneTesting(opts: {
    * 只能改自己负责的需求）。规则 1「录入即负责人」让这个助手更短：谁建谁负责，
    * 后面的每一步都由同一个人做。
    */
-  const owner = opts.owner ?? '房超';
+  const owner = opts.owner ?? '吕品';
   const r = await createRequirement(db, owner, {
     title: opts.title ?? 'S3 协议支持',
     type: opts.type ?? 'feature',
@@ -106,7 +125,7 @@ async function seedOneTesting(opts: {
     requirementId: r.id,
     prdUrl: 'https://docs.example.com/prd/s3',
   });
-  await reviewPass(db, '吕正豪', { requirementId: r.id });
+  await reviewPass(db, signerFor(owner), { requirementId: r.id });
   await schedule(db, owner, {
     requirementId: r.id, releaseId, commitTestAt: testAt, commitDueAt: due,
   });
@@ -138,7 +157,7 @@ async function seedReady(owner: string) {
   });
   await evaluate(db, owner, { requirementId: r.id });
   await submitReview(db, owner, { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
-  await reviewPass(db, '吕正豪', { requirementId: r.id });
+  await reviewPass(db, signerFor(owner), { requirementId: r.id });
   await schedule(db, owner, {
     requirementId: r.id,
     releaseId,
@@ -148,16 +167,22 @@ async function seedReady(owner: string) {
   return r.id;
 }
 
-/** 建一条推到 review 的需求，返回 id 与 type 决定的评审人姓名。 */
+/**
+ * 建一条推到 review 的需求。
+ *
+ * P4-06：**负责人挑在对应的条线上**——功能类交给功能线 PM（吕品，派给吕正豪），
+ * 商业类交给商业线 PM（王妍，派给赵越）。类型与负责人故意保持一致，是为了让这一组
+ * 读模型用例继续只关心「读」；「类型与条线错开」的那一格由 auth / permission-ui 钉。
+ */
 async function seedInReview(type: 'commercial' | 'feature') {
-  // 以负责人王妍的身份建与提交：PM 只能改自己负责的需求（P4-04）。
-  const r = await createRequirement(db, '王妍', {
+  const owner = type === 'commercial' ? '王妍' : '吕品';
+  const r = await createRequirement(db, owner, {
     title: type === 'commercial' ? '直链分享限速（二期）' : '导出任务队列改造',
     type,
-    requester: '王妍',
+    requester: owner,
   });
-  await evaluate(db, '王妍', { requirementId: r.id });
-  await submitReview(db, '王妍', { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
+  await evaluate(db, owner, { requirementId: r.id });
+  await submitReview(db, owner, { requirementId: r.id, prdUrl: 'https://docs.example.com/prd/r' });
   return r.id;
 }
 
@@ -218,7 +243,8 @@ describe('getBoard', () => {
     const card = await cardOf('test', id, '吕品');
     expect(card.number).toBeGreaterThan(0);
     expect(card.title).toBe('S3 协议支持');
-    expect(card.owner).toBe('房超');
+    // 默认负责人是吕品（功能线）：P4-06 之后签字人是他的条线负责人吕正豪。
+    expect(card.owner).toBe('吕品');
     expect(card.waiting).toBe(`${md(due)} 自动上线`);
     expect(card.waitingOn).toBe('clock');
     expect(card.late).toBe(false);
@@ -388,7 +414,7 @@ describe('已上线：走查做没做过', () => {
  */
 describe('mine = 现在欠你一个动作（不是「跟你有关」）', () => {
   it('待评审的卡不框负责人，只框派单到的评审人', async () => {
-    const feature = await seedInReview('feature'); // owner 王妍，派给吕正豪
+    const feature = await seedInReview('feature'); // owner 吕品（功能线），派给吕正豪
     const asOwner = await cardOf('review', feature, '王妍');
     expect(asOwner.waiting).toBe('等 吕正豪 评审');
     expect(asOwner.mine).toBe(false);
@@ -463,7 +489,10 @@ describe('getRequirementDetail', () => {
       type: 'feature',
       typeLabel: '功能',
       requester: '孙建宏',
-      owner: '房超',
+      owner: '吕品',
+      // P4-06 加的：负责人所在条线（权限锚点）必须被读出来，抽屉要显示它。
+      ownerLine: 'feature',
+      ownerLineLabel: '功能线',
       prdUrl: 'https://docs.example.com/prd/s3',
       stateLabel: '测试中',
     });

@@ -65,8 +65,9 @@ export default async function BoardPage({
   const members = formOpen ? await listMembers() : [];
 
   // 「改负责人」的候选：只在抽屉给出转交权时才查（超管全名册 / 条线负责人本线）。
+  // P4-06：候选按**转交人自己的条线**筛，不按需求类型——类型不再是锚点。
   const owners = detail !== null && detail.permissions.reassignOwner
-    ? await ownerCandidates(viewer, detail.info.type)
+    ? await ownerCandidates(viewer)
     : [];
 
   // 版本列表只给排期表单用：抽屉里没有「排期」这个动作时不查（版本页有自己的口径）。

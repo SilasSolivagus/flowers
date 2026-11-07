@@ -59,7 +59,7 @@ export async function schedule(db: Db, actor: string, raw: unknown) {
     const row = await lockRequirement(tx, requirementId);
     // 权限先于状态门（见 evaluate.ts 的同一段注释）。
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
 
     // queue → ready 是唯一通向 ready 的迁移，所以只按 from/to 配对判断就够：

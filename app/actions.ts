@@ -24,6 +24,7 @@ import {
 import { probeProvider, resolveProviderConfig } from '../src/core/uemaster/provider';
 import { createRequirement } from '../src/core/requirements/create';
 import { reassignOwner } from '../src/core/requirements/assign';
+import { claimRequirement } from '../src/core/requirements/claim';
 import {
   createMember, deactivateMember, resetPassword, saveNotifyPrefs, updateMember,
 } from '../src/core/members/manage';
@@ -658,6 +659,19 @@ export async function reassignOwnerAction(formData: FormData): Promise<ActionRes
   return run((actor) => reassignOwner(db, actor, {
     requirementId: field(formData, 'id'),
     ownerMemberId: field(formData, 'ownerMemberId'),
+  }));
+}
+
+/**
+ * 认领（P4-06）：抽屉「信息」段负责人那一行，当这条需求还没有负责人时出现。
+ *
+ * 「任何 PM 都能立项，立项即成为负责人」——所以这里不做任何角色判断：能不能认领由
+ * `can('claim')` 在服务层回答，认领之后这条需求落到认领人的条线下。
+ * 与 `reassignOwnerAction` 分成两个动作：认领只发生在无主的需求上，转交发生在有主之后。
+ */
+export async function claimAction(formData: FormData): Promise<ActionResult> {
+  return run((actor) => claimRequirement(db, actor, {
+    requirementId: field(formData, 'id'),
   }));
 }
 

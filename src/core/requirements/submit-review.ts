@@ -35,7 +35,7 @@ export async function submitReview(db: Db, actor: string, raw: unknown) {
     const row = await lockRequirement(tx, requirementId);
     // 权限先于状态门与 prd 门（见 evaluate.ts 的同一段注释）。
     await assertCan(tx, actor, {
-      type: row.type ?? '', ownerMemberId: row.owner_member_id, state: row.state,
+      ownerMemberId: row.owner_member_id, ownerLine: row.owner_line, state: row.state,
     }, 'edit');
     // prd 门的判定依据是**这次要写进 prd_url 的那个链接**（上面已校验非空），
     // 不是库里那一列——首次提交时库里还是 null。两处都是同一件事：没链接不让进评审。
@@ -52,10 +52,11 @@ export async function submitReview(db: Db, actor: string, raw: unknown) {
       payload: { from: row.state, to: 'review', prdUrl: url, skippedEvaluation: skipped },
     });
 
-    // 派单：按 type 选评审人、写 review_assignments（verdict='handed'）。
-    // 必须留在同一个事务里：类型没配评审人时抛 no_reviewer，状态推进要跟着回滚，
+    // 派单：按**负责人所在条线**选评审人、写 review_assignments（verdict='handed'）。
+    // 必须留在同一个事务里：那条线没配负责人时抛 no_reviewer，状态推进要跟着回滚，
     // 否则需求会停在「待评审」却没人接。review.ts 不反向 import 本文件，没有循环。
-    await assignReviewer(tx, requirementId, row.type ?? '');
+    // 负责人没有条线（超管）时它返回 null 且不写派单行——超管自己签（见 review.ts）。
+    await assignReviewer(tx, requirementId);
 
     return { state: 'review' as const, skippedEvaluation: skipped };
   });

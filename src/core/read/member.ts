@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { firstProductOwner, loadMembers, memberByName, type Exec } from '../auth/members.js';
-import { isAdmin, lineOfType, type Member } from '../auth/roles.js';
+import { isAdmin, type Member } from '../auth/roles.js';
 import { readSessionName } from '../auth/session.js';
 
 /**
@@ -139,20 +139,21 @@ export function actorFromCookie(raw: string | undefined): string | null {
 }
 
 /**
- * 抽屉「改负责人」那份下拉的候选（P4-05）。
+ * 抽屉「改负责人」那份下拉的候选（P4-05，P4-06 换锚点）。
  *
  * 两档，与 `reassignOwner` 服务里的那条约束**同口径**，但这里只决定「摆给谁选」：
  * - 超管：名册上所有活着的人；
- * - 条线负责人：与需求类型同一条线的人（跨线转交在服务层会被拒，
- *   与其让人选完再撞一句中文，不如不摆出来）。
+ * - 条线负责人：**自己这条线**的人。
  *
- * 这不是权限判断——真正能不能转、能转给谁，仍然由 `can()` 与服务层回答；
- * PM 或别的线的人根本看不到这个控件（`detail.permissions.reassignOwner` 是 false）。
+ * P4-06 之前这一档按「需求类型 → 条线」筛，于是会出现一个荒唐的组合：功能线负责人
+ * 对一条商业类需求有转交权（负责人是功能线 PM），下拉里却只摆商业线的人——选谁都会被
+ * 服务拒。锚点换成人的归属之后，两处说的是同一句话：**转交人的线**。
+ * 服务层仍然会再判一次（`target.line !== locked.owner_line`），这里只是不摆出必然
+ * 被拒的选项；PM 或别的线的人根本看不到这个控件（`detail.permissions.reassignOwner`）。
  */
-export async function ownerCandidates(actor: Member, type: string): Promise<Member[]> {
+export async function ownerCandidates(actor: Member): Promise<Member[]> {
   const all = await loadMembers(db);
   if (isAdmin(actor)) return all;
-  const line = lineOfType(type);
-  if (line === null) return [];
-  return all.filter((member) => member.line === line);
+  if (actor.line === undefined || actor.line === null) return [];
+  return all.filter((member) => member.line === actor.line);
 }

@@ -49,6 +49,18 @@ const PM = '吕品';
 const FEATURE_REVIEWER = '吕正豪';
 const COMMERCIAL_REVIEWER = '赵越';
 
+/**
+ * 签字人 = 负责人所在条线的负责人（P4-06）。写死名字，不从实现反查。
+ * 通知用例里负责人总是王妍（商业线），所以签字人是赵越——**与需求类型无关**，
+ * 于是下面那些 type: 'feature' 的需求同样由商业线负责人签。
+ */
+function signerFor(owner: string): string {
+  const found = member(owner);
+  if (found.line === 'feature') return FEATURE_REVIEWER;
+  if (found.line === 'commercial') return COMMERCIAL_REVIEWER;
+  return owner; // 没有条线（超管）：自己签
+}
+
 const TODAY = new Date().toISOString().slice(0, 10);
 const FUTURE = shiftDay(TODAY, 30);
 const PAST = shiftDay(TODAY, -30);
@@ -83,7 +95,7 @@ async function toTestState(owner: string, title = 'S3 协议支持') {
   });
   await evaluate(db, owner, { requirementId: created.id });
   await submitReview(db, owner, { requirementId: created.id, prdUrl: 'https://x' });
-  await reviewPass(db, FEATURE_REVIEWER, { requirementId: created.id });
+  await reviewPass(db, signerFor(owner), { requirementId: created.id });
   const releaseId = await makeRelease('R-测试', PAST, FUTURE);
   await schedule(db, owner, {
     requirementId: created.id, releaseId, commitTestAt: TODAY, commitDueAt: FUTURE,
@@ -126,7 +138,8 @@ describe('派生规则：谁收到哪条事件', () => {
   });
 
   it('进入待评审：只有派单的评审人收到（负责人、PM 都不收到）', async () => {
-    const owner = member('王妍');
+    // 负责人放在功能线：这条需求派给吕正豪（P4-06 锚点是人的条线，不是类型）。
+    const owner = member(PM);
     const created = await createRequirement(db, owner.name, {
       title: '导出任务队列', type: 'feature', requester: PM,
     });
@@ -151,7 +164,7 @@ describe('派生规则：谁收到哪条事件', () => {
     });
     await evaluate(db, owner.name, { requirementId: created.id });
     await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
-    await reviewReject(db, FEATURE_REVIEWER, {
+    await reviewReject(db, signerFor(owner.name), {
       requirementId: created.id, reason: '缺少回滚方案',
     });
 
@@ -167,7 +180,7 @@ describe('派生规则：谁收到哪条事件', () => {
   });
 
   it('进入测试中：只有负责人收到（评审人不收到）', async () => {
-    const owner = member('王妍');
+    const owner = member(PM);
     const created = await toTestState(owner.name);
 
     const forOwner = await notificationsFor(db, owner);
@@ -187,7 +200,7 @@ describe('派生规则：谁收到哪条事件', () => {
   });
 
   it('打回开发中：负责人收到，行里带新承诺日', async () => {
-    const owner = member('王妍');
+    const owner = member(PM);
     const created = await toTestState(owner.name);
     await bounce(db, owner.name, {
       requirementId: created.id, newCommitDueAt: FUTURE, reason: '接口没对齐',
@@ -207,13 +220,13 @@ describe('派生规则：谁收到哪条事件', () => {
   });
 
   it('打回后重新提交：两轮 review_requested 都归同一个派单评审人', async () => {
-    const owner = member('王妍');
+    const owner = member(PM);
     const created = await createRequirement(db, owner.name, {
       title: '两轮评审', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
     await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
-    await reviewReject(db, FEATURE_REVIEWER, {
+    await reviewReject(db, signerFor(owner.name), {
       requirementId: created.id, reason: '补一下边界',
     });
     await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x?v=2' });
@@ -236,14 +249,14 @@ describe('派生规则：谁收到哪条事件', () => {
    * 与这条需求无关的 PM。这条用例因此改成两侧都断：无关 PM 一条都没有，超管有。
    */
   it('与这条需求无关的 PM 一条都不产生（扇出只给超管与本线负责人）', async () => {
-    const owner = member('王妍');
+    const owner = member(PM);
     const created = await createRequirement(db, owner.name, {
       title: '直链分享限速', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
     await submitReview(db, owner.name, { requirementId: created.id, prdUrl: 'https://x' });
     // review_passed：spec §8 里没有站内那一行
-    await reviewPass(db, FEATURE_REVIEWER, { requirementId: created.id });
+    await reviewPass(db, signerFor(owner.name), { requirementId: created.id });
     // scheduled：也没有
     const releaseId = await makeRelease('R-空', PAST, FUTURE);
     await schedule(db, owner.name, {

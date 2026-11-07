@@ -1,6 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { can, type Ability, type Member, type RequirementFacts } from '../auth/roles.js';
+import {
+  can, lineLabelOf, type Ability, type Member, type RequirementFacts,
+} from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
@@ -57,11 +59,17 @@ export type DetailPermissions = {
   edit: boolean;
   review: boolean;
   reassignOwner: boolean;
+  /**
+   * 认领（P4-06）：这条需求还没有负责人，而这个人可以把它认领下来。
+   * 与 `reassignOwner` 分开：认领只发生在「无主」这一种状态上，而认领之后
+   * 这条需求就落到认领人的条线下——它是「立项」，不是「转交」。
+   */
+  claim: boolean;
   manageMembers: boolean;
 };
 
 const NO_PERMISSIONS: DetailPermissions = {
-  edit: false, review: false, reassignOwner: false, manageMembers: false,
+  edit: false, review: false, reassignOwner: false, claim: false, manageMembers: false,
 };
 
 export type DetailRef = {
@@ -135,6 +143,13 @@ export type Detail = {
     typeLabel: string;
     requester: string;
     owner: string | null;
+    /**
+     * 负责人所在条线（P4-06）：权限的锚点。抽屉把它显示在负责人后面，因为
+     * 「谁能改这条需求」从这一行就能读出来——不写出来，读者会以为锚点仍是类型。
+     * null = 没有负责人，或负责人没有条线（超管）。
+     */
+    ownerLine: string | null;
+    ownerLineLabel: string | null;
     prdUrl: string | null;
     skipReason: string | null;
     stateLabel: string;
@@ -264,6 +279,7 @@ export function permissionsFor(actor: Member, facts: RequirementFacts): DetailPe
     edit: can(actor, facts, 'edit'),
     review: can(actor, facts, 'review'),
     reassignOwner: can(actor, facts, 'reassignOwner'),
+    claim: can(actor, facts, 'claim'),
     manageMembers: can(actor, facts, 'manageMembers'),
   };
 }
@@ -334,6 +350,16 @@ function describe(type: string, payload: Payload): { label: string; note: string
     }
     case 'requirement.deleted':
       return { label: '删除需求', note: text(payload, 'title') };
+    case 'requirement.owner_assigned': {
+      // 认领（from 为 null，P4-06）与转交共用一条事件：读侧要回答的是同一件事——
+      // 「负责人是谁、什么时候换的」。时间轴上分开写，因为「他认领的」与「别人交给他的」
+      // 是两句不同的话，混成一句会让认领看起来像一次人事安排。
+      const from = text(payload, 'from');
+      const to = text(payload, 'to') ?? '';
+      return from === null
+        ? { label: '认领，成为负责人', note: to }
+        : { label: '转交负责人', note: `${from} → ${to}` };
+    }
     case 'requirement.rejected':
       return { label: '拒绝', note: text(payload, 'reason') };
     case 'requirement.shelved':
@@ -433,6 +459,7 @@ type Row = {
   created_at: string;
   owner: string | null;
   owner_member_id: string | null;
+  owner_line: string | null;
   release_id: string | null;
   release_name: string | null;
   window_start: string | null;
@@ -478,7 +505,7 @@ export async function getRequirementDetail(
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
-           r.owner_member_id, m.name as owner,
+           r.owner_member_id, m.name as owner, m.line as owner_line,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
       from requirements r
@@ -504,8 +531,8 @@ export async function getRequirementDetail(
    * 一份已收口的旧派单（passed / rejected）不该继续回答「现在谁签字」。
    */
   const facts: RequirementFacts = {
-    type: row.type,
     ownerMemberId: row.owner_member_id,
+    ownerLine: row.owner_line,
     state: row.state,
     reviewerMemberId: reviewRow !== null && reviewRow.verdict === 'handed'
       ? reviewRow.reviewer_id
@@ -580,6 +607,8 @@ export async function getRequirementDetail(
       typeLabel: TYPE_LABEL[row.type] ?? row.type,
       requester: row.requester,
       owner: row.owner,
+      ownerLine: row.owner_line,
+      ownerLineLabel: lineLabelOf(row.owner_line),
       prdUrl: row.prd_url,
       skipReason: row.skip_reason,
       stateLabel: STATE_LABEL[row.state],

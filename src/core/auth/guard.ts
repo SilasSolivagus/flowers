@@ -52,22 +52,26 @@ export async function assertCan(
 }
 
 /**
- * 从库里读一条需求的事实（类型 / 负责人 / 状态），给还没有锁行的调用方用
+ * 从库里读一条需求的事实（负责人 + 负责人所在条线），给还没有锁行的调用方用
  * （改描述、删除、转交负责人）。
  *
  * 与 `lockRequirement` 的区别：那个是**先锁再判**（状态动作必须），这个只读一次
  * （它管的是「描述的字段」，不是状态迁移）。软删除的行视为不存在——与读侧同一条口径。
+ * P4-06 起 `type` 不再是权限事实（锚点是负责人的条线），这一读也不再取它。
  */
 export async function requirementFacts(exec: Exec, requirementId: string): Promise<RequirementFacts> {
   const res = await exec.execute<{
-    type: string; owner_member_id: string | null; state: string;
+    owner_member_id: string | null; owner_line: string | null;
   }>(sql`
-    select type, owner_member_id, state
-      from requirements
-     where id = ${requirementId} and deleted_at is null`);
+    select r.owner_member_id, m.line as owner_line
+      from requirements r
+      left join members m on m.id = r.owner_member_id
+     where r.id = ${requirementId} and r.deleted_at is null`);
   const row = res.rows[0];
   // 「不存在」排在「你有没有权限」之前：一条没有的需求对**任何人**都是 404。
   // 反过来的话，这个错误码差异会变成一次存在性探测（拿任意 id 试）。
   if (row === undefined) throw new AppError('not_found', NOT_FOUND);
-  return { type: row.type, ownerMemberId: row.owner_member_id, state: row.state };
+  // 状态由调用方补（这条读法只服务「改描述 / 删除 / 转交」那几条，它们不看状态）；
+  // 条线必须在这里带出来——P4-06 之后 `can()` 只认 `ownerLine`。
+  return { ownerMemberId: row.owner_member_id, ownerLine: row.owner_line };
 }

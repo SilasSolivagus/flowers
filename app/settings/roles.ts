@@ -4,11 +4,11 @@
  * 为什么放在这里（而不是 core 或读模型）：
  *
  * 1. `members.role` 存的是英文枚举（`pm` / `commercial_reviewer` / `feature_reviewer`，
- *    见 src/db/schema.ts 的注释），而界面只出中文。领域层里已经有两份「角色 → 中文/角色 → 派单」
- *    的表，但都是**模块私有**的：`src/core/read/detail.ts` 的 `ROLE_LINE`
- *    （`commercial_reviewer: '商业线'`）与 `src/core/requirements/review.ts` 的
- *    `REVIEWER_ROLE`（`commercial → 'commercial_reviewer'`）。两份都不导出，而 P4 的读模型
- *    与领域层对本题是冻结的——派单口径（review.ts）尤其不该为了一个设置页去动。
+ *    见 src/db/schema.ts 的注释），而界面只出中文。领域层里已经有权威的那一份
+ *    （`src/core/auth/roles.ts` 的 `ROLE_LABEL` / `ROLE_OF_LINE`），但它同时是权限模块，
+ *    设置页只需要两个中文名：把视图侧的措辞关在这一个文件里，比让页面去 import 权限
+ *    模块的常量更不容易长出第三份规则（P4-06 删掉了「类型 → 角色」那张表，这里的那份
+ *    也一起删了，见下面的 `LINE_LEAD`）。
  * 2. 因此这份映射是**第三份**，也是唯一一份在视图侧的。它的存在本身是一条待办：
  *    P5 应该由 core 导出一张角色注册表（英文值 + 中文名 + 它覆盖的需求类型），
  *    detail.ts / review.ts / 本文件三处合成一处。在那之前，把重复关在一个页面目录里，
@@ -48,18 +48,18 @@ export function lineLabel(line: string | null | undefined): string {
 }
 
 /**
- * 需求类型 → 覆盖它的评审角色（与 src/core/requirements/review.ts 的 REVIEWER_ROLE 同口径）。
+ * 条线 → 那条线的负责人角色（P4-06）。
  *
- * 这是「评审人由类型决定」这条规则在界面上的那一半：界面上不做任何派单，只把
- * 「哪个类型配哪个角色、那个角色现在是谁」摆出来。类型名用 core 里 guard 那句话的措辞
- * （`需求必须有类型（商业 / 功能）`），不再另造一套「商业需求 / 功能需求」。
+ * 这是「谁能改一条需求由**负责人的条线**决定」在界面上的那一半：界面上不做派单，
+ * 只把「哪条线 → 谁是这条线的负责人」摆出来。P4-06 之前这里是「类型 → 角色」——
+ * 那张表就是被删掉的旧锚点，留着它会让设置页说一套、`can()` 说另一套。
  *
  * `role` 一定要渲染到屏上（评审 M1）：只写人名，读者得滚回上面的成员表才知道「赵越」
- * 是什么身份；角色名一出一条行就把「哪个类型 → 哪条线 → 谁」讲完了。
+ * 是什么身份；角色名一出一条行就把「哪条线 → 谁」讲完了。
  */
-export const REVIEW_LINE = [
-  { type: 'commercial', label: '商业', role: 'commercial_reviewer' },
-  { type: 'feature', label: '功能', role: 'feature_reviewer' },
+export const LINE_LEAD = [
+  { line: 'feature', label: '功能线', role: 'feature_reviewer' },
+  { line: 'commercial', label: '商业线', role: 'commercial_reviewer' },
 ] as const;
 
 /**

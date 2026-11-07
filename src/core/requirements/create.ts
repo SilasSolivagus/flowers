@@ -52,28 +52,36 @@ export type CreateInput = z.infer<typeof CreateInput>;
  *
  * `undefined`（字段根本没出现）与 `null`（显式「不指定」）在**超管**那里意义不同：
  * 前者 = 我自己，后者 = 留空等人认领。对其他人两者一样：都是自己。
+ *
+ * P4-06：这里判的仍然是「转交权」，但锚点换成了**人的归属**——把一条还没造出来的
+ * 需求挂到别人头上，等于替那个人所在的条线接活。事实里的 `ownerMemberId` 是 actor
+ * 自己（他要成为负责人），`ownerLine` 是 actor 的条线：`can('reassignOwner')` 于是
+ * 回答「他是不是自己这条线的负责人」。PM 不是 → forbidden；超管是 → 随便挂给谁。
+ * 需求类型不参与这一格的判断（它只是内容属性）。
  */
 async function resolveOwner(
   db: Db, actor: Member, input: { type: string; ownerMemberId?: string | null },
 ): Promise<string | null> {
   const wanted = input.ownerMemberId;
+  const asMine = { ownerMemberId: actor.id, ownerLine: actor.line ?? null };
 
   if (wanted === undefined) return actor.id;
-  if (wanted === null) return can(actor, { type: input.type, ownerMemberId: null }, 'admin')
-    ? null
-    : actor.id;
+  if (wanted === null) {
+    // 显式留空（演示里那条「待接单」的卡）：只有超管能造出一条没有负责人的需求。
+    // 其余人照旧成为负责人——「立项即负责人」。
+    return can(actor, { ownerMemberId: null, ownerLine: null }, 'admin') ? null : actor.id;
+  }
 
   if (wanted === actor.id) return actor.id;
 
   // 想指定别人：必须有权转交，而且那个人得真的在名册上、还在职。
-  await assertCan(db, actor.name, { type: input.type, ownerMemberId: actor.id }, 'reassignOwner');
+  await assertCan(db, actor.name, asMine, 'reassignOwner');
   const target = await memberByName(db, await nameOf(db, wanted));
   if (target === null || target.deactivatedAt !== null) {
     throw new AppError('invalid', '负责人不在名册上（或已停用）');
   }
-  // 条线负责人只能在本线内转交（超管不受限）。
-  if (!can(actor, { type: input.type, ownerMemberId: actor.id }, 'admin')
-    && target.line !== input.type) {
+  // 条线负责人只能把需求挂给本线的人（超管不受限）。「本线」= 自己那一行上的 line。
+  if (!can(actor, asMine, 'admin') && target.line !== (actor.line ?? null)) {
     throw new AppError('forbidden', '只能把需求交给本线的人');
   }
   return target.id;
@@ -102,7 +110,9 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
   const input = parsed.data;
 
   /**
-   * 规则 1「录入即负责人」（P4-04）：**谁建谁负责**。
+   * 规则 1「录入即负责人」（P4-04）：**谁建谁负责**。P4-06 确认「任何 PM 都能立项，
+   * 立项即成为负责人」——于是新建这条路上没有第二种默认：owner 就是 actor，
+   * 除非超管显式指定别人 / 显式留空。
    *
    * 为什么把这条规则从「界面默认值」搬进服务层：界面把 `ownerMemberId` 预填成当前成员，
    * 于是从页面上看这条规则永远成立；而 API / MCP 的调用方不经过那个表单——一个 PM

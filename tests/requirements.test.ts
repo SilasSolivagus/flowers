@@ -235,21 +235,25 @@ describe('evaluate', () => {
     expect((await rowOf(r.id)).state).toBe('design');
   });
 
-  it('类型不在枚举内（含原型链上的名字）报 invalid_type，且不写派单', async () => {
+  it('类型是脏数据（含原型链上的名字）也不影响派单：锚点是人的条线', async () => {
     // 直接插库绕开 zod：库里可能留着历史脏 type。'toString' 会命中原型上的函数，
-    // 裸查表的实现会把它当成角色继续往下走。
-    // P4-04：脏数据行也要有一个负责人——否则拦下它的是权限（forbidden），
-    // 而不是这条用例要证明的 invalid_type。
+    // 裸查表（line → 角色）的实现会把它当成角色继续往下走。
+    // P4-04：脏数据行也要有一个负责人——否则拦下它的是权限（forbidden）。
+    // P4-06：类型不再是派单锚点，这一格改成证明「脏 type 不会把派单带歪」：
+    // 派单只读负责人那一行的 line，'toString' 既不是 feature 也不是 commercial，
+    // 于是它连查表的机会都没有。
     const ins = await db.execute<{ id: string }>(sql`
       insert into requirements (number, title, type, state, requester, owner_member_id)
       values (99, '历史脏数据', 'toString', 'design', '孙建宏',
               (select id from members where name = '吕品')) returning id`);
     const id = ins.rows[0]!.id;
 
-    expect(await caught(submitReview(db, '吕品', { requirementId: id, prdUrl: 'https://x' })))
-      .toMatchObject({ code: 'invalid_type', message: '需求类型不认识' });
-    expect((await rowOf(id)).state).toBe('design');
-    expect(await assignmentsOf(id)).toHaveLength(0);
+    // 提交成功，派给负责人（吕品，功能线）所在条线的负责人。
+    expect((await submitReview(db, '吕品', { requirementId: id, prdUrl: 'https://x' })).state)
+      .toBe('review');
+    expect(await reviewerOf(id)).toBe('吕正豪');
+    expect((await rowOf(id)).state).toBe('review');
+    expect(await assignmentsOf(id)).toMatchObject([{ name: '吕正豪', verdict: 'handed' }]);
   });
 
   it('需求不存在时给中文 not_found', async () => {
@@ -414,12 +418,26 @@ describe('评审派单、通过与打回', () => {
     return r;
   }
 
-  it('功能类派给功能线评审人，商业类派给商业线', async () => {
-    const f = await inReview('feature');
-    expect(await reviewerOf(f.id)).toBe('吕正豪');
+  /**
+   * P4-06：派单跟着**负责人的条线**走。同一张表里两行故意让类型与条线错开：
+   *
+   * | 需求类型 | 负责人 | 派给 |
+   * |---|---|---|
+   * | 商业 | 吕品（功能线） | 吕正豪 |
+   * | 功能 | 王妍（商业线） | 赵越 |
+   *
+   * 旧规则下这两行的评审人正好相反——这条用例就是那次的翻转。
+   */
+  it('派单跟着负责人的条线，不跟需求类型', async () => {
+    const commercialByFeature = await inReview('commercial');
+    expect(await reviewerOf(commercialByFeature.id)).toBe('吕正豪');
 
-    const c = await inReview('commercial', 'https://y');
-    expect(await reviewerOf(c.id)).toBe('赵越');
+    const featureByBusiness = await createRequirement(db, '王妍', {
+      title: 'b', type: 'feature', requester: 'b',
+    });
+    await evaluate(db, '王妍', { requirementId: featureByBusiness.id });
+    await submitReview(db, '王妍', { requirementId: featureByBusiness.id, prdUrl: 'https://y' });
+    expect(await reviewerOf(featureByBusiness.id)).toBe('赵越');
   });
 
   it('派单在提交评审的同一事务里落库：一条 handed，尚未写决定时间', async () => {
@@ -515,15 +533,15 @@ describe('评审派单、通过与打回', () => {
     expect(await eventCountOf(r.id)).toBe(before);
   });
 
-  it('商业类的需求，功能线评审人也签不了（类型决定评审人，签字时刻同样成立）', async () => {
+  it('商业类的需求由功能线 PM 负责时，签它的是功能线负责人（商业线负责人签不了）', async () => {
     const c = await inReview('commercial', 'https://y');
-    expect(await reviewerOf(c.id)).toBe('赵越');
+    expect(await reviewerOf(c.id)).toBe('吕正豪');
 
-    expect(await caught(reviewPass(db, '吕正豪', { requirementId: c.id }))).toMatchObject({
+    expect(await caught(reviewPass(db, '赵越', { requirementId: c.id }))).toMatchObject({
       code: 'not_reviewer', message: '签字人不是这条需求派单到的评审人',
     });
     // 派单上的那个人可以签。
-    expect((await reviewPass(db, '赵越', { requirementId: c.id })).state).toBe('queue');
+    expect((await reviewPass(db, '吕正豪', { requirementId: c.id })).state).toBe('queue');
   });
 
   it('花名册里没有的名字也是 not_reviewer（不单开错误码，不给花名册探测器）', async () => {
@@ -601,7 +619,7 @@ describe('评审派单、通过与打回', () => {
     expect(await reviewerOf(r.id)).toBe('吕正豪');
   });
 
-  it('类型在但没有对应角色的成员时报 no_reviewer，整笔事务回滚', async () => {
+  it('负责人所在条线没有负责人时报 no_reviewer，整笔事务回滚', async () => {
     await db.execute(sql`update members set role = 'pm' where name = '吕正豪'`);
     const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
@@ -609,7 +627,7 @@ describe('评审派单、通过与打回', () => {
 
     expect(await caught(submitReview(db, '吕品', {
       requirementId: r.id, prdUrl: 'https://x',
-    }))).toMatchObject({ code: 'no_reviewer', message: '这个类型还没有配评审人' });
+    }))).toMatchObject({ code: 'no_reviewer', message: '这个条线还没有配负责人' });
 
     // 派单失败必须连状态推进和事件一起回滚：不能停在 review 却没人接。
     expect((await rowOf(r.id)).state).toBe('design');

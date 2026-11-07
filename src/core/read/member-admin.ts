@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
-import { can, type Member } from '../auth/roles.js';
+import { can, NO_REQUIREMENT, type Member } from '../auth/roles.js';
 
 /**
  * 设置 · 成员（P4-05）的读模型。
@@ -27,7 +27,7 @@ export type MemberAdminRow = {
 /** 没有 `manageMembers` 的人拿到 null（页面据此不渲染、也不给入口）。 */
 export async function memberAdminView(actor: Member | null): Promise<MemberAdminRow[] | null> {
   if (actor === null) return null;
-  if (!can(actor, { type: '', ownerMemberId: null }, 'manageMembers')) return null;
+  if (!can(actor, NO_REQUIREMENT, 'manageMembers')) return null;
 
   const res = await db.execute<{
     id: string; name: string; role: string; line: string | null;

@@ -68,10 +68,13 @@ function idOf(name: string): string {
   return memberOf(name).id;
 }
 
-/** 一条功能需求：负责人吕品、派单吕正豪。表驱动的三种情形从这里派生。 */
+/**
+ * 一条功能线 PM（吕品）名下的需求：派单给功能线负责人吕正豪。
+ * 表驱动的三种情形从这里派生。P4-06 起事实里没有 `type`——锚点是负责人的条线。
+ */
 const FEATURE_FACTS: RequirementFacts = {
-  type: 'feature',
   ownerMemberId: null,
+  ownerLine: 'feature',
   state: 'review',
   reviewerMemberId: null,
 };
@@ -85,10 +88,10 @@ function factsFor(state: string): RequirementFacts {
   };
 }
 
-/** 同一条状态上的商业需求：负责人王妍、派单赵越。跨线那一格靠它。 */
+/** 同一条状态上的商业线需求：负责人王妍（商业线）、派单赵越。跨线那一格靠它。 */
 function businessFacts(state: string): RequirementFacts {
   return {
-    type: 'commercial',
+    ownerLine: 'commercial',
     state,
     ownerMemberId: idOf(PM_BUSINESS),
     reviewerMemberId: idOf(COMMERCIAL_LEAD),
@@ -128,15 +131,41 @@ describe('动作条 = 状态合法 ∩ 这个人能做（漂移探测器）', ()
     }
   });
 
-  it('同级但跨线：功能线负责人打开商业需求，待评审也一样全无', () => {
+  it('跨线：负责人是商业线 PM 时，功能线负责人一格都没有', () => {
     const facts = businessFacts('review');
-    // 王妍的需求是商业线、派单赵越。吕正豪是功能线负责人——同级，但一格都不该有。
+    // 王妍（商业线）名下的需求、派单赵越。吕正豪是功能线负责人——同级，但一格都不该有。
     expect(visibleActions('review', memberOf(FEATURE_LEAD), facts)).toEqual([]);
     // 连「改负责人」也没有：跨线转交在服务层就是 rejected 的。
     expect(can(memberOf(FEATURE_LEAD), facts, 'reassignOwner')).toBe(false);
     // 商业线负责人本人才拿到那三个动作。
     expect(visibleActions('review', memberOf(COMMERCIAL_LEAD), facts))
       .toEqual(['reviewPass', 'reviewReject', 'shelve']);
+  });
+
+  /**
+   * 变更的起因（P4-06）：**类型与锚点脱钩**。一条商业类需求由功能线 PM 负责时，
+   * 商业线负责人一格都没有，功能线负责人拿到全套——与它的类型无关。
+   */
+  it('商业类 + 功能线负责人：功能线负责人拿到动作条，商业线负责人空', () => {
+    const facts: RequirementFacts = {
+      ownerMemberId: idOf(PM),
+      ownerLine: 'feature',
+      state: 'review',
+      reviewerMemberId: idOf(FEATURE_LEAD),
+    };
+    expect(visibleActions('review', memberOf(FEATURE_LEAD), facts))
+      .toEqual(['reviewPass', 'reviewReject', 'shelve']);
+    expect(visibleActions('review', memberOf(COMMERCIAL_LEAD), facts)).toEqual([]);
+    // 负责人本人只能搁置（PM 没有签字权）
+    expect(visibleActions('review', memberOf(PM), facts)).toEqual(['shelve']);
+  });
+
+  it('没有负责人的需求：动作条是空的，而 PM 拿到「认领」', () => {
+    const facts: RequirementFacts = { ownerMemberId: null, ownerLine: null, state: 'inbox' };
+    expect(visibleActions('inbox', memberOf(PM), facts)).toEqual([]);
+    expect(can(memberOf(PM), facts, 'claim')).toBe(true);
+    expect(can(memberOf(FEATURE_LEAD), facts, 'claim')).toBe(true);
+    expect(can(memberOf(ADMIN), facts, 'claim')).toBe(true);
   });
 
   it('待评审：本人 / 本线负责人 / 别的 PM 三格各自成立', () => {
@@ -216,7 +245,7 @@ describe('真库：抽屉按人算出来的动作与按钮可见性', () => {
     const detail = (await getRequirementDetail(id, null))!;
     expect(detail.actions).toEqual([]);
     expect(detail.permissions).toEqual({
-      edit: false, review: false, reassignOwner: false, manageMembers: false,
+      edit: false, review: false, reassignOwner: false, claim: false, manageMembers: false,
     });
   });
 });
