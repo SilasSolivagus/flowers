@@ -3,7 +3,6 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { db, pool } from '../src/db/client.js';
 import { recordLocate } from '../src/core/locate/ledger.js';
-import { keywordsFrom } from '../src/core/uemaster/inspect.js';
 import { locateFromHistory } from '../src/core/locate/history.js';
 import type { HistoryRow } from '../src/core/locate/history-store.js';
 import { ABSENT_HEADLINE, NOT_FOUND_HEADLINE } from '../src/core/locate/copy.js';
@@ -159,10 +158,16 @@ describe('检索式：只传标题（描述不进 query——裁定见 inspect.t
   const TITLE = '分享页搜索补齐';
   const DESC = '上传下载按量限速：超过阈值的下载要弹风控提示';
 
-  it('标题 + 长描述 → 检索式仍然**等于标题**（描述一个字都没进去）', () => {
+  it('标题 + 长描述 → 检索式仍然**等于标题**（描述没有进入检索式的通道）', () => {
     // 函数就只收标题：这一句是编译期保证，用例把运行期的结果也钉一遍。
     expect(locateQuery(TITLE)).toBe(TITLE);
     expect(locateQuery(`  ${TITLE}\n\t`)).toBe(TITLE);
+    // 描述「在场」但不在检索式里：长描述一个字都不许出现（它没有能进去的参数）
+    expect(locateQuery(TITLE)).not.toContain(DESC);
+    expect(locateQuery(TITLE)).not.toContain('限速');
+    // 反过来只有手工把描述当标题拼进来才会出现——生产链路没有这条通道
+    // （`queryOfRequirement` 只传 `req.title`），所以这不是「能不能拼」的问题。
+    expect(locateQuery(`${TITLE} ${DESC}`)).toContain(DESC);
   });
 
   it('描述不再参与：只跟描述对得上的那条合并进不了候选（本次裁定的代价）', () => {

@@ -281,7 +281,23 @@ export const LIVE_LOCATE_DEPS: LocateDeps = { ensureHistory, readHistory, record
 
 export type InspectLocateInput = {
   repoId: string;
-  /** 检索式：需求标题 + 阶段一抽出来的关键词（中文原样，不翻成标识符）。 */
+  /**
+   * 检索式：**只有需求标题**（`locateQuery`，`\s+` 压成一个空格再 trim）。
+   *
+   * 描述、六问、`keywordsFrom` 抽出来的关键词**一律不进**这个字段。这条不是口味问题，
+   * 是实测定的（uni-app 124 行，真答案 `src/services/download-risk-modal.ts`）：
+   * - 只有标题 → 真答案第 5（0.260）；
+   * - 标题 + 一句短描述 → 还是第 5（0.185），**零收益**；
+   * - 标题 + 60 字整段描述 → **掉出前 6**，第一名变成「fix:修改版本号和描述」那批 utils。
+   *
+   * 机制上也不是本仓特产：提交信息平均 20–40 字，查询越长，命中「修改 / 版本 / 描述」
+   * 这类高频词的空泛合并越占便宜——查询长度与文档长度量级不一致，是检索的经典病。
+   * 关键词还有第二个坏处：那套词是为「中文 → 英文标识符」造桥用的（`搜索` → `search`），
+   * 而这一层是**中文对中文**比字面重合，桥用不上，多出来的词只给宽合并加分。
+   *
+   * 关键词在走查里只剩一个用途：喂下面那段结构摘要（路由/页面清单），不参与检索。
+   * **不要往这个字段里加任何东西**，除非重跑那三组实测并把它写进这里。
+   */
   query: string;
   requirementId: string | null;
   deps?: LocateDeps;
