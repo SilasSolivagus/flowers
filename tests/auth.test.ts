@@ -1115,7 +1115,8 @@ describe('通知扇出：条线 / 超管 / 偏好', () => {
       title: '商业线 PM 的商业类', type: 'commercial', requester: '孙建宏',
     });
 
-    const ids = (notices: Array<{ requirementId: string }>) => notices.map((n) => n.requirementId);
+    // `requirementId` 可空（P2：成员级提醒没有需求可挂），这里只关心需求那几条。
+    const ids = (notices: Array<{ requirementId: string | null }>) => notices.map((n) => n.requirementId);
     const featureLead = ids(await notificationsFor(db, memberOf(FEATURE_LEAD)));
     const commercialLead = ids(await notificationsFor(db, memberOf(COMMERCIAL_LEAD)));
     const admin = ids(await notificationsFor(db, memberOf(ADMIN)));

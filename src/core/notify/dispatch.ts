@@ -4,6 +4,7 @@ import type { Member } from '../auth/roles.js';
 import { tick } from '../clock/tick.js';
 import { pendingDeliveries, type DeliveryCandidate } from '../read/notify.js';
 import { prefsOf, type Level } from './prefs.js';
+import { checkWecomBindings, type BindingAlert } from './self-heal.js';
 import {
   lookupUserid, messageOf, resolveUserid, sendMarkdown,
   type Runner, type WecomFail,
@@ -297,18 +298,30 @@ function clampLimit(value: number | undefined): number {
 }
 
 /**
- * **tick 那条路**：先推进时钟，再补推送。
+ * **tick 那条路**：先推进时钟，再补推送，最后做一次企微绑定自检。
  *
- * 拆成两个函数而不是把推送塞进 `tick` 的事务里：`tick` 是「状态机在时钟上的一次
+ * 拆成三个函数而不是把推送塞进 `tick` 的事务里：`tick` 是「状态机在时钟上的一次
  * 推进」，它必须在一个事务里要么全成要么全不动；而推送要跑 0..N 次网络调用、每次
  * 几十秒——放进去会让一次 tick 持锁几分钟。所以顺序是：**先提交状态，再发消息**。
  * 代价是「状态推了、消息没发」这一格存在（下一轮会补，因为推送只认
  * `notify_deliveries`，与状态无关）。
+ *
+ * ── 自检为什么排在推送**之后**（P2「企微绑定自愈」）
+ *
+ * 它要看的是「最近几条投递发出去没有」，而这一轮的投递正是刚刚写下的。排在前面，
+ * 判断依据就永远是上一轮的状态：一条今天刚坏掉的绑定要等到下一轮才被发现，而
+ * 「晚一轮」在一天只跑几次的 cron 上就是几个小时。代价是这一轮多一次事务、几次
+ * 只读查询——比「坏了没人知道」便宜太多。
+ *
+ * `--dry-run` 下不跑：自检要写事件（提醒本身），而预览的语义是「什么都不改」
+ * （见 `DispatchOptions` 上面那段）。所以 dry-run 返回空数组，而不是「会提醒谁」的
+ * 预测——预测要么是第二份实现、要么就是一个会撒谎的数字。
  */
 export async function tickThenDispatch(
   database: Db, now: Date, opts: DispatchOptions = {},
-): Promise<{ moved: number; summary: DispatchSummary }> {
+): Promise<{ moved: number; summary: DispatchSummary; alerts: BindingAlert[] }> {
   const { moved } = await tick(database, now);
   const summary = await dispatchWecom(database, opts);
-  return { moved: moved.length, summary };
+  const alerts = opts.dryRun === true ? [] : await checkWecomBindings(database, now);
+  return { moved: moved.length, summary, alerts };
 }

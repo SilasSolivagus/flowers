@@ -94,7 +94,11 @@ export function NotifyBell({ initial }: { initial: NotifyView }) {
   const openRow = (notice: Notice) => {
     setOpen(false);
     void markReadAction(notice.eventSeq).then(setView);
-    router.push(`/?open=${notice.requirementId}`);
+    // 成员级提醒没有需求可开（P2 的企微绑定自愈）：它的下一步动作在设置页——去那里
+    // 点一次「查一下」。拼成 `?open=null` 会打开一个空的抽屉，看起来像点坏了。
+    router.push(
+      notice.requirementId === null ? '/settings' : `/?open=${notice.requirementId}`,
+    );
   };
 
   const markAll = () => {

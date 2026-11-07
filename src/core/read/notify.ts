@@ -82,9 +82,16 @@ export type Notice = {
   at: string;
   /** 事件类型原文（`requirement.auto_test` 这种）。 */
   type: string;
-  requirementId: string;
-  number: number;
-  title: string;
+  /**
+   * 这条通知指向的需求；`null` = **成员级**提醒（P2 的企微绑定自愈）。
+   *
+   * 三列一起可空，因为它们回答的是同一件事（「打开哪一条」）。一条
+   * `member.wecom_unlinked` 没有需求可挂——它的动作是「去设置里点查一下」，
+   * 给它编一个 PAN 编号或者挂到某条需求上都会点开一个无关的抽屉。
+   */
+  requirementId: string | null;
+  number: number | null;
+  title: string | null;
   /** 一句话：发生了什么 + 要读者做什么（含需求编号，见文件头的示例）。 */
   line: string;
   unread: boolean;
@@ -175,8 +182,31 @@ export function keyOf(number: number, title: string): string {
   return `PAN-${number}「${title}」`;
 }
 
-/** 铃铛里的一整行：编号 + 标题 + 句子。 */
-function lineOf(type: string, payload: Payload, number: number, title: string): string {
+/**
+ * 成员级提醒的一整行（没有需求可挂的那些）。
+ *
+ * 与需求事件一样要回答两件事：**是谁**、**要读者做什么**。这里必须点到「去设置里点
+ * 一次查一下」——只说「吕品的企微绑定有问题」等于把一个诊断结果丢给人，而他要的是
+ * 下一步动作。
+ */
+export function memberLineOf(type: string, payload: Payload): string {
+  if (type === 'member.wecom_unlinked') {
+    const name = text(payload, 'memberName') ?? '有人';
+    const reason = text(payload, 'reason');
+    const streak = typeof payload.streak === 'number' ? payload.streak : 0;
+    if (reason === 'failing') {
+      return `「${name}」的企微账号最近 ${streak} 条通知都没发出去——去设置里点一次「查一下」确认企微账号`;
+    }
+    return `「${name}」还没对上企微账号，通知发不出去——去设置里点一次「查一下」`;
+  }
+  return '有一条成员提醒';
+}
+
+/** 铃铛里的一整行：编号 + 标题 + 句子；没有需求的那一类只给句子。 */
+function lineOf(
+  type: string, payload: Payload, number: number | null, title: string | null,
+): string {
+  if (number === null || title === null) return memberLineOf(type, payload);
   return `${keyOf(number, title)}${sentenceOf(type, payload)}`;
 }
 
@@ -252,23 +282,50 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
   // 扇出：超管收每一条变更，条线负责人收本线每一条变更，都排除自己做的事。
   // P4-03 那版在这里按 `changed` / `rejected` 拆成两档；现在拆档由上面的
   // `levelFilter` 统一做（类的划分是产品口径，不该在三个地方各写一遍）。
-  const body = fancied
-    ? sql`(${base} or (e.actor <> ${member.name}${inMyLine}))`
-    : base;
+  //
+  // `e.requirement_id is not null` 是 P2 加的一道：成员级事件（`member.wecom_unlinked`、
+  // `release.*`）没有需求可挂，而这条扇出说的是「**需求**变更」——不加这一条，超管会
+  // 连同发版窗口的新建/删除一起收进来，那是这次改动之外的一整类新噪音。
+  const fanout = fancied
+    ? sql`(e.requirement_id is not null and e.actor <> ${member.name}${inMyLine})`
+    : sql`false`;
 
-  return sql`(${body} and ${levelFilter(level)})`;
+  // 成员级提醒（P2「企微绑定自愈」）：**只有超管收**。它没有「谁的线」可锚——绑不上的
+  // 人属于名册，不属于某条需求；而能修它的人是超管（设置页的「查一下」）。
+  // 并且刻意**不**排除自己做的动作：这一条是 `actor = 'system'` 写下的，不属于任何人。
+  const memberAlert = admin
+    ? sql`(e.requirement_id is null and e.type = 'member.wecom_unlinked')`
+    : sql`false`;
+
+  return sql`((${base} or ${fanout} or ${memberAlert}) and ${levelFilter(level)})`;
 }
 
 type NoticeRow = {
   seq: number;
   at: string | Date;
   type: string;
-  requirement_id: string;
-  number: number;
-  title: string;
+  /** 成员级提醒（`member.*`）没有需求可挂；`release.*` 也是这一类。 */
+  requirement_id: string | null;
+  number: number | null;
+  title: string | null;
   payload: string;
   last_seq: number;
 };
+
+/**
+ * 「事件 × 需求」的公共形状：**left join**，外加软删除那一格。
+ *
+ * 四处查询（铃铛、红点、水位线、企微候选）都用它——它们必须看见同一批事件，否则
+ * 「铃铛有 3 条、红点 2 条」这种分歧会随下一次改动悄悄长出来。写成两个片段而不是
+ * 抄四遍 `from`：P2 加成员级事件时这正是唯一需要改的地方。
+ *
+ * `r.deleted_at is null or e.requirement_id is null` 里的后半句是 P2 加的：inner join
+ * 会把没有需求的事件整类扔掉（`member.wecom_unlinked` 就是这一类），而
+ * `r.deleted_at is null` 对 left join 出来的 NULL 行恒为 NULL（= 被过滤掉）——
+ * 少了后半句，加了 left join 也一条都读不到。
+ */
+const EVENTS_FROM = sql`from events e left join requirements r on r.id = e.requirement_id`;
+const ALIVE = sql`(r.deleted_at is null or e.requirement_id is null)`;
 
 /** pg 对 timestamptz 给的是 Date（连接级 parser），测试里也可能是字符串。统一成 ISO。 */
 function asIso(value: string | Date): string {
@@ -296,24 +353,26 @@ export async function notificationsFor(
     select e.seq, e.at, e.type, e.requirement_id, e.payload,
            r.number, r.title,
            coalesce(nr.last_seq, 0) as last_seq
-      from events e
-      join requirements r on r.id = e.requirement_id
+      ${EVENTS_FROM}
       left join notification_reads nr on nr.member_id = ${member.id}
-     where r.deleted_at is null
+     where ${ALIVE}
        and ${addressed(member)}
      order by e.seq desc
      limit ${limit}`);
 
-  return res.rows.map((row) => ({
-    eventSeq: Number(row.seq),
-    at: asIso(row.at),
-    type: row.type,
-    requirementId: row.requirement_id,
-    number: Number(row.number),
-    title: row.title,
-    line: lineOf(row.type, parsePayload(row.payload), Number(row.number), row.title),
-    unread: Number(row.seq) > Number(row.last_seq),
-  }));
+  return res.rows.map((row) => {
+    const number = row.number === null ? null : Number(row.number);
+    return {
+      eventSeq: Number(row.seq),
+      at: asIso(row.at),
+      type: row.type,
+      requirementId: row.requirement_id,
+      number,
+      title: row.title,
+      line: lineOf(row.type, parsePayload(row.payload), number, row.title),
+      unread: Number(row.seq) > Number(row.last_seq),
+    };
+  });
 }
 
 /**
@@ -338,10 +397,10 @@ export type DeliveryCandidate = {
   type: string;
   /** 事件类（action / outcome / change）。报告与消息里都用它）。 */
   cls: EventClass;
-  requirementId: string;
-  number: number;
-  title: string;
-  /** 企微消息的第一行（加粗）：`PAN-12「导出任务队列」`。 */
+  requirementId: string | null;
+  number: number | null;
+  title: string | null;
+  /** 企微消息的第一行（加粗）：`PAN-12「导出任务队列」`；成员级提醒是一句抬头。 */
   headline: string;
   /** 第二行：一句话说清发生了什么、要他做什么。 */
   sentence: string;
@@ -357,13 +416,12 @@ export async function pendingDeliveries(
     select e.seq, e.at, e.type, e.requirement_id, e.payload,
            r.number, r.title,
            0 as last_seq
-      from events e
-      join requirements r on r.id = e.requirement_id
+      ${EVENTS_FROM}
       left join notify_deliveries d
         on d.member_id = ${member.id}
        and d.event_seq = e.seq
        and d.channel = ${opts.channel}
-     where r.deleted_at is null
+     where ${ALIVE}
        and ${addressed(member, opts.channel)}
        and (d.id is null or d.status <> 'sent')
      order by e.seq asc
@@ -371,7 +429,15 @@ export async function pendingDeliveries(
 
   return res.rows.map((row) => {
     const payload = parsePayload(row.payload);
-    const number = Number(row.number);
+    const number = row.number === null ? null : Number(row.number);
+    // 成员级提醒：没有需求编号可加粗，第一行给一个「这是什么」的抬头，第二行仍是
+    // 同一句话（铃铛里那一行的 `memberLineOf`）——两个频道说同一句话那条规矩不变。
+    const headline = number === null || row.title === null
+      ? '企微绑定提醒'
+      : keyOf(number, row.title);
+    const sentence = number === null
+      ? memberLineOf(row.type, payload)
+      : sentenceOf(row.type, payload);
     return {
       eventSeq: Number(row.seq),
       at: asIso(row.at),
@@ -380,8 +446,8 @@ export async function pendingDeliveries(
       requirementId: row.requirement_id,
       number,
       title: row.title,
-      headline: keyOf(number, row.title),
-      sentence: sentenceOf(row.type, payload),
+      headline,
+      sentence,
     };
   });
 }
@@ -394,10 +460,9 @@ export async function pendingDeliveries(
 export async function unreadCount(db: Db, member: Member): Promise<number> {
   const res = await db.execute<{ n: number }>(sql`
     select count(*)::int as n
-      from events e
-      join requirements r on r.id = e.requirement_id
+      ${EVENTS_FROM}
       left join notification_reads nr on nr.member_id = ${member.id}
-     where r.deleted_at is null
+     where ${ALIVE}
        and ${addressed(member)}
        and e.seq > coalesce(nr.last_seq, 0)`);
   return Number(res.rows[0]?.n ?? 0);
@@ -412,9 +477,8 @@ export async function unreadCount(db: Db, member: Member): Promise<number> {
 export async function latestNoticeSeq(db: Db, member: Member): Promise<number | null> {
   const res = await db.execute<{ seq: number | null }>(sql`
     select max(e.seq) as seq
-      from events e
-      join requirements r on r.id = e.requirement_id
-     where r.deleted_at is null
+      ${EVENTS_FROM}
+     where ${ALIVE}
        and ${addressed(member)}`);
   const value = res.rows[0]?.seq;
   return value === null || value === undefined ? null : Number(value);

@@ -57,6 +57,14 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
   'requirement.auto_dev': 'action',
   /** 进入测试中（时钟）：负责人跟测试进度。 */
   'requirement.auto_test': 'action',
+  /**
+   * 成员级提醒（P2「企微绑定自愈」）：这个人的企微绑定坏了，超管要去点一次「查一下」。
+   *
+   * 为什么是 `action` 而不是 `change`：它**现在**就要一个人动手，而且这个动作有时效
+   * ——不点，那个人会一直收不到通知（这正是这一项要修的那类静默失败）。归到 `change`
+   * 会让默认档 `key` 的超管在铃铛里看不到它（`key` = 动手 + 结果），等于白报。
+   */
+  'member.wecom_unlinked': 'action',
 
   // ── outcome：有结果 ─────────────────────────────────────────────────────
   'requirement.review_passed': 'outcome',   // 评审通过

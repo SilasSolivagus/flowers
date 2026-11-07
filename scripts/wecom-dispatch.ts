@@ -97,12 +97,27 @@ const args = parseArgs(process.argv.slice(2));
 
 try {
   if (args.tick) {
-    const { moved, summary } = await tickThenDispatch(db, new Date(), {
+    const { moved, summary, alerts } = await tickThenDispatch(db, new Date(), {
       dryRun: args.dryRun,
       perMemberLimit: args.limit,
     });
     process.stdout.write(`时钟推进：${moved} 条需求前进了一步\n`);
     report(summary);
+    // 自检也打一行：一次「0 条提醒」与一次「没跑自检」在日志里必须长得不一样，
+    // 否则过两周没人说得清是绑定都好，还是这项检查被删掉了。
+    if (args.dryRun) {
+      process.stdout.write('企微绑定自检：dry-run 不跑（它会写提醒，预览只读）\n');
+    } else if (alerts.length === 0) {
+      process.stdout.write('企微绑定自检：绑定都正常，没有新提醒。\n');
+    } else {
+      process.stdout.write(`企微绑定自检：给超管记了 ${alerts.length} 条提醒\n`);
+      for (const alert of alerts) {
+        const why = alert.reason === 'missing'
+          ? '还没对上企微账号'
+          : `最近 ${alert.streak} 条通知都没发出去`;
+        process.stdout.write(`  ${alert.memberName}：${why}\n`);
+      }
+    }
     await pool.end();
     process.exit(summary.failed > 0 ? 1 : 0);
   }
