@@ -8,6 +8,7 @@ import {
 } from './shape.js';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
+import { typeLabel } from '../requirements/type.js';
 import { parseRequirementId } from '../validate.js';
 import {
   head, lsTree, show,
@@ -245,7 +246,8 @@ type RequirementRow = {
   id: string;
   number: number;
   title: string;
-  type: string;
+  /** 可空（Ruling 1）：null = 未指定，prompt 里也照这个词写。 */
+  type: string | null;
   requester: string;
   prd_url: string | null;
   /** 六问（P4-02）：指纹要它们，见 `compose.ts` 的 `RequirementRow`。 */
@@ -931,7 +933,7 @@ export function structurePrompt(
     '这次的对象：',
     `  · 编号：PAN-${req.number}`,
     `  · 标题：${flat(req.title)}`,
-    `  · 类型：${flat(req.type)}　提出人：${flat(req.requester)}`,
+    `  · 类型：${typeLabel(req.type)}　提出人：${flat(req.requester)}`,
     '  · 材料是「走查材料」：拿实现跟 PRD 对比——流程要按真实存在的页面画，不要照 PRD 修图。',
     '',
     '代码基线（读的是镜像的 HEAD，不是某个分支）：',

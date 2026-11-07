@@ -7,9 +7,12 @@ import type { State } from '../state-machine.js';
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /**
- * 取出来的行。三个列就是所有调用方的并集，不是「以后可能有用」：
+ * 取出来的行。这些列就是所有调用方的并集，不是「以后可能有用」：
  * - state：每个调用方都要拿它做 assertTransition；
- * - type / prd_url：prd / type 两个 guard 的判定依据。
+ * - prd_url：prd guard 的判定依据；
+ * - type：**不再是 guard 的依据**（Ruling 1 摘掉了 `guard: 'type'`），留着是因为
+ *   `evaluateInTx` 的调用方拿同一行当返回值、而 `Locked` 是那几处的公共形状；
+ *   它现在只是一条内容属性，读它不会改变任何判断。
  *
  * 不提供 selectExtra 之类的参数：列名是拼接进 SQL 的字符串字面量，谁传谁就绕过了
  * 参数化；而目前没有任何调用方需要第四个列。

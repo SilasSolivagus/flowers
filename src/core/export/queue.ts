@@ -1,4 +1,5 @@
 import { sql } from 'drizzle-orm';
+import { typeLabel } from '../requirements/type.js';
 
 import { db as appDb, type Db } from '../../db/client.js';
 import { defaultRunner, type Runner } from '../notify/wecom.js';
@@ -53,7 +54,8 @@ export const QUEUE_SHEET_TITLE = '待排期';
 export type QueueRow = {
   number: number;
   title: string;
-  type: string;
+  /** `commercial` / `feature` / null（Ruling 1：类型可空）。 */
+  type: string | null;
   owner: string | null;
   requester: string;
   /** 「等什么」。这一列里每条都在等排期，所以它由**状态**决定，不查库。 */
@@ -122,7 +124,7 @@ function fail(code: ExportFailCode, message: string): ExportFail {
  */
 export async function loadQueueRows(database: Db = appDb): Promise<QueueRow[]> {
   const res = await database.execute<{
-    number: number; title: string; type: string; owner: string | null;
+    number: number; title: string; type: string | null; owner: string | null;
     requester: string; days: number; prd_url: string | null; release_name: string | null;
   }>(sql`
     select r.number, r.title, r.type,
@@ -157,7 +159,9 @@ export function recordValues(row: QueueRow): Record<string, string> {
   return {
     编号: `PAN-${row.number}`,
     标题: row.title,
-    类型: row.type === 'commercial' ? '商业' : '功能',
+    // 类型（Ruling 1）：三态。空值写「未指定」而不是折成「功能」——表格里一个
+    // 编出来的值比一个空白更坏（读表的人会拿它当依据）。标签来自唯一来源 `type.ts`。
+    类型: typeLabel(row.type),
     负责人: row.owner ?? '—',
     提出人: row.requester,
     等什么: row.waiting,

@@ -431,8 +431,13 @@ async function showTool(identity: Identity, raw: unknown): Promise<string[]> {
     stateLabel: detail.stateLabel,
     stateDays: detail.days,
     stateEnteredAt: detail.info.stateEnteredAt,
+    // 类型（Ruling 1）：可能为 null（未指定），标签给的是「未指定」而不是空串。
     type: detail.info.type,
     typeLabel: detail.info.typeLabel,
+    // 来源（Ruling 3）：六类之一 / null。agent 决定下一步常要看它（线上问题优先）。
+    source: detail.info.source,
+    sourceLabel: detail.info.sourceLabel,
+    sourceNote: detail.info.sourceNote,
     requester: detail.info.requester,
     owner: detail.info.owner,
     prdUrl: detail.info.prdUrl,

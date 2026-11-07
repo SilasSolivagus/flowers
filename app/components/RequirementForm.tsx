@@ -11,6 +11,8 @@ import {
 import type { EntryResult, SplitFillResult } from '../actions';
 import { PLATFORMS } from '../../src/core/requirements/platforms';
 import { PRIORITIES, PRIORITY_UNSET } from '../../src/core/requirements/priority';
+import { TYPES, TYPE_UNSET } from '../../src/core/requirements/type';
+import { SOURCES, SOURCE_OTHER, SOURCE_UNSET } from '../../src/core/requirements/source';
 
 /**
  * 新建 / 编辑需求的表单（P4-02 的录入面）。
@@ -45,7 +47,12 @@ export type RequirementFormProps = {
     id: string;
     number: number;
     title: string;
-    type: string;
+    /** Ruling 1：可能为 null（未指定）。 */
+    type: string | null;
+    /** Ruling 3：来源的初值（null = 未标注）。 */
+    source?: string | null;
+    /** 「其他」那句自述的初值。 */
+    sourceNote?: string | null;
     requester: string;
     ownerMemberId: string | null;
     description: {
@@ -113,7 +120,15 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
   const router = useRouter();
   const [values, setValues] = useState<Record<string, string>>(() => initialValues(initial));
   const [title, setTitle] = useState(initial?.title ?? '');
-  const [type, setType] = useState(initial?.type ?? 'feature');
+  /**
+   * 类型（Ruling 1）：**空串 = 未指定**，是下拉的第一项。
+   *
+   * 初值不再兜成 `'feature'`：以前那个默认值等于替人做了一个他没做的选择，而现在
+   * 空值是合法的。表单提交空串，服务层把它归一成 null（`create.ts` 的 `toType`）。
+   */
+  const [type, setType] = useState<string>(initial?.type ?? '');
+  /** 来源（Ruling 3）：空串 = 未标注。只在「其他」时多渲染一格自述。 */
+  const [source, setSource] = useState<string>(initial?.source ?? '');
   const [requester, setRequester] = useState(initial?.requester ?? me);
   const [owner, setOwner] = useState(initial?.ownerMemberId ?? '');
   /**
@@ -257,14 +272,18 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
               <div className="two">
                 <div className="fld">
                   <label htmlFor="req-type">类型</label>
+                  {/* Ruling 1：类型**可空**。第一项「未指定」是默认值——不替人做选择。
+                      选项从 `TYPES` 派生（词表只有一个来源，加一类不必来这里改第二处）。 */}
                   <select
                     id="req-type"
                     name="type"
                     value={type}
                     onChange={(event) => setType(event.target.value)}
                   >
-                    <option value="feature">功能</option>
-                    <option value="commercial">商业</option>
+                    <option value="">{TYPE_UNSET}</option>
+                    {TYPES.map((item) => (
+                      <option key={item.key} value={item.key}>{item.label}</option>
+                    ))}
                   </select>
                 </div>
                 <div className="fld">
@@ -278,6 +297,35 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
                   />
                 </div>
               </div>
+              {/* 来源（Ruling 3）：六类 + 未标注。「其他」多出一格自述（`sourceNote`）——
+                  只有「其他」需要解释，别的类别本身就是解释；这一格跟着选择出现，
+                  免得六类里多出一个没人填的空框。选项同样从 `SOURCES` 派生。 */}
+              <div className="fld">
+                <label htmlFor="req-source">来源</label>
+                <select
+                  id="req-source"
+                  name="source"
+                  value={source}
+                  onChange={(event) => setSource(event.target.value)}
+                >
+                  <option value="">{SOURCE_UNSET}</option>
+                  {SOURCES.map((item) => (
+                    <option key={item.key} value={item.key}>{item.label}</option>
+                  ))}
+                </select>
+              </div>
+              {source === SOURCE_OTHER && (
+                <div className="fld">
+                  <label htmlFor="req-source-note">其他说明</label>
+                  <input
+                    id="req-source-note"
+                    name="sourceNote"
+                    defaultValue={initial?.sourceNote ?? ''}
+                    placeholder="一句话：这个需求到底是从哪来的"
+                    autoComplete="off"
+                  />
+                </div>
+              )}
               <div className="fld">
                 <label htmlFor="req-owner">负责人</label>
                 <select

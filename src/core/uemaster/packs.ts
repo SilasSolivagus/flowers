@@ -1,4 +1,5 @@
 import { AppError } from '../errors.js';
+import { typeLabel } from '../requirements/type.js';
 
 /**
  * 三处产物槽位的名字。
@@ -27,7 +28,8 @@ export type PackInput = {
   id: string;
   number: number;
   title: string;
-  type: string;
+  /** `commercial` / `feature` / null（Ruling 1：类型可空）。null 时包里写「未指定」。 */
+  type: string | null;
   requester: string;
   prdUrl: string | null;
 };
@@ -140,7 +142,7 @@ export function packFor(stage: Stage, req: PackInput): string {
 
   const number = flat(String(req.number));
   const title = flat(req.title ?? '');
-  const type = flat(req.type ?? '');
+  const type = typeLabel(req.type);
   const requester = flat(req.requester ?? '');
   const name = `PAN-${number}`;
   const id = flat(req.id ?? '');

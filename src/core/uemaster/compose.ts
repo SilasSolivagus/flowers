@@ -9,6 +9,7 @@ import { parseRequirementId } from '../validate.js';
 import { attachArtifact } from './attach.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
+import { typeLabel } from '../requirements/type.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
 import {
@@ -154,7 +155,8 @@ export type RequirementRow = {
   id: string;
   number: number;
   title: string;
-  type: string;
+  /** `text` 可空（Ruling 1）：commercial / feature / null（未指定）。生成 prompt 里写「未指定」。 */
+  type: string | null;
   requester: string;
   prd_url: string | null;
   /**
@@ -201,7 +203,7 @@ export function flowPrompt(req: RequirementRow, stage: Stage): string {
     '需求：',
     `  · 编号：PAN-${req.number}`,
     `  · 标题：${flat(req.title)}`,
-    `  · 类型：${flat(req.type)}`,
+    `  · 类型：${typeLabel(req.type)}`,
     `  · 提出人：${flat(req.requester)}`,
     `  · PRD：${flat(prd)}`,
     `  · 这次要做的是${NOUN[stage]}：${FOCUS[stage]}`,

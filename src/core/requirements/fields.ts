@@ -109,8 +109,14 @@ export const SHORT_LABEL: Record<string, string> = {
  *
  * 空判定与指纹的归一一致（`trim()` 之后为空）：只有空白的 textarea 在库里会被写成
  * null，它在语义上就是「没写」，提示该出来。
+ *
+ * `type` 可空（Ruling 1）：null = 未指定，于是没有 `commercialHint` 那一版更狠的措辞
+ * ——「商业需求没有成功口径，评审过不了」这句话只有在**确实是商业**时才成立。空类型
+ * 走普通提示（或没有提示）。
  */
-export function hintFor(field: DescriptiveField, value: string, type: string): string | null {
+export function hintFor(
+  field: DescriptiveField, value: string, type: string | null,
+): string | null {
   if (value.trim() !== '') return null;
   if (type === 'commercial' && field.commercialHint !== undefined) return field.commercialHint;
   return field.hint;

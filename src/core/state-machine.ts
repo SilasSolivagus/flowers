@@ -27,9 +27,19 @@ export type Trigger =
 /**
  * 状态机亲自执行的门禁。
  *
- * 只有「需求身上就能验证」的两条留在这里：
- * - prd：进评审必须有正式 PRD 链接；
- * - type：需求必须有类型（商业 / 功能）。
+ * 只剩一条：「需求身上就能验证」的那条——
+ * - prd：进评审必须有正式 PRD 链接。
+ *
+ * ## Ruling 1（2026-11-08）：`type` 那道门**摘掉了**
+ *
+ * 表里原本有第二条 `guard: 'type'`（`inbox → design`，需求必须有类型才能立项）。
+ * owner 的裁决：负责人决定评审人（P4-06 之后派单锚在 `members.line`），**类型不再
+ * 承载权限**，那么「没有类型的需求不该被卡住」。于是这条门连同 `hasType` 这个
+ * 上下文键一起删掉——不是「改成恒真」，是真的不留：一张表里留着 `guard: 'type'`
+ * 而 `assertGuards` 里没有对应分支，下一个人会以为它在生效。
+ *
+ * 这一条删得有代价，代价是**记录在案的**：`tests/type-optional.test.ts` 让一条
+ * 没有类型的 inbox 需求走通立项（把 guard 加回去，那条用例变红）。
  *
  * 另外两种门不看状态表，由**拥有那道数据的服务**执行，写在这里只会变成装饰
  * （读它的人为零）：
@@ -38,7 +48,7 @@ export type Trigger =
  * - new_due（test → dev）：打回必须重填承诺完成日，在 bounce.ts 里校验（还要和
  *   「今天」比，见 R23）。
  */
-export type Guard = 'prd' | 'type';
+export type Guard = 'prd';
 
 export type Transition = {
   from: State; to: State; trigger: Trigger;
@@ -53,7 +63,8 @@ export type Transition = {
  * （见 clock/tick.ts 的 clockEdges），不允许另抄一份。
  */
 export const TRANSITIONS: readonly Transition[] = [
-  { from: 'inbox',  to: 'design',  trigger: 'evaluate',      guard: 'type' },
+  // Ruling 1：立项不再要求类型（`guard: 'type'` 已摘掉，见上面 `Guard` 的注释）。
+  { from: 'inbox',  to: 'design',  trigger: 'evaluate' },
   { from: 'inbox',  to: 'review',  trigger: 'submit_review', guard: 'prd'  },
   { from: 'inbox',  to: 'rejected', trigger: 'reject' },
   { from: 'inbox',  to: 'shelved', trigger: 'shelve' },
@@ -79,8 +90,11 @@ export function clockTransitions(): readonly Transition[] {
  * 可选是刻意的：只有真正会读它的迁移才该被传值。给一条 guard 为 prd 的迁移
  * 传 `hasPrd: true` 而没有真的检查过任何东西，就是在注释里撒谎；反过来，
  * 省略它不会「跳过门禁」——门禁是 fail-closed（见下面 assertTransition）。
+ *
+ * `hasType` 在 Ruling 1 之后不存在了：类型不再是门（`type` 列可空，且不承载权限）。
+ * 删掉这个键而不是留着不用，是为了让「谁还在读类型」在类型检查里就暴露出来。
  */
-export type TransitionContext = { hasPrd?: boolean; hasType?: boolean };
+export type TransitionContext = { hasPrd?: boolean };
 
 /**
  * 按 from/to 取那一行迁移；没有这一对就是状态机的边界。
@@ -105,15 +119,12 @@ export function find(from: State, to: State): Transition {
 /**
  * 执行一条迁移自己的 guard。
  *
- * fail-closed：guard 需要 hasPrd / hasType 而调用方没给，就是没通过——不是「跳过检查」。
+ * fail-closed：guard 需要 hasPrd 而调用方没给，就是没通过——不是「跳过检查」。
  * 这样「忘记传 ctx」会立刻炸在开发机上，而不是安静地放行。
  */
 function assertGuards(t: Transition, ctx: TransitionContext): void {
   if (t.guard === 'prd' && ctx.hasPrd !== true) {
     throw new AppError('missing_prd', '直接提交评审必须有正式 PRD 链接');
-  }
-  if (t.guard === 'type' && ctx.hasType !== true) {
-    throw new AppError('missing_type', '需求必须有类型（商业 / 功能）才能进入下一步');
   }
 }
 
@@ -140,9 +151,10 @@ export function assertTransition(
  *   不能报配对：`inbox → design` 是**合法**的一对，说「不能从「收集」直接到「待设计」」
  *   等于告诉用户状态机坏了。
  *
- * 顺序：先查配对、再查动作、最后查门。动作不对时**不许**先报门——对一条 inbox 的
- * 需求点打回，会骑着合法的 `inbox → design` 走到 type 门上，于是用户看到「需求必须
- * 有类型」，而他其实只是点错了按钮。
+ * 顺序：先查配对、再查动作、最后查门。动作不对时**不许**先报门——一个走错门的动作
+ * 骑着一条合法的配对到达带门的迁移时，用户看到的会是「直接提交评审必须有正式 PRD
+ * 链接」，而他其实只是点错了按钮。（Ruling 1 之前这里举的例子是 type 门，那道门已经
+ * 摘掉；这条顺序规则本身不因为少了一道门而改变——现在唯一的门是 prd。）
  */
 export function assertTrigger(
   from: State, to: State, trigger: Trigger, ctx: TransitionContext = {},

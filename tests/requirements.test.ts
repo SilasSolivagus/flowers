@@ -77,16 +77,28 @@ describe('createRequirement', () => {
     });
   });
 
-  it('类型缺失或不在枚举内都直接拒绝', async () => {
-    expect(await caught(createRequirement(db, '吕品', {
-      title: 'x', requester: 'y',
-    } as never))).toMatchObject({ code: 'invalid', message: '必须选择类型：商业或功能' });
+  it('类型缺省 / 空串都落成 null；不在枚举内的值仍然拒绝（Ruling 1）', async () => {
+    // Ruling 1：类型不再必填。缺字段与空串（表单里那个「未指定」）都是**合法的空**。
+    const noType = await createRequirement(db, '吕品', { title: 'x', requester: 'y' } as never);
+    const blankType = await createRequirement(db, '吕品', {
+      title: 'y', type: '   ', requester: 'y',
+    });
+    const rows = await db.execute<{ title: string; type: string | null }>(
+      sql`select title, type from requirements order by number`);
+    expect(rows.rows).toEqual([
+      { title: 'x', type: null },
+      { title: 'y', type: null },
+    ]);
+    expect(noType.id).toBeTruthy();
+    expect(blankType.id).toBeTruthy();
 
+    // 认不出的值仍然报错（单选不该被静默丢掉），而且整条建不出来。
     expect(await caught(createRequirement(db, '吕品', {
-      title: 'x', type: 'other', requester: 'y',
-    } as never))).toMatchObject({ code: 'invalid', message: '必须选择类型：商业或功能' });
-
-    expect(await requirementCount()).toBe(0);
+      title: 'z', type: 'other', requester: 'y',
+    } as never))).toMatchObject({
+      code: 'invalid', message: '类型只能是 commercial / feature（或留空 = 未指定）',
+    });
+    expect(await requirementCount()).toBe(2);
   });
 
   it('标题缺失或只有空白都拒绝', async () => {

@@ -300,7 +300,7 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
   const found = await db.execute<{
     id: string; stage: string; status: string;
     requirement_id: string; number: number; title: string;
-    type: string; requester: string; prd_url: string | null;
+    type: string | null; requester: string; prd_url: string | null;
     context: string | null; problem: string | null; outcome: string | null;
     surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;
     platforms: string[] | null;

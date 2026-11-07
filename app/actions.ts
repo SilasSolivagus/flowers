@@ -513,7 +513,13 @@ export async function createRequirementAction(formData: FormData): Promise<Entry
   const owner = field(formData, 'ownerMemberId').trim();
   return entry((actor) => createRequirement(db, actor, {
     title: field(formData, 'title'),
+    // 类型（Ruling 1）：下拉里的「未指定」提交的是空串，服务层把它归一成 null
+    // （`create.ts` 的 `toType`）。这里不做第二次判断——值域只有一个来源。
     type: field(formData, 'type'),
+    // 来源（Ruling 3）：同上；`sourceNote` 只有选中「其他」时才在表单里存在，
+    // 缺失时 `field` 给空串，服务层归一成 null。
+    source: field(formData, 'source'),
+    sourceNote: field(formData, 'sourceNote'),
     requester: field(formData, 'requester'),
     ownerMemberId: owner === '' ? null : owner,
     // 平台是**多值**（P4-08）：同名 checkbox 提交上来是几行，`getAll` 取全部。

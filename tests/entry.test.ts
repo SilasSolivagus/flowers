@@ -340,10 +340,11 @@ describe('updateRequirement', () => {
 // ─── 4. 新建需求（表单校验） ──────────────────────────────────────────────────
 
 describe('createRequirement 的表单校验', () => {
-  it('缺标题 / 类型 / 提出人 → 中文错误', async () => {
+  it('缺标题 / 提出人 → 中文错误（类型不必填，Ruling 1）', async () => {
     expect((await error(createRequirement(db, '吕品', {}))).message).toBe('标题不能为空');
+    // Ruling 1：只给标题时**不再**报「必须选择类型」，接下来缺的是提出人。
     expect((await error(createRequirement(db, '吕品', { title: 't' }))).message)
-      .toBe('必须选择类型：商业或功能');
+      .toBe('提出人不能为空');
     expect((await error(createRequirement(db, '吕品', { title: 't', type: 'feature' }))).message)
       .toBe('提出人不能为空');
   });

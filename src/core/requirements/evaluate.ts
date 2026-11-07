@@ -14,8 +14,13 @@ import { lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
  * 就是「材料落了库、迁移失败」或者反过来，正是要防的那条。
  *
  * 抽出来只搬代码、不改行为：`evaluate()` 现在是「入参校验 + 开事务 + 调本函数」，
- * 锁行、assertTrigger（含 missing_type）、moveTo、payload `{from,to}` 逐字未动，
- * 所以真评估那条路上的错误文案、事件形状、并发语义全都与之前一致。
+ * 锁行、assertTrigger、moveTo、payload `{from,to}` 逐字未动，所以真评估那条路上的
+ * 错误文案、事件形状、并发语义全都与之前一致。
+ *
+ * Ruling 1（2026-11-08）：这里曾经传 `hasType: !!row.type`。类型不再是门，那个键
+ * 连同上送的 `missing_type` 一起删掉——**没有类型的需求照样立项**（这正是裁决要的：
+ * 负责人决定评审人，类型不承载权限）。锁行仍然照旧，`assertTrigger` 仍然要跑：
+ * 它防的是「走错门的动作」，与类型无关。
  *
  * `locked` 是给「调用方已经锁过行」的场景（attach 要读状态判断该不该推进，那次
  * 读取就该顺手加锁，而不是在同一事务里再 select ... for update 一次）。不传就自己
@@ -31,8 +36,9 @@ export async function evaluateInTx(
   const row = locked ?? (await lockRequirement(tx, requirementId));
   // 光看配对不够：review → design 也是合法的一对（那是评审打回），所以对着一条
   // 待评审的需求点「评估」会骑着它跑回待设计、静默顶掉打回。必须钉 trigger。
-  // hasType 来自真实读出的行（类型列 NOT NULL，但门禁读的是数据，不是常量）。
-  assertTrigger(row.state, 'design', 'evaluate', { hasType: !!row.type });
+  // Ruling 1：`inbox → design` 这条边上没有 guard 了（类型不再必填），所以这里不传
+  // 任何 ctx——传一个没人读的键会让下一个人以为类型还在判。
+  assertTrigger(row.state, 'design', 'evaluate');
   await moveTo(tx, requirementId, 'design');
   await recordEvent(tx, {
     requirementId, actor, type: 'requirement.evaluated',

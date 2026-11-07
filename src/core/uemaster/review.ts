@@ -3,6 +3,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
+import { typeLabel } from '../requirements/type.js';
 import { parseRequirementId } from '../validate.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
@@ -578,7 +579,7 @@ export function findingsPrompt(req: RequirementRow, prd: ReviewPrd, nodes: FlowN
     '这次的对象：',
     `  · 编号：PAN-${req.number}`,
     `  · 标题：${flat(req.title)}`,
-    `  · 类型：${flat(req.type)}　提出人：${flat(req.requester)}`,
+    `  · 类型：${typeLabel(req.type)}　提出人：${flat(req.requester)}`,
     '  · 材料是「评审材料」：把 PRD 完整走一遍——评审就是照着它一步一步过，走不通的地方要看得出来。',
     '',
     ...prdBlock(prd),

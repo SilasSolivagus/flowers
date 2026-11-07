@@ -8,6 +8,8 @@ import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
 import { normalizePlatforms, platformsLabel } from '../requirements/platforms.js';
 import { normalizePriority, priorityLabel } from '../requirements/priority.js';
+import { typeLabel, typeSuffix } from '../requirements/type.js';
+import { sourceLabel } from '../requirements/source.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
 } from './board.js';
@@ -141,8 +143,19 @@ export type Detail = {
   stateLabel: string;
   days: number;
   info: {
-    type: string;
+    /**
+     * 类型（Ruling 1）：`commercial` / `feature` / **null**。
+     *
+     * null 是合法值（「还没说要算商业还是功能」）。界面两处用法不同：
+     * - 抽屉抬头（`PAN-7 · 功能类`）用 `typeSuffix()`，null → 整段不渲染；
+     * - 信息表的「类型」一行用 `typeLabel`，null → 「未指定」。
+     * 两处的差别是有意的：抬头是标题行（省掉一段没人读的话），信息表是字段
+     * （必须有一格说得清它是空的）。
+     */
+    type: string | null;
     typeLabel: string;
+    /** 抬头那一行的后缀（`功能类`）；null 时不渲染。见上面。 */
+    typeSuffix: string | null;
     requester: string;
     owner: string | null;
     /**
@@ -172,6 +185,17 @@ export type Detail = {
     priority: string | null;
     /** 上面那个键的中文（`P0` / `绿色通道`），null 时是「未定」。 */
     priorityLabel: string;
+    /**
+     * 来源（Ruling 3）：六类之一，null = 未标注。
+     *
+     * 放在 `info` 的理由与平台 / 优先级相同：它是「这条需求是谁提的」，
+     * 与提出人是同一层。看板卡上没有它（两行放不下第三个标签）。
+     */
+    source: string | null;
+    /** 上面那个键的中文；null 时是「未标注」。 */
+    sourceLabel: string;
+    /** 「其他」的自述（只有 `source === '其他'` 时才可能有值）。 */
+    sourceNote: string | null;
     skipReason: string | null;
     stateLabel: string;
     stateEnteredAt: string;
@@ -221,8 +245,6 @@ export type Detail = {
   /** 上面那几处控件各自要不要渲染。同样只来自 `can()`，页面不自己推导。 */
   permissions: DetailPermissions;
 };
-
-const TYPE_LABEL: Record<string, string> = { commercial: '商业', feature: '功能' };
 
 const ROLE_LINE: Record<string, string> = {
   pm: 'PM',
@@ -485,7 +507,8 @@ type Row = {
   id: string;
   number: number;
   title: string;
-  type: string;
+  /** `text` 可空（Ruling 1）：commercial / feature / null（未指定）。 */
+  type: string | null;
   state: State;
   requester: string;
   prd_url: string | null;
@@ -511,6 +534,10 @@ type Row = {
   platforms: string[] | null;
   /** `text` 可空（P4-09）：`p0|p1|p2|p3|green`；null = 未定。 */
   priority: string | null;
+  /** `text` 可空（Ruling 3）：六类来源之一；null = 未标注。 */
+  source: string | null;
+  /** 「其他」那句自述；null = 没写。 */
+  source_note: string | null;
 };
 
 type ReviewRow = {
@@ -549,7 +576,7 @@ export async function getRequirementDetail(
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
-           r.platforms, r.priority,
+           r.platforms, r.priority, r.source, r.source_note,
            r.owner_member_id, m.name as owner, m.line as owner_line,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
@@ -648,8 +675,10 @@ export async function getRequirementDetail(
     stateLabel: STATE_LABEL[row.state],
     days,
     info: {
+      // Ruling 1：type 可空，标签与「未指定」都从 `requirements/type.ts` 来（唯一来源）。
       type: row.type,
-      typeLabel: TYPE_LABEL[row.type] ?? row.type,
+      typeLabel: typeLabel(row.type),
+      typeSuffix: typeSuffix(row.type),
       requester: row.requester,
       owner: row.owner,
       ownerLine: row.owner_line,
@@ -659,6 +688,12 @@ export async function getRequirementDetail(
       platformsLabel: platformsLabel(normalizePlatforms(row.platforms)),
       priority: normalizePriority(row.priority),
       priorityLabel: priorityLabel(normalizePriority(row.priority)),
+      // Ruling 3：来源（六类之一，null = 未标注）。
+      source: row.source,
+      // 认不出的历史值原样显示（`sourceLabel` 的兜底就是 `key` 本身），不折成 null：
+      // 一次「这一格读不出来」不该等于「这一格没标」。
+      sourceLabel: sourceLabel(row.source),
+      sourceNote: row.source_note,
       skipReason: row.skip_reason,
       stateLabel: STATE_LABEL[row.state],
       stateEnteredAt: row.state_entered_at,

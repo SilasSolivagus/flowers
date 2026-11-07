@@ -1,4 +1,5 @@
 import { Fragment } from 'react';
+import { SOURCE_OTHER } from '../../src/core/requirements/source';
 import Link from 'next/link';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail';
@@ -152,7 +153,13 @@ export function Drawer({
       <Link className="scrim on" href="/" aria-label="关闭" tabIndex={-1} />
       <aside className="drawer on" aria-label="需求详情">
         <div className="dh">
-          <div className="k">{requirementKey(detail.number)} · {info.typeLabel}类</div>
+          {/* 抬头那一行：编号 · 类型类。Ruling 1 之后类型可能是空的，此时**整段不渲染**
+              ——「PAN-7 · 未指定类」不是中文，而空值在信息表里还有一行（「类型：未指定」），
+              抬头少一段不丢信息。 */}
+          <div className="k">
+            {requirementKey(detail.number)}
+            {info.typeSuffix !== null && ` · ${info.typeSuffix}`}
+          </div>
           <h2>{detail.title}</h2>
           <div className="row">
             <span className="chip">{detail.stateLabel}</span>
@@ -187,7 +194,18 @@ export function Drawer({
                   <ClaimButton id={detail.id} />
                 )}
               </dd>
+              {/* 类型（Ruling 1）：空值显示「未指定」。这一行**不隐藏**：与抬头相反，
+                  信息表是一张字段表，「这一格没填」本身就是一条要说得清的事实。 */}
               <dt>类型</dt><dd>{info.typeLabel}</dd>
+              {/* 来源（Ruling 3）：六类之一，空值「未标注」（与平台同字：这一格没标）。
+                  「其他」的自述跟一条缩进的说明放在它下面，不占第二格字段。 */}
+              <dt>来源</dt>
+              <dd>
+                {info.sourceLabel}
+                {info.sourceNote !== null && info.source === SOURCE_OTHER && (
+                  <span className="ownline">（{info.sourceNote}）</span>
+                )}
+              </dd>
               {/* 平台（P4-08）：信息段里的一行。**看板卡上没有它** —— 那张卡只有两行
                   （标题 / 等谁），一个九列的板再塞一行标签就把「一眼看出这段在等什么」
                   挤掉了；而平台是「这条需求是什么」的分类，打开抽屉才需要它。 */}

@@ -9,6 +9,8 @@ import { memberByName } from '../auth/members.js';
 import { can, type Member } from '../auth/roles.js';
 import { normalizePlatforms } from './platforms.js';
 import { PRIORITIES } from './priority.js';
+import { normalizeType, type TypeKey } from './type.js';
+import { normalizeSource, SOURCES, type SourceKey } from './source.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
 // 而对外错误只暴露 issues[0].message，前端会看到英文。
@@ -18,6 +20,9 @@ const NOT_BLANK = (message: string) => ({
 });
 
 const BAD_OWNER = '负责人 ID 格式不正确';
+
+/** 来源六类的名字，拼进报错里（从词表派生，改词表不必改这句）。 */
+const SOURCES_LABEL = SOURCES.map((item) => item.key).join(' / ');
 
 /**
  * 六问的入参形状（P4-02）。
@@ -58,15 +63,70 @@ const PriorityInput = z.enum(PRIORITY_KEYS, {
   message: '优先级只能是 P0 / P1 / P2 / P3 / 绿色通道',
 }).nullish();
 
+/**
+ * 类型（Ruling 1）：**可空**。
+ *
+ * 这里刻意**不写成 zod 枚举**（改动前是 `z.enum(['commercial','feature'])`）：表单里
+ * 那个「未指定」选项提交上来的是空串，而空串要算「没填」而不是「填错了」。用
+ * `z.string().nullish()` 接住它，再由 `toType()` 归一（空 / null → null，认不出 →
+ * 中文报错），与 `priority` 那条路同一种分工：形状归 zod，值域归服务层。
+ *
+ * 为什么值域不放 zod：`z.preprocess` / `z.union` 会让 `CreateInput` 变成 `ZodEffects`，
+ * 而它同时也是 MCP 工具入参的**唯一 schema**（`mcp/tools.ts` 直接把它拿去做
+ * `inputSchema`）。ZodEffects 在 JSON Schema 里没有忠实表示，MCP 客户端看到的会是
+ * 一份和真正的校验对不上的 schema——那正是「工具说能调、服务拒了」的来源。
+ */
+const TYPE_KEYS = ['commercial', 'feature'] as const;
+const TypeInput = z.string({
+  invalid_type_error: `类型只能是 ${TYPE_KEYS.join(' / ')}（或留空 = 未指定）`,
+}).nullish();
+
+/**
+ * 来源（Ruling 3）：可空，词表校验在 `toSource()`（同一个理由：值域归服务层）。
+ * `sourceNote` 是「其他」那句自述，自由文本，空串归一成 null（与六问同一口径）。
+ */
+const SourceInput = z.string({ invalid_type_error: '来源必须是一类来源的名字' }).nullish();
+const SourceNoteInput = z.string({ invalid_type_error: '来源说明必须是文本' }).nullish();
+
+/** 类型归一：空 / null → null（未指定）；认不出的值**报错**（一次表态不该被静默丢掉）。 */
+function toType(value: string | null | undefined): TypeKey | null {
+  if (value === null || value === undefined || value.trim() === '') return null;
+  const key = normalizeType(value);
+  if (key === null) {
+    throw new AppError('invalid', `类型只能是 ${TYPE_KEYS.join(' / ')}（或留空 = 未指定）`);
+  }
+  return key;
+}
+
+/** 来源归一：空 / null → null（未标注）；认不出的值报错，消息里给出全部六类。 */
+function toSource(value: string | null | undefined): SourceKey | null {
+  if (value === null || value === undefined || value.trim() === '') return null;
+  const key = normalizeSource(value);
+  if (key === null) {
+    throw new AppError('invalid', `来源只能是 ${SOURCES_LABEL}（或留空 = 未标注）`);
+  }
+  return key;
+}
+
 export type DescriptiveInput = z.infer<typeof DescriptiveInput>;
 
 export const CreateInput = z.object({
   title: z.string(NOT_BLANK('标题不能为空')).trim().min(1, '标题不能为空'),
-  type: z.enum(['commercial', 'feature'], { message: '必须选择类型：商业或功能' }),
+  /**
+   * 类型：**可省略**（Ruling 1）。新建只要标题 + 提出人。
+   *
+   * 删掉的是 `z.enum(...)` 那条必填：它让「还没决定商业还是功能」变成一条建不出来的
+   * 需求，而 owner 已经裁定类型不承载权限（派单看负责人那一行的 line），那么挡住
+   * 录入只是逼人在下拉里随便点一个——那比空着更坏（它看起来像有依据）。
+   */
+  type: TypeInput,
   requester: z.string(NOT_BLANK('提出人不能为空')).trim().min(1, '提出人不能为空'),
   ownerMemberId: z.string(NOT_BLANK(BAD_OWNER)).uuid(BAD_OWNER).nullish(),
   platforms: PlatformsInput,
   priority: PriorityInput,
+  /** 来源（Ruling 3）：可省略；「其他」的自述另存一列。 */
+  source: SourceInput,
+  sourceNote: SourceNoteInput,
 }).merge(DescriptiveInput);
 
 export type CreateInput = z.infer<typeof CreateInput>;
@@ -84,7 +144,9 @@ export type CreateInput = z.infer<typeof CreateInput>;
  * 需求类型不参与这一格的判断（它只是内容属性）。
  */
 async function resolveOwner(
-  db: Db, actor: Member, input: { type: string; ownerMemberId?: string | null },
+  // 类型不再是这个判断的输入（Ruling 1 之前它也只是被接收、从未被读）：签名里留一个
+  // 不读的 `type` 会让人以为「类型影响归属」，而那正是这条裁决要否掉的那件事。
+  db: Db, actor: Member, input: { ownerMemberId?: string | null },
 ): Promise<string | null> {
   const wanted = input.ownerMemberId;
   const asMine = { ownerMemberId: actor.id, ownerLine: actor.line ?? null };
@@ -153,6 +215,13 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
    */
   const actorMember = await requireActor(db, actor);
   const ownerMemberId = await resolveOwner(db, actorMember, input);
+  // 类型 / 来源的值域校验也放在开事务之前：认不出的值不值得开一个事务。
+  // （Ruling 1：type 现在可以是 null；Ruling 3：source 同理，两者都比「必填」多一步归一。）
+  const type = toType(input.type);
+  const source = toSource(input.source);
+  // 自述只在「其他」时被表单渲染，但服务层**不拦**别的来源带自述：那是调用方给的
+  // 一句话，静默丢掉比留着更坏（要清就显式传空串/ null）。
+  const sourceNote = blankToNull(input.sourceNote);
 
   // `number` 由 requirements_number_seq 分配（列上有 default），这里**不写**它，
   // 也不再扫 `max(number)+1`：并发建需求时两个事务会读到同一个 max，输的那个撞
@@ -164,20 +233,24 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
     const inserted = await tx.execute<{ id: string; number: number; state: string }>(sql`
       insert into requirements
         (title, type, state, requester, owner_member_id,
-         context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms, priority)
+         context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms, priority,
+         source, source_note)
       values (
-        ${input.title}, ${input.type}, 'inbox', ${input.requester}, ${ownerMemberId},
+        ${input.title}, ${type}, 'inbox', ${input.requester}, ${ownerMemberId},
         ${blankToNull(input.context)}, ${blankToNull(input.problem)}, ${blankToNull(input.outcome)},
         ${blankToNull(input.surfaces)}, ${blankToNull(input.edgeCases)}, ${blankToNull(input.outOfScope)},
         ${sql.param(normalizePlatforms(input.platforms))}::text[],
-        ${input.priority ?? null}
+        ${input.priority ?? null},
+        ${source}, ${sourceNote}
       )
       returning id, number, state`);
     const row = inserted.rows[0]!;
     const number = Number(row.number);
     await recordEvent(tx, {
       requirementId: row.id, actor, type: 'requirement.created',
-      payload: { number, title: input.title, type: input.type },
+      // `type` 可能是 null（Ruling 1）：事件里照写 null，而不是编一个默认值——
+      // 时间轴要回答的是「建的时候填了没有」，不是「大概率算哪一类」。
+      payload: { number, title: input.title, type, source },
     });
     return { id: row.id, number, state: row.state as 'inbox' };
   }));

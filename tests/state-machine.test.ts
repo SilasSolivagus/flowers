@@ -102,13 +102,14 @@ describe('state machine', () => {
   it('13 条合法转移都能过', () => {
     expect(TRANSITIONS).toHaveLength(13);
     for (const t of TRANSITIONS) {
-      expect(() => assertTransition(t.from, t.to, { hasPrd: true, hasType: true })).not.toThrow();
+      expect(() => assertTransition(t.from, t.to, { hasPrd: true })).not.toThrow();
     }
   });
 
   it('转移表与规格逐条一致', () => {
     expect(TRANSITIONS).toEqual([
-      { from: 'inbox', to: 'design', trigger: 'evaluate', guard: 'type' },
+      // Ruling 1：立项不再有 type 门（类型可空，且不承载权限）。
+      { from: 'inbox', to: 'design', trigger: 'evaluate' },
       { from: 'inbox', to: 'review', trigger: 'submit_review', guard: 'prd' },
       { from: 'inbox', to: 'rejected', trigger: 'reject' },
       { from: 'inbox', to: 'shelved', trigger: 'shelve' },
@@ -125,18 +126,22 @@ describe('state machine', () => {
   });
 
   it('inbox 不能直接到 开发中', () => {
-    expect(() => assertTransition('inbox', 'dev', { hasPrd: true, hasType: true }))
+    expect(() => assertTransition('inbox', 'dev', { hasPrd: true }))
       .toThrowError(AppError);
   });
 
   it('inbox → review 必须有 PRD', () => {
-    expect(caught(() => assertTransition('inbox', 'review', { hasPrd: false, hasType: true })))
+    expect(caught(() => assertTransition('inbox', 'review', { hasPrd: false })))
       .toMatchObject({ code: 'missing_prd', message: '直接提交评审必须有正式 PRD 链接' });
   });
 
-  it('inbox → design 必须有类型', () => {
-    expect(caught(() => assertTransition('inbox', 'design', { hasPrd: true, hasType: false })))
-      .toMatchObject({ code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步' });
+  it('inbox → design 不再要求类型（Ruling 1：那道门已摘掉）', () => {
+    // 这条断言是「门已经不在表里」的静态证据；跑得通的那一半在 tests/type-optional.test.ts
+    // （真建一条没有类型的需求、真立项）。把 `guard: 'type'` 加回 TRANSITIONS，
+    // 这里与那条用例会一起变红。
+    expect(TRANSITIONS.find((t) => t.from === 'inbox' && t.to === 'design')!.guard)
+      .toBeUndefined();
+    expect(() => assertTransition('inbox', 'design')).not.toThrow();
   });
 
   it('TRANSITIONS 在类型上是只读的（表就是口径，运行期不许往里写）', () => {
@@ -229,8 +234,10 @@ describe('assertTrigger — 配对合法但动作不对', () => {
 });
 
 /**
- * I1：ctx 可选，且门禁 fail-closed。给一条带着 prd / type 门的迁移不传 ctx，
+ * I1：ctx 可选，且门禁 fail-closed。给一条带着 prd 门的迁移不传 ctx，
  * 等于「没检查过」，必须拒绝——而不是安静放行。
+ *
+ * Ruling 1 之后表里只剩 prd 一道门；type 门的删除有它自己的断言（见上一条 describe）。
  */
 describe('assertTransition — ctx 可选，门禁 fail-closed', () => {
   it('prd 门不传 ctx 就拒绝', () => {
@@ -239,10 +246,8 @@ describe('assertTransition — ctx 可选，门禁 fail-closed', () => {
     });
   });
 
-  it('type 门不传 ctx 就拒绝', () => {
-    expect(caught(() => assertTransition('inbox', 'design'))).toMatchObject({
-      code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步',
-    });
+  it('type 门已经不存在（Ruling 1）：不传 ctx 也放行', () => {
+    expect(() => assertTransition('inbox', 'design')).not.toThrow();
   });
 
   it('没有 guard 的迁移不传 ctx 也放行', () => {

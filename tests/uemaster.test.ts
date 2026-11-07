@@ -95,7 +95,9 @@ describe('packFor', () => {
     for (const stage of STAGES) {
       const p = packFor(stage, BASE);
       expect(p).toContain('PAN-7');
-      expect(p).toContain('feature');
+      // 类型在包里是**给人/agent 读的中文标签**（Ruling 1 之后从 `type.ts` 取，
+      // 空值写「未指定」），不再是库里的键 `feature`。
+      expect(p).toContain('类型：功能');
       expect(p).toContain('孙建宏');
       // 复制任务包这条路上 agent 只有这段文本，uuid 必须在里面
       expect(p).toContain(REQUIREMENT_ID);
@@ -103,6 +105,12 @@ describe('packFor', () => {
       expect(p).toContain('flow-canvas');
       expect(p).toContain('flow-walkthrough');
     }
+  });
+
+  it('没有类型时包里写「未指定」（Ruling 1）', () => {
+    const p = packFor('evaluate', { ...BASE, type: null });
+    expect(p).toContain('类型：未指定');
+    expect(p).not.toContain('类型：；');
   });
 
   it('固定六行骨架：任务 / 输入 / 技能 / 产出 / 交付 / 约束', () => {
@@ -464,7 +472,8 @@ describe('attachArtifact', () => {
  * 两件事要么都成、要么都不成。
  *
  * 三条边界都在这一个 describe 里钉住：只认 evaluate、只认 inbox、门禁与真 evaluate
- * 同一条（没有类型就 missing_type，并且整条 attach 回滚）。
+ * 同一条（走错门的动作整条 attach 回滚——Ruling 1 之前这条门是「没有类型」，
+ * 类型可空之后换成「只有 evaluate 能触发迁移」，见最后那条用例）。
  */
 describe('R-P2-8：评估产物即通行证', () => {
   async function stateOf(id: string): Promise<string> {
@@ -527,26 +536,31 @@ describe('R-P2-8：评估产物即通行证', () => {
     ]);
   });
 
-  it('收集 + 没有类型：missing_type，整条 attach 回滚——不留产物行、不动状态', async () => {
+  it('收集 + 没有类型：照样推进到待设计（Ruling 1：类型不再是门）', async () => {
     const { id } = await newRequirement();
-    // 类型列是 NOT NULL，但门禁读的是**数据**：清空它才是「没有类型」的那条需求，
-    // 也是真 evaluate 撞 missing_type 的同一种输入。
-    await db.execute(sql`update requirements set type = '' where id = ${id}`);
+    // 类型现在可以是 null（Ruling 1）。这条用例是 attach 那条路上的同一件事：
+    // 「评估产物即通行证」不该因为需求没填类型而失效——那正是裁决要放行的需求。
+    await db.execute(sql`update requirements set type = null where id = ${id}`);
 
-    const url = '/uemaster/PAN-1/evaluate.html';
-    await writeArtifact(url);
-    const e = await caught(attachArtifact(db, '吕品', {
-      requirementId: id, stage: 'evaluate', url,
-    }));
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');
 
-    // 同一条门、同一句话：与真 evaluate 的 missing_type 一字不差。
-    expect(e).toBeInstanceOf(AppError);
-    expect(e).toMatchObject({
-      code: 'missing_type', message: '需求必须有类型（商业 / 功能）才能进入下一步',
-    });
+    expect(await stateOf(id)).toBe('design');
+    expect(await artifactCount()).toBe(1);
+    expect(await eventTypes()).toEqual([
+      'requirement.created', 'uemaster.attached', 'requirement.evaluated',
+    ]);
+  });
+
+  it('收集 + 评审材料：不推进（这道门只认 evaluate，与真 evaluate 同一条规则）', async () => {
+    // Ruling 1 之前这条边界由 missing_type 顺带守住（那时「没有类型」的需求连
+    // 立项都过不去）。类型可空之后，仍然要有一条用例钉住「只有 evaluate 触发迁移」，
+    // 否则「补一份评审材料把需求推进到待设计」会变成一条没人拦的路。
+    const { id } = await newRequirement();
+    await db.execute(sql`update requirements set type = null where id = ${id}`);
+    await attachOk(id, 'review', '/uemaster/PAN-1/review.html');
+
     expect(await stateOf(id)).toBe('inbox');
-    expect(await artifactCount()).toBe(0);
-    expect(await eventTypes()).toEqual(['requirement.created']);
+    expect(await eventTypes()).toEqual(['requirement.created', 'uemaster.attached']);
   });
 });
 
