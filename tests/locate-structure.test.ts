@@ -70,6 +70,27 @@ describe('扩展词', () => {
     expect(got).toEqual(['套餐', 'vip等级']);
   });
 
+  /**
+   * 已知缺口（终审 Minor 7）：回落值是调用方的原始关键词，而它**可能是空的**。
+   *
+   * 那时这一层会拿零个词去结构检索，`locateFromStructure` 回 `none`，材料上写
+   * 「没能在代码里定位到这条需求的实现」。这句话在「我们拿着零个词去搜」的意义上不算
+   * 说谎，但它把**上游没有词可用**这件事抹掉了——而这正是 `structure.ts` 文件头说
+   * 它要防的那一类失败。这条用例把这个现状钉住：将来给「零词」补一个自己的出口
+   * （需要动 `copy.ts` 的措辞契约），它会红，届时应连同注释一起改。
+   */
+  it('模型失败 + 回落词表也是空的 → 零词检索回 none（已知缺口，钉住现状）', async () => {
+    const got = await expandedKeywords(async () => null, 'XX', '', []);
+    expect(got).toEqual([]);
+
+    const located = locateFromStructure([
+      { repo: 'uni-app', index: index('uni-app', { 'src/pages/search/search.vue': file('page') }) },
+    ], got);
+    // 零个词 = 一条候选都不可能有；这里回的是 `none` 而不是 `absent`——
+    // 索引在、我们查过了，只是没词可查。材料的措辞因此是本条缺口的一部分。
+    expect(located).toEqual({ kind: 'none' });
+  });
+
   it('模型失败 → 用原始关键词，不重试也不抛', async () => {
     let calls = 0;
     const got = await expandedKeywords(

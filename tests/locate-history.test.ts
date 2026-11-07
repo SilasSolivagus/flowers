@@ -556,7 +556,10 @@ describe('中文检索打分', () => {
     expect(ranked[0]!.score).toBeLessThanOrEqual(1);
   });
 
-  it('取前 5 次合并，文件按出现次数聚合，并写出处', () => {
+  // 用例名曾写「按出现次数聚合」——那条口径已被推翻（终审 Minor 5）：`count` 不参与
+  // 排序，聚合取的是「合并相似度按合并宽度打折后的最高权重」，count 只是同分时的历史
+  // 包袱。名字不改的话，下一个读者会照着名字去调 count。
+  it('取前 5 次合并，文件按合并权重聚合（count 不参与排序），并写出处', () => {
     const got = locateFromHistory(rows, '用户部分权益缩减调整');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;

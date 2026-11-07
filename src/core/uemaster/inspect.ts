@@ -844,7 +844,7 @@ function locateBannerText(repos: readonly RepoBaseline[]): string {
  * 猜「是不是有个仓没读到」。规则必须跟着输入出现，才读得懂。
  */
 function absentRule(repos: readonly RepoBaseline[]): string[] {
-  const absent = repos.filter((repo) => repo.locate?.kind === 'absent');
+  const absent = repos.filter((repo) => repo.locate.kind === 'absent');
   if (absent.length === 0) return [];
   return [
     `  ! ${absent.map((repo) => repo.id).join('、')} 的代码这一轮**没读到**（见上面的原因）：`,

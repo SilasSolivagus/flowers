@@ -496,7 +496,8 @@ function repoOf(path: string, trees: Map<string, Set<string>>): string | null {
  *
  * 返回 `Baseline` 而不是 `Baseline | null`：以前的 `null` 表示「镜像没配」，材料里那句
  * 「这次没有代码现状可参考」把「没读到」与「没配」混成了一句。现在读不到就是 `absent`，
- * 材料里由 `ABSENT_LINE` 指名原因——而 `repos` 为空时标题仍写「未参考代码现状」，
+ * 材料里由 `ABSENT_LINE`（代码没读到，`origin: 'code'`）指名原因——而 `repos` 为空时
+ * 标题仍写「未参考代码现状」，
  * 这一句照样诚实。
  */
 export async function gatherBaseline(

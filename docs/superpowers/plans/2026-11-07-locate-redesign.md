@@ -571,7 +571,13 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现 `types.ts` 与 `copy.ts`**
 
-> 实施结果与本节原稿的差异（以此为准）：`CANDIDATES_LINE` 对空数组 **throw**，不是渲染悬空标题。
+> 实施结果与本节原稿的差异（以此为准）：
+> 1. `CANDIDATES_LINE` 对空数组 **throw**，不是渲染悬空标题；
+> 2. **终审起是四句，不是三句**：`absent` 拆成「代码没读到」（`ABSENT_HEADLINE` /
+>    `ABSENT_LINE`）与「代码读到了、合并历史没读到」（`ABSENT_HISTORY_HEADLINE` /
+>    `ABSENT_HISTORY_LINE`），另外两句不变。理由见 spec §7 与 `copy.ts` 的注释；
+> 3. 这些句子除了进提示词，还必须进**产物顶部的横幅**（`src/core/locate/banner.ts`，
+>    代码写、模型不参与）——只进提示词的那一版在终审被判不合格。
 
 `copy.ts` 里三句话必须是常量或纯函数，且**全仓只有这一处**：
 
@@ -643,7 +649,9 @@ describe('中文检索打分', () => {
     expect(ranked[0]!.row.commitSha).toBe('a');
   });
 
-  it('取前 5 条合并，文件按出现次数排序，并写出处', () => {
+  // 用例名曾写「文件按出现次数排序」——与同一任务 Step 3 第 5 条「不许按 count 排」
+  // 自相矛盾（终审 Minor 5）。实际口径是「按合并权重降序、再按路径」，count 不参与排序。
+  it('取前 5 条合并，文件按合并权重排序（count 不参与），并写出处', () => {
     const got = locateFromHistory(rows, '用户部分权益缩减调整');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
