@@ -14,6 +14,8 @@ import {
   type MirrorResult,
 } from '../codemirror/mirror.js';
 import { repoShape, type RepoShape } from '../codemirror/route.js';
+import { locateOrFallback, type Probe } from '../codemirror/code-index.js';
+import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
@@ -164,6 +166,13 @@ export type RepoBaseline = {
   tree: Set<string>;
   shape: RepoShape;
   candidates: Array<{ path: string; hits: number }>;
+  /**
+   * 候选是怎么来的：`index` = 静态索引（`hits` 是评分），`grep` = 旧的
+   * 关键词命中（`hits` 是命中的关键词个数）。提示词里那句话要说清是哪一种。
+   */
+  source?: 'index' | 'grep';
+  /** 索引给出的候选（带 `why` / `route`）。下一步的 next probes 提示词读它。 */
+  probes?: Probe[];
 };
 
 /** 这次走查的数字。作业收口、报告与用例都读这一份，不各自再算一遍。 */
@@ -235,6 +244,8 @@ export type InspectDeps = {
   lsTree: (repoId: string) => Promise<MirrorResult<string[]>>;
   grep: typeof grep;
   repoShape: (repoId: string) => Promise<MirrorResult<RepoShape>>;
+  /** 静态索引（P4-10）：有就按路由/名字/导入/符号定位，没有就退回 grep。 */
+  repoIndex: (db: Db, repo: string, sha: string) => Promise<MirrorResult<BuiltIndex>>;
   show: typeof show;
   attach: typeof attachArtifact;
 };
@@ -252,6 +263,7 @@ const LIVE: InspectDeps = {
   grep,
   repoShape,
   show,
+  repoIndex: (db, repo, sha) => repoIndex(db, repo, sha),
   attach: attachArtifact,
 };
 
@@ -381,6 +393,7 @@ async function baselineOf(
   repoId: string,
   keywords: string[],
   deps: InspectDeps,
+  db: Db,
 ): Promise<RepoBaseline> {
   const [headRes, treeRes, shapeRes] = await Promise.all([
     deps.head(repoId),
@@ -395,6 +408,34 @@ async function baselineOf(
   if (!treeRes.ok) throw mirrorFailure(treeRes.code, repoId, treeRes.message);
   if (!shapeRes.ok) throw mirrorFailure(shapeRes.code, repoId, shapeRes.message);
 
+  const sha = headRes.data.sha;
+
+  // ── 定位：先问静态索引（P4-10） ──
+  //
+  // 有索引就**一次 grep 都不发**：结构早就在库里，按路由(10)/名字(6)/被引用(4)/
+  // 符号(3) 打分即可。索引不可用（后端仓、镜像读不通、建索引失败）才走下面那条
+  // 旧的 grep 路径——那段代码原样保留，`source` 字段把「走的是哪条」写下来，
+  // 报告与用例都能查到（§3.5）。
+  const indexed = await deps.repoIndex(db, repoId, sha);
+  const choice = locateOrFallback(indexed.ok ? indexed.data.index : null, keywords, {
+    limit: CANDIDATE_CAP,
+  });
+  if (choice.source === 'index') {
+    return {
+      id: repoId,
+      sha,
+      date: headRes.data.date,
+      subject: headRes.data.subject,
+      files: treeRes.data.length,
+      tree: new Set(treeRes.data),
+      shape: shapeRes.data,
+      candidates: choice.probes.map((probe) => ({ path: probe.path, hits: probe.score })),
+      source: 'index',
+      probes: choice.probes,
+    };
+  }
+
+  // ── 降级：旧的 grep（§3.5，保留原样） ──
   // 关键词逐个 grep；同一仓的几次搜索并发发出去（互不依赖），失败**不吞**：
   // 一次 grep 失败说明镜像读不通，那时给部分结果只会让人以为「代码里没有」。
   const results = await Promise.all(keywords.map((word) => deps.grep(repoId, word, { max: GREP_MAX })));
@@ -414,13 +455,15 @@ async function baselineOf(
 
   return {
     id: repoId,
-    sha: headRes.data.sha,
+    sha,
     date: headRes.data.date,
     subject: headRes.data.subject,
     files: treeRes.data.length,
     tree: new Set(treeRes.data),
     shape: shapeRes.data,
     candidates,
+    source: 'grep',
+    probes: [],
   };
 }
 
@@ -523,9 +566,14 @@ function shapeLines(repo: RepoBaseline): string[] {
 
 function candidateLines(repo: RepoBaseline): string[] {
   if (repo.candidates.length === 0) return [`  [${repo.id}] 关键词一个都没命中（这份 PRD 的用词与代码里的标识符对不上）`];
+  // 两种来源的 `hits` 不是同一个量：索引给的是评分，grep 给的是命中关键词个数。
+  // 标签必须跟着来源走——把评分写成「关键词命中」是一句假话，模型会照它推理。
+  const note = (hits: number): string => (repo.source === 'index'
+    ? `评分 ${hits}`
+    : `${hits} 个关键词命中`);
   return [
     `  [${repo.id}]`,
-    ...repo.candidates.map((c) => `    ${c.path}  （${c.hits} 个关键词命中）`),
+    ...repo.candidates.map((c) => `    ${c.path}  （${note(c.hits)}）`),
   ];
 }
 
@@ -1142,7 +1190,7 @@ export async function inspect(
   stats.keywords = keywords;
   const repos: RepoBaseline[] = [];
   for (const repoId of INSPECT_REPOS) {
-    repos.push(await baselineOf(repoId, keywords, full));
+    repos.push(await baselineOf(repoId, keywords, full, db));
   }
   stats.repos = repos.map((repo) => ({ id: repo.id, sha: repo.sha, date: repo.date, files: repo.files }));
   stats.candidates = Object.fromEntries(repos.map((repo) => [repo.id, repo.candidates.length]));

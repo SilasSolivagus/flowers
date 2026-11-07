@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  check, pgTable, pgSequence, uuid, text, timestamp, integer, index, uniqueIndex,
+  check, jsonb, pgTable, pgSequence, primaryKey, uuid, text, timestamp, integer, index, uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
@@ -530,3 +530,35 @@ export const prdSnapshots = pgTable('prd_snapshots', {
   hash: text('hash').notNull(),
   fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
 }, (t) => ({ byReq: index('prd_snapshots_req').on(t.requirementId, t.fetchedAt) }));
+
+/**
+ * 静态索引（P4-10）：一个仓库在一个提交上的**结构**，不是正文。
+ *
+ * 存的是三张关系（`files` / `imports` / `routes`），由 `core/codemirror/code-index.ts`
+ * 用正则与目录约定从「每个文件前 80 行」里抽出来。为什么不是 AST：先要证明
+ * 「路由 + 导入」这一层够用来定位；不够再谈 tree-sitter 那种原生依赖。
+ *
+ * **主键 `(repo, sha)` 就是全部失效策略**：sha 一变，索引自然查不到，当场重建。
+ * 没有 TTL、没有「过期标记」，也就不存在「拿旧索引解释新代码」这个失败模式。
+ *
+ * 为什么不存正文：正文会跟着 `git show` 的截断、编码、大小上限漂，而索引要的是
+ * 稳定的关系。正文仍旧按需 `git show`（走查深读那一段），读多读少由提示词预算决定。
+ *
+ * 三列都是 `jsonb` 而不是拆成行：这一层只按 `(repo, sha)` 整份读、整份写，
+ * 拆表只会多三张要 join 的表，换不来一次更快的查询。
+ */
+export const codeIndex = pgTable('code_index', {
+  repo: text('repo').notNull(),
+  sha: text('sha').notNull(),
+  /** path → { kind, exports[], size } */
+  files: jsonb('files').notNull(),
+  /** path → [被 import 的仓内路径] */
+  imports: jsonb('imports').notNull(),
+  /** [{ route, file, title }] */
+  routes: jsonb('routes').notNull(),
+  /** 建索引的时刻。同一个 `(repo, sha)` 第二次读到它时，这个值不该变。 */
+  builtAt: timestamp('built_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.repo, t.sha] }),
+  byBuiltAt: index('code_index_built_at').on(t.builtAt),
+}));

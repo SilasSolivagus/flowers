@@ -689,3 +689,165 @@ export async function show(
   }
   return ok(text);
 }
+
+// ─── 第五个读口：批量读「每个文件的前 N 行」 ──────────────────────────────────
+
+/**
+ * 静态索引要读的东西：**每个页面/组件/服务文件的开头几十行**（导入、导出、路由表）。
+ *
+ * 为什么不复用 `show`：`show` 一次只读一个文件，而且内部先 `cat-file -s` 再
+ * `show`——两次往返。实测一个仓有 130–140 个候选文件，逐文件读 = 280 次 ssh
+ * 往返，光是延迟就几十秒，而静态索引的全部价值就是「比 grep 快」。
+ *
+ * 所以这里加一个**批量**读口，形状只有两次往返：
+ * 1. `ls-tree -r -l -z`：一次拿到全树的 `path / oid / size`（`-l` 带大小，省掉
+ *    `cat-file -s` 那一趟）；
+ * 2. `git show <oid> <oid> …`：一次读多块 blob。git 对多个 blob 参数是**按顺序原样
+ *    拼接**，不加任何分隔符——所以切分靠第 1 步拿到的大小，切完再校验总长；对不上
+ *    就退回逐文件 `show`（正确性优先，慢一点可以接受）。
+ *
+ * 为什么不是 `cat-file --batch`：那要往 stdin 写一串对象名，而 `runGit` 不接 stdin
+ * （这一层的所有命令都是纯 argv，见文件头第 1 条）。`git show` 多参数是同一件事的
+ * 只读等价物，且已经在白名单里。
+ */
+
+export type TreeEntry = {
+  path: string;
+  oid: string;
+  size: number;
+};
+
+/** 一次 `git show` 最多带多少个 blob：够长（少往返），又不至于把 argv 撑爆。 */
+export const SHOW_BATCH = 120;
+
+/** 一次 `git show` 的输出上限：超过就拆成更小的批，不靠 Node 杀进程兜底。 */
+const SHOW_BATCH_BYTES = 8 * 1024 * 1024;
+
+/**
+ * HEAD 上的全部**文件**（带 oid 与大小），已去噪音。
+ *
+ * `-l` 会在每个条目里加一列「对象大小」；`-z` 仍然用 NUL 分隔（路径可以有空格与
+ * 中文）。`type` 不是 `blob` 的条目（子模块的 `commit`）直接跳过——它们不是文件。
+ */
+export async function lsTreeEntries(
+  repoId: string,
+  opts: { ref?: string } = {},
+): Promise<MirrorResult<TreeEntry[]>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+  // `ref` 只收 sha：索引的键是 `(repo, sha)`，读一棵「跟着分支漂」的树等于给错了 sha。
+  const ref = (opts.ref ?? HEAD_REF).trim();
+  if (ref !== HEAD_REF && !/^[0-9a-f]{4,40}$/i.test(ref)) {
+    return fail('bad_path', `ref 不合法：「${ref}」（只能是 HEAD 或一个提交 sha）`);
+  }
+  const run = await read(resolved, ['ls-tree', '-r', '-l', '-z', ref], {
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (!run.ok) return run;
+
+  const out: TreeEntry[] = [];
+  for (const row of run.data.stdout.toString('utf8').split('\0')) {
+    if (row === '') continue;
+    // `100644 blob <oid> <size>\t<path>`：size 那一列是右对齐的，所以中间空格数量不定。
+    const match = /^(\d+) (\w+) ([0-9a-f]+) +(\d+)\t(.+)$/.exec(row);
+    if (match === null) continue;
+    if ((match[2] ?? '') !== 'blob') continue;
+    const path = match[5] ?? '';
+    if (isNoisePath(path)) continue;
+    const size = Number(match[4]);
+    out.push({ path, oid: match[3] ?? '', size: Number.isFinite(size) ? size : 0 });
+  }
+  return ok(out);
+}
+
+/**
+ * 批量读文件**开头**：返回 `path → 前 maxLines 行`。
+ *
+ * `maxLines` 在本地切（传输的是整块 blob）：git 没有「只给我前 80 行」的读命令，
+ * 而索引真正要的是导入/导出/路由表——它们都在文件头部。多传的那点字节比多几十次
+ * 往返便宜得多（实测两个仓各 0.7MB / 0.6MB 源码）。
+ *
+ * 任何一处对不上（git 退出码非 0、拼出来的总长与 `ls-tree -l` 的大小不合）都**不猜**：
+ * 这一批退回逐文件 `show`。索引里少一个文件比错位解析整棵树好。
+ */
+export async function showHeads(
+  repoId: string,
+  entries: readonly TreeEntry[],
+  opts: { maxLines?: number; maxBytes?: number } = {},
+): Promise<MirrorResult<Map<string, string>>> {
+  const maxLines = Number.isFinite(opts.maxLines) && (opts.maxLines ?? 0) > 0
+    ? Math.floor(opts.maxLines as number)
+    : 80;
+  const maxBytes = opts.maxBytes ?? DEFAULT_SHOW_MAX_BYTES;
+  const cut = (text: string): string => headLines(text, maxLines);
+
+  const heads = new Map<string, string>();
+  let index = 0;
+  while (index < entries.length) {
+    // 按字节预算切批：一个仓里既有 200 字节的 `index.ts`，也有 40KB 的页面。
+    const batch: TreeEntry[] = [];
+    let bytes = 0;
+    while (index < entries.length) {
+      const entry = entries[index]!;
+      if (batch.length > 0 && (batch.length >= SHOW_BATCH || bytes + entry.size > SHOW_BATCH_BYTES)) break;
+      batch.push(entry);
+      bytes += entry.size;
+      index += 1;
+    }
+    const got = await showBatch(repoId, batch, bytes, maxBytes);
+    if (!got.ok) return got;
+    for (const [path, text] of got.data) heads.set(path, cut(text));
+  }
+  return ok(heads);
+}
+
+/** 取一段文本的前 n 行（行尾的 `\r` 去掉：Windows 上提交的源码不少）。 */
+export function headLines(text: string, max: number): string {
+  const lines = text.split('\n');
+  const shown = lines.slice(0, max).map((line) => line.replace(/\r$/, ''));
+  return shown.join('\n');
+}
+
+/**
+ * 一批 blob 的内容。先拼一次 `git show`，长度对得上就直接按大小切；对不上（或 git
+ * 直接失败）就逐文件 `show`。
+ *
+ * 逐文件那条路用的是公开读口 `show`，它自带截断标记——索引只取前 80 行，标记会不会
+ * 混进解析不影响：正则在前 80 行里就结束了。
+ */
+async function showBatch(
+  repoId: string,
+  batch: readonly TreeEntry[],
+  bytes: number,
+  maxBytes: number,
+): Promise<MirrorResult<Map<string, string>>> {
+  const out = new Map<string, string>();
+  if (batch.length === 0) return ok(out);
+
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+  const args = ['show', ...batch.map((entry) => entry.oid)];
+  const run = await read(resolved, args, { maxBuffer: bytes + 2 * 1024 * 1024 });
+
+  if (run.ok) {
+    const buffer = run.data.stdout;
+    const total = batch.reduce((sum, entry) => sum + entry.size, 0);
+    if (buffer.length === total) {
+      let offset = 0;
+      for (const entry of batch) {
+        const slice = buffer.subarray(offset, offset + entry.size);
+        offset += entry.size;
+        out.set(entry.path, truncateUtf8(slice, maxBytes));
+      }
+      return ok(out);
+    }
+  }
+
+  // 兜底：一批一批地读，读到哪个算哪个（失败仍然是失败，不吞）。
+  for (const entry of batch) {
+    const one = await show(repoId, entry.path, { maxBytes });
+    if (!one.ok) return one;
+    out.set(entry.path, one.data);
+  }
+  return ok(out);
+}

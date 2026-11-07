@@ -14,8 +14,11 @@ import {
   type ComposeDeps, type ComposeUsage, type FlowNode, type RequirementRow,
 } from './compose.js';
 import { renderFlowchart } from './flow.js';
-import { head, lsTree, grep, show } from '../codemirror/mirror.js';
+import { head, lsTree, grep, show, type MirrorResult } from '../codemirror/mirror.js';
 import { repoShape } from '../codemirror/route.js';
+import { isGenericWord, pathTokens } from '../codemirror/terms.js';
+import { locateOrFallback, type Probe } from '../codemirror/code-index.js';
+import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
 import { keywordsFrom, prdVersionOf } from './inspect.js';
 import {
   complete, extractJson, resolveProviderConfig,
@@ -204,10 +207,13 @@ export type ReviewDeps = ComposeDeps & {
   grep: typeof grep;
   show: typeof show;
   repoShape: typeof repoShape;
+  /** 静态索引：有索引就按索引定位，没有（或建失败）就退回 grep。 */
+  repoIndex: (db: Db, repo: string, sha: string) => Promise<MirrorResult<BuiltIndex>>;
 };
 
 const LIVE: ReviewDeps = {
   head, lsTree, grep, show, repoShape,
+  repoIndex: (db, repo, sha) => repoIndex(db, repo, sha),
   complete,
   render: (mermaid) => renderFlowchart(mermaid),
   resolveConfig: resolveProviderConfig,
@@ -325,62 +331,28 @@ export type Baseline = {
   repos: Array<{ id: string; sha: string }>;
   /** 每个仓库 HEAD 上的路径集合，校验代码证据用。 */
   trees: Map<string, Set<string>>;
+  /**
+   * 索引给出的候选（带 `why` 与 `route`）。下一步（提示词改成 next probes）会读它；
+   * 现在先原样带着，好让材料里那句「为什么是这几处」有出处。
+   */
+  probes: Array<{ repo: string } & Probe>;
 };
 
 /** 现状摘取的文件数/字节预算：够模型看出「现在怎么做的」，又不至于把仓库搬进提示词。 */
 export const BASELINE_FILES = 6;
 export const BASELINE_BYTES = 28_000;
 
-/**
- * 到处都有的词，拿它们定位等于随机挑文件。
- *
- * 实测：「文件」「当前」「返回」「结果」让排第一的候选变成 `app/downLoad/index.ts`
- * （下载模块）——它不是这个功能的实现，模型看着它当然说不出「与现状冲突」。
- * 这些词在 PRD 里出现频率高，但**不指向任何具体位置**。
- */
-/**
- * 中文业务词 → 代码里的英文片段。
- *
- * 为什么必须有：PRD 写「搜索」，代码里叫 `search.vue`；PRD 写「分享」，代码里是
- * `share`。拿中文词去匹配英文路径**永远命中不了**，于是基线会随缘挑文件——实测
- * 挑到过 `app/downLoad/index.ts` 和 `src/enum/umengPoint.ts`，都不是这个功能。
- * 这张表只做定位，不参与任何判断。
- */
-const PATH_TERMS: Array<[string, string[]]> = [
-  ['搜索', ['search']], ['分享', ['share']], ['目录', ['directory', 'dir']],
-  ['面包屑', ['breadcrumb', 'crumbs']], ['排序', ['sort', 'order']],
-  ['文件', ['file']], ['文件夹', ['folder', 'dir']], ['列表', ['list']],
-  ['详情', ['detail']], ['登录', ['login', 'auth']], ['会员', ['vip', 'member']],
-  ['短信', ['sms', 'message']], ['通知', ['notify', 'notification']],
-  ['订单', ['order']], ['支付', ['pay', 'payment']], ['剪贴板', ['clipboard']],
-  ['直链', ['direct', 'link']], ['限速', ['limit', 'rate']], ['上传', ['upload']],
-  ['下载', ['download']], ['历史', ['history']], ['设置', ['setting', 'config']],
-  ['多选', ['select', 'checkbox']], ['导航', ['nav', 'navigation']],
-  ['移动端', ['mobile', 'h5', 'app']], ['首页', ['home', 'index']],
-];
-
-/** 一个中文词对应的英文路径片段（没有就空）。 */
-function pathTokens(word: string): string[] {
-  const hit = PATH_TERMS.find(([cn]) => word.includes(cn) || cn.includes(word));
-  return hit === undefined ? [] : hit[1];
-}
-
-/** 功能实现只会落在这几类目录里。 */
+/** 功能实现只会落在这几类目录里（退回 grep 那条路时用）。 */
 const FEATURE_PATH = /(^|\/)(pages?|views?|screens?|components?|services?|api|store|hooks)\//i;
 const CODE_EXT = /\.(tsx?|jsx?|vue)$/i;
-
-const STOP_WORDS = new Set([
-  '文件', '当前', '返回', '结果', '目录', '上一级', '支持', '需要', '可以', '进行',
-  '展示', '操作', '页面', '功能', '设置', '进入', '点击', '选择', '内容', '数据',
-  '新增', '增加', '优化', '调整', '统一', '确认', '记录', '显示', '以下', '上述',
-]);
 
 export async function gatherBaseline(
   prd: ReviewPrd,
   keywordsRaw: string[],
   deps: ReviewDeps,
+  db: Db,
 ): Promise<Baseline | null> {
-  const keywords = keywordsRaw.filter((word) => !STOP_WORDS.has(word) && word.length >= 2);
+  const keywords = keywordsRaw.filter((word) => !isGenericWord(word) && word.length >= 2);
   let repos: Array<{ id: string; sha: string; date: string }>;
   try {
     const shapeProbe = await deps.lsTree('123pan-pc');
@@ -398,6 +370,8 @@ export async function gatherBaseline(
 
   const trees = new Map<string, Set<string>>();
   const picked: Array<{ repo: string; path: string }> = [];
+  /** 索引给出的候选（带 `why`）：下一步的提示词与证据栏要它。 */
+  const probes: Array<{ repo: string } & Probe> = [];
   /** 没有路径命中的仓：现状里要对读者说清楚「这一侧没定位到」。 */
   const emptyRepos: string[] = [];
   for (const repo of repos) {
@@ -406,6 +380,25 @@ export async function gatherBaseline(
     const set = new Set(tree.data);
     trees.set(repo.id, set);
 
+    // ── 定位：先问静态索引（P4-10） ──
+    //
+    // 走索引这一支**不发一次 grep**：一个仓的页面/组件/服务结构早就在库里，按
+    // 路由 > 名字 > 被引用 > 导出符号的固定权重打分即可（实测 3–50 ms）。
+    // 索引不可用（后端仓、镜像读不到、建索引失败）才往下走到旧的 grep 那一支。
+    const indexed = await deps.repoIndex(db, repo.id, repo.sha);
+    const choice = locateOrFallback(indexed.ok ? indexed.data.index : null, keywords, {
+      limit: BASELINE_FILES,
+    });
+    if (choice.source === 'index') {
+      if (choice.probes.length === 0) emptyRepos.push(repo.id);
+      for (const probe of choice.probes) {
+        picked.push({ repo: repo.id, path: probe.path });
+        probes.push({ repo: repo.id, ...probe });
+      }
+      continue;
+    }
+
+    // ── 降级：旧的 grep + 路径加权（§3.5，保留原样） ──
     // 候选池只取「页面 + 接口」两类（`repoShape` 给的形状）。
     //
     // 为什么不在整棵树里找：实测按正文命中排序，排第一的是 `src/enum/umengPoint.ts`
@@ -468,6 +461,7 @@ export async function gatherBaseline(
       text: '（在代码镜像里没有定位到这个功能现有的实现——下面只能就 PRD 本身评，凡需要「现状」的判断不要写。）',
       repos: repos.map(({ id, sha }) => ({ id, sha })),
       trees,
+      probes,
     };
   }
 
@@ -495,6 +489,7 @@ export async function gatherBaseline(
     ].join('\n'),
     repos: repos.map(({ id, sha }) => ({ id, sha })),
     trees,
+    probes,
   };
 }
 
@@ -1113,7 +1108,7 @@ export async function reviewRequirement(
   // ── 现状：先摸清「现在是什么样」，才评得了「这个改动对不对」 ──
   // 关键词取自 PRD（与走查同一套抽取），定位失败不等于报错：退化成「只看 PRD」，
   // 标题会写「未参考代码现状」——那是一句诚实的话，读者自己会打折看。
-  const baseline = await gatherBaseline(prd, keywordsFrom(prd.text, req.title), counted);
+  const baseline = await gatherBaseline(prd, keywordsFrom(prd.text, req.title), counted, db);
 
   // ── 问题清单 ──
   const found = await collectFindings(cfg, req, prd, nodes, baseline, counted, usage, trace);
