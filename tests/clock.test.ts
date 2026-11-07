@@ -2,12 +2,18 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import {
-  tick, deadlineDay, shanghaiDayOf, startOfShanghaiDay,
+  tick, deadlineDay, judgeRow, shanghaiDayOf, startOfShanghaiDay,
 } from '../src/core/clock/tick.js';
 import { AppError } from '../src/core/errors.js';
+import { activeMemberByName } from '../src/core/auth/members.js';
+import { notificationsFor } from '../src/core/read/notify.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { makeQueued, makeReadyAt, makeRelease } from './helpers/factory.js';
+
+/** 名册里的两个身份：跳过提醒的收件人（超管）与不该收到它的 PM。 */
+const ADMIN = '房超';
+const PM = '吕品';
 
 beforeEach(async () => {
   await resetDb();
@@ -261,65 +267,127 @@ describe('tick — 事件与并发', () => {
   });
 });
 
-describe('tick — 坏数据不静默跳过', () => {
-  it('待在待开发却没有版本 → 报错，而不是永远不动', async () => {
+/**
+ * 库里这一轮的跳过提醒（`clock.tick_skipped`）。
+ *
+ * 断言的是**事件**，不是「tick 说它写了」：提醒在这套系统里就是一条事件
+ * （没有通知表），写没写只有 `events` 说得清。
+ */
+async function skipAlerts(): Promise<Array<{ seq: number; payload: Record<string, unknown> }>> {
+  const r = await db.execute<{ seq: number; payload: string }>(sql`
+    select seq, payload from events
+     where type = 'clock.tick_skipped'
+     order by seq`);
+  return r.rows.map((row) => ({
+    seq: Number(row.seq),
+    payload: JSON.parse(row.payload) as Record<string, unknown>,
+  }));
+}
+
+/** 超管（房超）铃铛里那一行的正文。 */
+async function adminSkipLines(): Promise<string[]> {
+  const admin = await activeMemberByName(db, ADMIN);
+  if (admin === null) throw new Error('名册里没有超管');
+  const notices = await notificationsFor(db, admin, { limit: 50 });
+  return notices.filter((notice) => notice.type === 'clock.tick_skipped').map((notice) => notice.line);
+}
+
+/**
+ * 2026-11-08 裁定：**一条坏数据不许停掉全场。**
+ *
+ * 背景写在这里而不是藏进 commit message：迁移 `0024` 之前 803 条迁入行没有
+ * `release_id`，tick 每轮都在第一行坏数据上抛错、整轮回滚，于是从迁移那天起
+ * **一轮都没跑完过**——状态不动、超时提醒不响、推送不发、自愈检查轮不到。看板看起来
+ * 只是「今天没活」。迁移把 34 条缺日期的行退回 queue、顺手清了现场，机制却没动。
+ *
+ * 这一组用例的顺序是有意的：先证明「坏行不推进」，紧接着证明「同一轮里别的行照常
+ * 推进」——只钉前半句会漏掉真正的那个人祸（全场停摆），只钉后半句会把坏行静默吞掉。
+ */
+describe('tick — 坏行只影响它自己（一条坏数据不许停掉全场）', () => {
+  it('待开发却没有版本 → 不推进、不抛，进 skipped 并带中文原因', async () => {
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = 'ready' where id = ${r.id}`);
 
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「待开发」但没有排期版本，无法自动推进`);
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(out.moved).toHaveLength(0);
+    expect(out.skipped).toHaveLength(1);
+    expect(out.skipped[0]).toMatchObject({
+      id: r.id, state: 'ready', field: 'release_id', reason: '没有排期版本',
+    });
+    // 原因必须是中文：这条账唯一的读者是人（铃铛那一行、报告、stdout）。
+    expect(out.skipped[0]!.reason).toMatch(/[\u4e00-\u9fa5]/);
+    // 原样不动：状态还是 ready，也没有写一条自动转移事件。
+    expect(await stateOf(r.id)).toBe('ready');
+    expect(await autoEvents(r.id)).toHaveLength(0);
+  });
+
+  it('同一轮里坏行被跳过，其它行照常推进（停摆的回归用例）', async () => {
+    const good = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
+    const bad = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+    await db.execute(sql`update requirements set state = 'ready' where id = ${bad.id}`);
+
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(out.moved).toEqual([{ id: good.id, from: 'ready', to: 'dev' }]);
+    expect(out.skipped.map((row) => row.id)).toEqual([bad.id]);
+    expect(await stateOf(good.id)).toBe('dev');
+    expect(await autoEvents(good.id)).toHaveLength(1);
+    expect(await stateOf(bad.id)).toBe('ready');
   });
 
   /**
-   * 版本检查必须对三个状态一视同仁：dev / test 行不读 window_start，若只在
-   * window_start 为空时报错，release_id 为 null 的 dev 行会被静默推成 test → live。
-   * 这类行没有版本就没有开工日，属于损坏数据，必须喊出来。
+   * 版本检查对三个状态一视同仁：dev / test 行不读 window_start，若只在开工日为空时
+   * 报错，`release_id = null` 的 dev 行会被静默推成 test → live。这类行没有版本就
+   * 没有开工日，属于损坏数据——现在它是一行跳过，而不是一次全场停摆。
    */
-  it('开发中却没有版本 → 报错（不会静默推进到测试中）', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+  it('开发中 / 测试中却没有版本 → 各自进 skipped（不会静默推到 live）', async () => {
+    const dev = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`
       update requirements
          set state = 'dev', release_id = null, commit_test_at = '2026-12-01T00:00:00Z'
-       where id = ${r.id}`);
-
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-02')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「开发中」但没有排期版本，无法自动推进`);
-    expect(await stateOf(r.id)).toBe('dev');
-  });
-
-  it('测试中却没有版本 → 报错（不会静默推上线）', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+       where id = ${dev.id}`);
+    const released = await createRequirement(db, '吕品', { title: 't', type: 'feature', requester: 'b' });
     await db.execute(sql`
       update requirements
          set state = 'test', release_id = null,
              commit_test_at = '2026-12-01T00:00:00Z', commit_due_at = '2026-12-04T00:00:00Z'
-       where id = ${r.id}`);
+       where id = ${released.id}`);
 
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-05')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「测试中」但没有排期版本，无法自动推进`);
-    expect(await stateOf(r.id)).toBe('test');
+    const out = await tick(db, startOfShanghaiDay('2026-12-05'));
+    expect(out.moved).toHaveLength(0);
+    expect(out.skipped).toHaveLength(2);
+    // 顺序按 id（uuid，随机）：用集合比，不赌 uuid 的字典序。
+    expect(out.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: dev.id, state: 'dev', reason: '没有排期版本' }),
+      expect.objectContaining({ id: released.id, state: 'test', reason: '没有排期版本' }),
+    ]));
+    expect(await stateOf(dev.id)).toBe('dev');
+    expect(await stateOf(released.id)).toBe('test');
   });
 
-  it('开发中却没有提测日 → 报错', async () => {
-    // 版本要给：否则先撞「没有排期版本」，测不到提测日这一格。
-    const releaseId = await makeRelease('R-1', '2026-12-01', '2026-12-04');
-    const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+  it('两类坏行（无版本 / 缺日期）都在 skipped 里，一轮照样跑完', async () => {
+    const releaseId = await makeRelease('R-2', '2026-12-01', '2026-12-20');
+    const noRelease = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    await db.execute(sql`update requirements set state = 'ready' where id = ${noRelease.id}`);
+    const noDate = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`
-      update requirements set state = 'dev', release_id = ${releaseId} where id = ${r.id}`);
+      update requirements set state = 'dev', release_id = ${releaseId} where id = ${noDate.id}`);
 
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「开发中」但缺少提测日，无法自动推进`);
+    const out = await tick(db, startOfShanghaiDay('2026-12-02'));
+    expect(out.moved).toHaveLength(0);
+    expect(out.skipped).toHaveLength(2);
+    expect(out.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: noRelease.id, field: 'release_id', reason: '没有排期版本' }),
+      expect.objectContaining({ id: noDate.id, field: 'commit_test_at', reason: '缺少提测日' }),
+    ]));
+    // 一条账，不是两条：一轮就是一条（803 条坏行不该变成 803 条铃铛）。
+    const alerts = await skipAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.payload).toMatchObject({
+      count: 2, day: shanghaiDayOf('2026-12-02T00:00:00+08:00'),
+    });
   });
 
-  it('测试中却没有承诺完成日 → 报错', async () => {
+  it('测试中却没有承诺完成日 → 跳过，原因点名那一列', async () => {
     const releaseId = await makeRelease('R-1', '2026-12-01', '2026-12-04');
     const r = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`
@@ -327,35 +395,90 @@ describe('tick — 坏数据不静默跳过', () => {
          set state = 'test', release_id = ${releaseId}, commit_test_at = '2026-12-01T00:00:00Z'
        where id = ${r.id}`);
 
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${r.id} 处于「测试中」但缺少承诺完成日，无法自动推进`);
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(out.skipped).toEqual([
+      expect.objectContaining({
+        id: r.id, state: 'test', field: 'commit_due_at', reason: '缺少承诺完成日',
+      }),
+    ]);
+    expect(await stateOf(r.id)).toBe('test');
   });
 
-  it('一条坏行会让整次 tick 回滚，不留半推进状态', async () => {
-    const good = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
+  it('干净的一轮：skipped 为空，也不写任何跳过提醒', async () => {
+    const ok = await makeReadyAt('2026-12-01', '2026-12-03', '2026-12-04');
+    const out = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(out.skipped).toEqual([]);
+    expect(out.moved).toEqual([{ id: ok.id, from: 'ready', to: 'dev' }]);
+    expect(await skipAlerts()).toHaveLength(0);
+    expect(await adminSkipLines()).toEqual([]);
+  });
+
+  it('有跳过的一轮：恰好一条提醒给超管，点名条数与编号，同一天再跑不翻倍', async () => {
     const bad = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = 'ready' where id = ${bad.id}`);
+    const numberRow = await db.execute<{ number: number }>(
+      sql`select number from requirements where id = ${bad.id}`);
+    const number = Number(numberRow.rows[0]!.number);
 
-    const e = await caught(tick(db, startOfShanghaiDay('2026-12-01')));
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_missing_deadline');
-    expect(e.message).toBe(`需求 ${bad.id} 处于「待开发」但没有排期版本，无法自动推进`);
-    expect(await stateOf(good.id)).toBe('ready');
-    expect(await autoEvents(good.id)).toHaveLength(0);
+    const first = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(first.skipped).toHaveLength(1);
+    expect(await skipAlerts()).toHaveLength(1);
+
+    const lines = await adminSkipLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('时钟跳过 1 条需求');
+    expect(lines[0]).toContain(`PAN-${number}`);
+    expect(lines[0]).toContain('没有排期版本');
+
+    // 同一天再跑：坏行还在（tick 不修数据），账仍然记在返回值里，但提醒不翻倍。
+    const second = await tick(db, startOfShanghaiDay('2026-12-01'));
+    expect(second.skipped).toHaveLength(1);
+    expect(await skipAlerts()).toHaveLength(1);
+    expect(await adminSkipLines()).toHaveLength(1);
   });
 
-  it('时间戳解析不出来就报错（不把 NaN 当成「没到点」）', async () => {
-    const e = caughtSync(
+  it('跳过提醒只给超管，不发给 PM', async () => {
+    const bad = await createRequirement(db, '吕品', { title: 'b', type: 'feature', requester: 'b' });
+    await db.execute(sql`update requirements set state = 'ready' where id = ${bad.id}`);
+    await tick(db, startOfShanghaiDay('2026-12-01'));
+
+    const pm = await activeMemberByName(db, PM);
+    if (pm === null) throw new Error('名册里没有 PM');
+    const notices = await notificationsFor(db, pm, { limit: 50 });
+    expect(notices.filter((notice) => notice.type === 'clock.tick_skipped')).toEqual([]);
+  });
+
+  /**
+   * `clock_bad_deadline`（列里存了解析不出来的值）在真库里走不到：三列都是
+   * timestamptz，写不进坏字符串。但它是判定入口的契约，所以在这里对纯函数钉死，
+   * 免得「读不懂的日期」被当成 `NaN < today` 的 `false` 而悄悄变成「没到点」。
+   */
+  it('日期解析不出来 → 判定是「跳过这一行」，原因是那一列不是有效时间', () => {
+    expect(judgeRow(
+      {
+        id: 'r-1', state: 'dev', release_id: 'rel-1',
+        window_start: null, commit_test_at: '不是时间', commit_due_at: null,
+      },
+      { from: 'dev', to: 'test', field: 'commit_test_at' },
+      shanghaiDayOf('2026-12-01T00:00:00+08:00')!,
+    )).toEqual({ kind: 'skip', field: 'commit_test_at', reason: '提测日不是有效时间' });
+  });
+
+  it('deadlineDay 的三条文案不变（报错措辞只在这里定义一次）', () => {
+    const noDate = caughtSync(
+      () => deadlineDay(null, { requirementId: 'r-1', state: 'dev', field: 'commit_test_at' }),
+    );
+    expect(noDate.code).toBe('clock_missing_deadline');
+    expect(noDate.message).toBe('需求 r-1 处于「开发中」但缺少提测日，无法自动推进');
+
+    const badDate = caughtSync(
       () => deadlineDay('不是时间', { requirementId: 'r-1', state: 'dev', field: 'commit_test_at' }),
     );
-    expect(e).toBeInstanceOf(AppError);
-    expect(e.code).toBe('clock_bad_deadline');
-    expect(e.message).toBe('需求 r-1 的提测日不是有效时间：不是时间');
+    expect(badDate.code).toBe('clock_bad_deadline');
+    expect(badDate.message).toBe('需求 r-1 的提测日不是有效时间：不是时间');
   });
 
-  it('tick 的 now 是 Invalid Date 时直接报错，而不是静默推进 0 条', async () => {
+  it('tick 的 now 是 Invalid Date 时直接报错，而不是静默推进 0 条（这一条仍然致命）', async () => {
     const e = await caught(tick(db, new Date('nope')));
     expect(e).toBeInstanceOf(AppError);
     expect(e.code).toBe('invalid');
