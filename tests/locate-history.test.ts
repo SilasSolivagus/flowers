@@ -2,9 +2,12 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
+import { db } from '../src/db/client.js';
+import { ensureHistory, readHistory } from '../src/core/locate/history-store.js';
 
 const git = (cwd: string, args: string[]) =>
   new Promise<string>((resolve, reject) => {
@@ -211,5 +214,165 @@ describe('mergeHistory：一次合并 = 一条记录', () => {
     expect(only!.mergedAt >= '2025-01-01').toBe(true);
     // 增量必须是全量的子集：否则「缺就补」会把两条不同的合并混成一条。
     expect(all.data.some((row) => row.sha === only!.sha)).toBe(true);
+  });
+});
+
+// ─── 落库：commit_history 与增量 ─────────────────────────────────────────────
+//
+// Task 2 修的是「镜像坏了要报失败」；这一段钉的是**接下来那一层不能把它糟蹋掉**：
+// 失败必须原样返回（不是「0 条、一切正常」），重复调用必须 0 插入。
+//
+// 库是真库（`resetDb` 之外的用例也这么干）：`on conflict do nothing` 的语义、
+// `jsonb` 的往返、`timestamptz` 的时区，只有真 Postgres 能验。
+// 只清自己的行（仓 id 是 `file://…` 的临时目录），不 truncate——这张表里
+// 可能已经有真实仓的历史，用例没有资格删它。
+
+/** 库里某个仓有几行。直接问表：被测函数自己数得对不对，不能用它自己的数去验。 */
+async function countRows(repo: string): Promise<number> {
+  const res = await db.execute<{ n: string }>(sql`
+    select count(*)::text as n from commit_history where repo = ${repo}`);
+  return Number(res.rows[0]?.n ?? '0');
+}
+
+/** 两次合并的仓：2024 一次、2025 一次。增量口径只能靠真日期验。 */
+let agedBare = '';
+
+beforeAll(async () => {
+  const aged = path.join(root, 'aged');
+  await mkdir(aged, { recursive: true });
+  await git(aged, ['init', '-q', '-b', 'master']);
+  await git(aged, ['config', 'user.email', 'dev@example.com']);
+  await git(aged, ['config', 'user.name', 'dev']);
+  await git(aged, ['config', 'commit.gpgsign', 'false']);
+  await writeFile(path.join(aged, 'README.md'), 'base\n');
+  await git(aged, ['add', '.']);
+  await gitWhen(aged, ['commit', '-q', '-m', 'chore: init'], '2023-01-01T00:00:00+08:00');
+
+  await git(aged, ['checkout', '-q', '-b', 'feat-old']);
+  await writeFile(path.join(aged, 'old.ts'), 'export {};\n');
+  await git(aged, ['add', '.']);
+  await gitWhen(aged, ['commit', '-q', '-m', 'feat: 旧功能'], '2024-06-01T00:00:00+08:00');
+  await git(aged, ['checkout', '-q', 'master']);
+  await gitWhen(aged, ['merge', '-q', '--no-ff', 'feat-old', '-m', 'Merge #1 into master from feat-old'], '2024-06-02T00:00:00+08:00');
+
+  await git(aged, ['checkout', '-q', '-b', 'feat-new']);
+  await writeFile(path.join(aged, 'new.ts'), 'export {};\n');
+  await git(aged, ['add', '.']);
+  await gitWhen(aged, ['commit', '-q', '-m', 'feat: 新功能'], '2025-06-01T00:00:00+08:00');
+  await git(aged, ['checkout', '-q', 'master']);
+  await gitWhen(aged, ['merge', '-q', '--no-ff', 'feat-new', '-m', 'Merge #2 into master from feat-new'], '2025-06-02T00:00:00+08:00');
+
+  agedBare = path.join(root, 'aged.git');
+  await git(root, ['clone', '-q', '--bare', aged, agedBare]);
+  register(`file://${agedBare}`, agedBare);
+
+  // 上一轮（或上次失败的运行）可能留着行；仓 id 里带的是这次的临时目录，所以只清这些。
+  await db.execute(sql`delete from commit_history where repo like 'file://%'`);
+});
+
+afterAll(async () => {
+  await db.execute(sql`delete from commit_history where repo like 'file://%'`);
+});
+
+describe('ensureHistory：增量补齐', () => {
+  it('第一次写入，第二次不重复写；总数不变', async () => {
+    const repo = `file://${bare}`;
+    const first = await ensureHistory(db, repo);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.data.inserted).toBe(1);
+
+    const second = await ensureHistory(db, repo);
+    expect(second.ok).toBe(true);
+    if (second.ok) {
+      expect(second.data.inserted).toBe(0);
+      expect(second.data.total).toBe(1);
+    }
+    const rows = await readHistory(db, repo);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.files).toEqual(['src/pages/video/video.vue']);
+  });
+
+  it('镜像读不出来 → 失败原样返回，且一行都没写', async () => {
+    // Task 2 的整个修轮就是为了这件事：路径配错必须**报错**，否则这条路径会被
+    // 写成「这个仓没有合并」，之后 5 条真实历史都查不到，而且看起来一切正常。
+    const gone = path.join(root, 'gone');
+    await mkdir(gone, { recursive: true });
+    await writeFile(path.join(gone, 'README.md'), '这不是仓库\n');
+    const id = register(`file://${gone}`, gone);
+
+    const res = await ensureHistory(db, id);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.code).toBe('git_failed');
+    expect(res.message).toContain(gone);
+    expect(await countRows(id)).toBe(0);
+  });
+
+  it('只补库里没有的那次合并：旧的不重写，新的补进来', async () => {
+    const repo = `file://${agedBare}`;
+    const first = await ensureHistory(db, repo);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.data.inserted).toBe(2);
+
+    // 把最新那条删掉 = 「上一次跑到一半断了」。库里最新的那一刻退回 2024，
+    // 所以下一次的 since 应该只够拿到 2025 那条（含边界，git 的 --since 是含等的）。
+    const rows = await readHistory(db, repo);
+    expect(rows).toHaveLength(2);
+    await db.execute(sql`
+      delete from commit_history where repo = ${repo} and commit_sha = ${rows[0]!.commitSha}`);
+
+    const second = await ensureHistory(db, repo);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.data.inserted).toBe(1);
+    expect(second.data.total).toBe(2);
+  });
+
+  it('库里最新那条比镜像里所有合并都新 → 0 插入，不报错', async () => {
+    // 这条是增量口径的边界：since 取自库里的 max(merged_at)，镜像若没有任何
+    // 比它更新的合并，git 会回空。那是「没有新东西」，不是失败——但**也不会**
+    // 回填库里缺的旧行（历史只增不改的前提）。所以这里同时钉住「不报错」与
+    // 「不回填」：假行留着，真实那次合并不会被顺手补进来。
+    const repo = `file://${bare}`;
+    await db.execute(sql`delete from commit_history where repo = ${repo}`);
+    await db.execute(sql`
+      insert into commit_history (repo, commit_sha, merged_at, branch, message, files)
+      values (${repo}, ${'f'.repeat(40)}, '2099-01-01T00:00:00+08:00'::timestamptz, null, '未来', '[]'::jsonb)
+      on conflict (repo, commit_sha) do nothing`);
+
+    const res = await ensureHistory(db, repo);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.inserted).toBe(0);
+    expect(res.data.total).toBe(1);
+    const rows = await readHistory(db, repo);
+    expect(rows.map((row) => row.commitSha)).toEqual(['f'.repeat(40)]);
+  });
+
+  it('readHistory 只回一个仓的行，且最新的排在最前', async () => {
+    const a = `file://${bare}`;
+    const b = `file://${agedBare}`;
+    // 上一条用例往 a 里塞了一条 2099 的假行，先清掉；两个仓都重新补齐一遍。
+    await db.execute(sql`delete from commit_history where repo = ${a}`);
+    for (const repo of [a, b]) {
+      const res = await ensureHistory(db, repo);
+      expect(res.ok).toBe(true);
+    }
+
+    const rowsA = await readHistory(db, a);
+    const rowsB = await readHistory(db, b);
+    expect(rowsA).toHaveLength(1);
+    expect(rowsA.every((row) => row.repo === a)).toBe(true);
+    expect(rowsB).toHaveLength(2);
+    expect(rowsB.every((row) => row.repo === b)).toBe(true);
+    // 最新在前：2025 那次合并排在 2024 那次之前。
+    expect(rowsB[0]!.mergedAt >= rowsB[1]!.mergedAt).toBe(true);
+    expect(rowsB[0]!.branch).toBe('feat-new');
+    expect(rowsB[1]!.branch).toBe('feat-old');
+    // 消息与文件都要能原样回读（jsonb 往返 + 中文不坏）。
+    expect(rowsB[0]!.message).toContain('新功能');
+    expect(rowsB[0]!.files).toEqual(['new.ts']);
   });
 });
