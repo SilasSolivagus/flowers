@@ -16,7 +16,8 @@
  *    全部变成逾期，界面上的「停留天数 / 等开工日」全失去意义。相对日期让这张
  *    看板任何时候打开都处在「正在跑」的状态。
  *
- * 产出（与线稿一致）：5 个成员、2 个版本、12 条需求铺满 10 个状态，
+ * 产出（与线稿一致）：7 个成员（各有邮箱登录名，P4-08）、2 个版本、12 条需求铺满
+ * 10 个状态（其中 PAN-6 带平台 H5 + Android），
  * 其中 3 条是当前成员（默认「吕品」）**现在需要动手**的卡。
  *
  * 为什么不是 brief 写的 5 条：`mine` 的口径是「现在欠你一个动作」，而它由「等谁」
@@ -31,6 +32,7 @@ import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import type { State } from '../src/core/state-machine.js';
 import { createRequirement } from '../src/core/requirements/create.js';
+import { updateRequirement } from '../src/core/requirements/manage.js';
 import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass } from '../src/core/requirements/review.js';
@@ -275,7 +277,17 @@ async function main() {
 
   const queueB = await create('分享页搜索补齐 H5 / APP', 'feature', '王妍', '吕品');
   await toQueue(queueB, '吕正豪');
-  log(`${padTo(`#${queueB.number}`, 5)}${padTo('分享页搜索补齐 H5 / APP', 26)}… → reviewPass（吕正豪）`);
+  /**
+   * 平台（P4-08）：这条需求就是 owner 嘴里那个例子——「PAN-6 是 H5 + APP」。
+   *
+   * 走的是真实服务 `updateRequirement`（不是裸 UPDATE）：它会算指纹、写一条
+   * 「更新描述 · 平台」的事件，于是时间轴上看得见「谁在这条需求上补了平台」。
+   * 顺序放在 reviewPass 之后，因为「评估 / 评审」是在还没有平台这一格时做的——那
+   * 也正是「补了平台，老材料就变旧」这条语义在种子里的样子。
+   */
+  await updateRequirement(db, PM, { requirementId: queueB.id, platforms: ['h5', 'android'] });
+  log(`${padTo(`#${queueB.number}`, 5)}${padTo('分享页搜索补齐 H5 / APP', 26)}… → reviewPass（吕正豪）`
+    + ' · 平台 H5 / Android');
 
   // 7 待开发：排进下月版本，开工日还没到（等开工日 day(+7)）。时钟不会碰它。
   const ready = await create('PC 端支持打开分享页', 'feature', '房超', '房超');
