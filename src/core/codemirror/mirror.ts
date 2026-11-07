@@ -851,3 +851,167 @@ async function showBatch(
   }
   return ok(out);
 }
+
+// ─── 第六个读口：合并历史 ────────────────────────────────────────────────────
+
+/** 一条合并记录。`files` 只含源码扩展名——docs/、png、package.json 不是「功能的位置」。 */
+export type MergeRecord = {
+  sha: string;
+  /** 提交时间，ISO 8601（`%cI`：带时区偏移，与 `head()` 同一格式）。 */
+  mergedAt: string;
+  /** 合并标题里解析出的分支名；标题里没有来源分支（如手写的合并信息）时为 null。 */
+  branch: string | null;
+  /** 该分支自己的非合并提交信息，` / ` 拼接。 */
+  message: string;
+  files: string[];
+};
+
+const HISTORY_SRC = /\.(tsx?|jsx?|vue)$/i;
+/** 记录之间用 \u0001 分隔，字段之间用 \u0002——提交信息里可能有换行与竖线。 */
+const REC = '\u0001';
+const FLD = '\u0002';
+
+/**
+ * 读一次合并历史最多等多久：两个仓合计 657 条合并，实测 uni-app 124 条 1.7 秒、
+ * pc 533 条 16 秒。240 秒是给「机房网络抖一下」的余量，不是正常耗时。
+ */
+const HISTORY_TIMEOUT_MS = 240_000;
+
+/**
+ * POSIX 单引号字面量。
+ *
+ * `ssh <host> bash -lc <script>` 里 ssh 会把 argv 从主机名之后用**空格**拼成一条
+ * 远端命令行（文件头第 1 条规矩的反面：这一层我们躲不掉），所以带空格与换行的
+ * 脚本必须自己先变成「一个词」，否则远端 shell 会把它拆成几十个参数，`bash -lc`
+ * 只拿到第一个词。单引号里除了 `'` 没有任何字符需要转义，所以只处理 `'`。
+ */
+function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * 一次合并的取数脚本：**一个 shell** 里跑完所有合并。
+ *
+ * 为什么把 git 脚本写在远端而不是每条合并来一次往返：123pan-uni-app 124 条、
+ * 123pan-pc 533 条合并，逐条（每条要 4 次 git）就是两千多次 ssh 往返，几十秒到
+ * 几分钟；这里一次把结果吐回来，实测 uni-app 1.7 秒、pc 16 秒。`git log` 拿不到
+ * 「某次合并带进来的那些提交」，那是一个区间（`m^1..m`），只有循环能做到。
+ *
+ * 两个约束写在这里的原因：
+ * - 仓库路径从 argv 进来（`$1`）、`--since` 从 argv 进来（`$2`）：脚本是**被 shell
+ *   解释的文本**，把配置里的路径拼进去等于把它再解释一遍（路径里有引号就散了）。
+ * - 提交信息**不**用 `|` 之类的分隔符拼接：`$msgs`、`$files` 原样保留换行（提交标题
+ *   里可以有竖线），切分交给调用方——字段分隔符只有 \u0002。
+ */
+const HISTORY_SCRIPT = [
+  'cd "$1" || exit 9',
+  // $2 为空时 ${2:+...} 一个词都不展开；非空时展开成 --since=<日期>。
+  'git rev-list --merges ${2:+--since=$2} HEAD | while read -r m; do',
+  '  at=$(git log -1 --format=%cI "$m")',
+  '  subj=$(git log -1 --format=%s "$m")',
+  '  msgs=$(git log --no-merges --format=%s "$m^1..$m" 2>/dev/null)',
+  // 相对**第一父提交**的差异 = 这次合并真正带进来的文件。
+  '  files=$(git diff --name-only "$m^1" "$m" 2>/dev/null | grep -E "\\.(tsx?|jsx?|vue)\\$")',
+  '  printf "%s\\002%s\\002%s\\002%s\\002%s\\001" "$m" "$at" "$subj" "$msgs" "$files"',
+  'done',
+].join('\n');
+
+/**
+ * 脚本的 argv：本地是 `bash -lc <script> bash <path> [since]`，远端只是前面多一段
+ * `ssh <opts> <host>`——与 `gitArgv` 完全同形的两条路（见文件头第 1 条），**不是**
+ * 第三条 transport 判断。远端那一份额外做了 shell 引用（ssh 会重新拼一次命令行）。
+ */
+function historyArgv(
+  config: Pick<MirrorConfig, 'transport' | 'sshHost'>,
+  repoPath: string,
+  since: string,
+): string[] {
+  // 位置参数：$0 = "bash"，$1 = 仓库路径，$2 = since（可选）。
+  const locals = since === '' ? ['bash', repoPath] : ['bash', repoPath, since];
+  if (config.transport === 'local') return ['bash', '-lc', HISTORY_SCRIPT, ...locals];
+  return ['ssh', ...SSH_OPTS, config.sshHost, 'bash', '-lc', shellQuote(HISTORY_SCRIPT), ...locals.map(shellQuote)];
+}
+
+/**
+ * 合并标题里的分支名。
+ *
+ * 这个仓的镜像来自 Gitea，标题形如 `Merge #12 into master from feat-userEquity-fjd`；
+ * git 自己生成的则是 `Merge branch 'feat/x' into master`。两种都认，认不出来就是
+ * null——**不猜**：`branch` 会进库给人看，编一个比空着更糟。
+ */
+function mergeBranch(subject: string): string | null {
+  const from = /.*\bfrom\s+(\S+)/.exec(subject);
+  if (from?.[1] !== undefined) return from[1];
+  const quoted = /Merge (?:remote-tracking )?branch '([^']+)'/.exec(subject);
+  return quoted?.[1] ?? null;
+}
+
+/**
+ * 一次取回**全部**合并记录（读口 6）。
+ *
+ * 省掉的往返见 `HISTORY_SCRIPT`；这里只强调两件事：
+ * 1. 失败照旧是数据（超时、ssh 连不上、退出码非 0 都给中文 message）；
+ * 2. 输出被缓冲上限截断时**报失败**，不交半份：调用方会把这些行当「全部合并」写库，
+ *    一份看起来完整的半份历史比一次明确的失败更难发现。
+ *
+ * `since` 用于增量：只取比它新的合并（历史只增不改，所以「缺就补」永远安全）。
+ */
+export async function mergeHistory(
+  repoId: string,
+  opts: { since?: string } = {},
+): Promise<MirrorResult<MergeRecord[]>> {
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+
+  const since = opts.since?.trim() ?? '';
+  // since 会进远端 shell 的 argv（虽然是被引用的位置参数，仍不让它带换行/NUL）。
+  if (since !== '' && /[\r\n\0]/.test(since)) {
+    return fail('bad_config', `since 不合法：「${since}」（不能含换行）`);
+  }
+
+  const argv = historyArgv(resolved.config, resolved.repo.path, since);
+  // 这一条不走 `read()`：它是脚本不是 git argv，`isReadOnlyGitArgs()` 的
+  // 「第一个词必须是只读子命令」对它不成立。脚本内部只有 rev-list / log / diff
+  // 三条读命令（`--git-dir` 读、无工作区），只读是构造上的——见 HISTORY_SCRIPT。
+  const run = await runGit(argv, { timeoutMs: HISTORY_TIMEOUT_MS });
+
+  const bin = argv[0] ?? 'bash';
+  if (run.spawnError !== null) return fail('git_failed', `${bin} 起不来（${run.spawnError}）`);
+  if (run.timedOut) {
+    return fail('timeout', `读合并历史超时：${HISTORY_TIMEOUT_MS / 1000} 秒内没有返回`);
+  }
+  if (run.outputLimited) {
+    return fail('git_failed', `合并历史的输出超出缓冲上限（${bin} 的 stdout 被截断）`);
+  }
+  if (run.exitCode !== 0) {
+    const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
+    const detail = tail(run.stderr);
+    return fail('git_failed', `读合并历史失败（${code}）：${detail === '' ? '（stderr 是空的）' : detail}`);
+  }
+
+  const out: MergeRecord[] = [];
+  for (const rec of run.stdout.toString('utf8').split(REC)) {
+    if (rec.trim() === '') continue;
+    const parts = rec.split(FLD);
+    // 登录 shell 的 profile 可能往 stdout 吐一行东西（`bash -lc`）；sha 在字段 1 里
+    // 用 40 位十六进制锚定，那一行就不会把第一条记录读歪。
+    const sha = /[0-9a-f]{40}/.exec(parts[0] ?? '')?.[0];
+    if (sha === undefined || parts.length < 4) continue;
+    const [, at, subject, msgs, files] = parts;
+    out.push({
+      sha,
+      mergedAt: (at ?? '').trim(),
+      branch: mergeBranch(subject ?? ''),
+      message: (msgs ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+        .join(' / '),
+      files: (files ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '' && HISTORY_SRC.test(line)),
+    });
+  }
+  return ok(out);
+}
