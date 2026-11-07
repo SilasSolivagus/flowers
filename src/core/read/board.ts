@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
-import { shanghaiDayOf } from '../clock/tick.js';
+import { DEADLINE_LABEL, shanghaiDayOf, type DeadlineField } from '../clock/tick.js';
 import { currentMember } from './member.js';
 import { memberByName } from '../auth/members.js';
 import { can } from '../auth/roles.js';
@@ -31,6 +31,16 @@ export type BoardCard = {
   waitingOn: WaitingOn;
   /** 正在等的那个日期已经过去了（界面把它标红：等的东西已经过期）。 */
   late: boolean;
+  /**
+   * 这条需求**还差哪些日期**才能真正走完时钟（空数组 = 一天不缺）。
+   *
+   * 为什么要有这一格，而不是让界面去读 `waiting` 里的字符串：`waiting` 只说得出
+   * 「这一行今天卡在哪天」（`ready` 卡开工日、`dev` 卡提测日、`test` 卡承诺完成日），
+   * 而缺日期是一个**结构性**的问题——`ready` 缺提测日的行，开工日那天照样会推进到
+   * `dev`，然后永远冻在那里。所以卡片要把「还差哪几天」说出来（见 `missingDeadlines`），
+   * 界面也能拿这一格做样式（今天只用来拼 `waiting` 那句话）。
+   */
+  missingDates: DeadlineField[];
   /** 停在当前状态几个上海日历天。 */
   days: number;
   /**
@@ -170,10 +180,76 @@ type Row = {
  * 缺席的日期不静默成空字符串：那是越过服务直接写库才会有的数据损坏，
  * 卡片上写「缺提测日」比写一个空标签诚实。这种行 `on: 'none'`——没人欠动作，
  * 该修的是数据。
+ *
+ * ## 缺日期：点名「还差哪几天」，不是「今天卡在哪天」
+ *
+ * 三个时钟状态的驱动日期只有一个（见 `missingDeadlines`），但**能不能走完**要的
+ * 不止一个：`ready` 走一步就改读提测日。所以判定用的是「还差哪几天」这一组，
+ * 而不是当前状态那一个空格——否则一条缺提测日的 ready 卡会显示「等开工日 11-14」，
+ * 看起来完全正常，等到开工日到了、被推到开发中才第一次露出「缺提测日」。
+ *
+ * 这一格的代价是：`ready` 缺提测日时卡片不再显示「等开工日 几号」。这是**刻意的**——
+ * 它此刻最该被看到的事实是「这条排期没填完」，而不是「它在等 11-14」。
  */
 type Waiting = { text: string; on: WaitingOn; who: string | null };
 
-function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Waiting {
+/**
+ * 三个时钟状态**各自需要哪些日期**才能一路被时钟推下去。
+ *
+ * 口径来自两处，缺一不可：
+ *
+ * - `clock/tick.ts` 的 `DEADLINE_FIELD`（当前状态读哪一列推进）；
+ * - 裁定 6（2026-11-08）：一条 `ready` 行只差一步就会进 `dev`，而 `dev` 读提测日。
+ *   所以「提测日为空的 ready 行」也是走不完的行——它只是把冻结推迟了一步。
+ *   健康的 ready 行不会有这种形状：`schedule` 一次写三个日期，三个都不许空。
+ *
+ * `commit_due_at` 不在 `ready` 的清单里：从 ready 到 test 之间还有一次调度机会
+ * （dev 里填/改日期），而提测日是 ready 一推进就要读的那一列。不多列，避免把
+ * 「还远着的缺失」也标成红字——那种提示很快就没人看了。
+ *
+ * 只有 `deleted_at is null` 的行会出现在看板上，软删除的行不进这里。
+ */
+const REQUIRED_DEADLINES: Partial<Record<State, readonly DeadlineField[]>> = {
+  ready: ['window_start', 'commit_test_at'],
+  dev: ['commit_test_at', 'commit_due_at'],
+  test: ['commit_due_at'],
+};
+
+/**
+ * 这条需求还差哪些日期（空数组 = 不缺）。日期列存在但解析不出来也算缺：
+ * `shanghaiDayOf` 返回 null 的字符串在 tick 里同样会抛 `clock_bad_deadline`，
+ * 那就等于「没有这个日期」。
+ *
+ * 导出给用例与别处复用：这条口径只能有一份，卡片、用例、以后的提醒都读它。
+ */
+export function missingDeadlines(row: {
+  state: State;
+  window_start: string | null;
+  commit_test_at: string | null;
+  commit_due_at: string | null;
+}): DeadlineField[] {
+  const required = REQUIRED_DEADLINES[row.state];
+  if (!required) return [];
+  return required.filter((field) => {
+    const raw = row[field];
+    return raw === null || shanghaiDayOf(raw) === null;
+  });
+}
+
+/** 「缺开工日」「缺提测日、承诺完成日」——词表取自时钟模块，与 tick 的报错同一份。 */
+function missingText(missing: readonly DeadlineField[]): string {
+  return `缺${missing.map((field) => DEADLINE_LABEL[field]).join('、')}`;
+}
+
+function waitingFor(
+  row: Row, today: number, inspectAtLabel: string | null, missing: readonly DeadlineField[],
+): Waiting {
+  // 三个时钟状态共用同一条前置判断：缺任何一天就先说缺，别说「在等哪天」。
+  // 放在 switch 外面而不是每个 case 里抄一遍，是为了让「缺日期优先于等日期」这条
+  // 顺序只写一次（三个 case 里各写一次，早晚有一个忘了）。
+  if (missing.length > 0 && (row.state === 'ready' || row.state === 'dev' || row.state === 'test')) {
+    return { text: missingText(missing), on: 'none', who: null };
+  }
   switch (row.state) {
     case 'inbox':
       // 补必填是提出人的事（提出人是字段，不是账号）。但字段里可以是一个**不在花名册里**的
@@ -206,14 +282,13 @@ function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Wai
         ? { text: '等排期', on: 'none', who: null }
         : { text: `${row.owner} 排期`, on: 'person', who: row.owner };
     case 'ready': {
-      const day = formatMonthDay(row.window_start);
-      return day
-        ? { text: `等开工日 ${day}`, on: 'clock', who: null }
-        : { text: '缺开工日', on: 'none', who: null };
+      // 走到这里 missing 一定是空的（开工日与提测日都在，见上面的前置判断），
+      // 所以 day 不会为 null；'未定' 只是给类型一个不撒谎的兜底，正常数据走不到。
+      const day = formatMonthDay(row.window_start) ?? '未定';
+      return { text: `等开工日 ${day}`, on: 'clock', who: null };
     }
     case 'dev': {
-      const day = formatMonthDay(row.commit_test_at);
-      if (!day) return { text: '缺提测日', on: 'none', who: null };
+      const day = formatMonthDay(row.commit_test_at) ?? '未定';
       // 提测日过了还停在开发中：卡片该标红（lateDeadline），但**不欠任何人一个动作**。
       // 时钟会继续推它，打回是可选的；可选动作不产生「你的卡」（裁决 R-mine）。
       return isPastDay(row.commit_test_at, today)
@@ -221,8 +296,7 @@ function waitingFor(row: Row, today: number, inspectAtLabel: string | null): Wai
         : { text: `${day} 提测`, on: 'clock', who: null };
     }
     case 'test': {
-      const day = formatMonthDay(row.commit_due_at);
-      if (!day) return { text: '缺承诺完成日', on: 'none', who: null };
+      const day = formatMonthDay(row.commit_due_at) ?? '未定';
       // 同上：承诺日过了也只是「等的东西过期了」，不是「负责人欠一个动作」。
       return isPastDay(row.commit_due_at, today)
         ? { text: `承诺日已过 ${day}`, on: 'clock', who: null }
@@ -347,7 +421,10 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
       );
     }
     const inspectAtLabel = formatMonthDay(row.inspect_at);
-    const waiting = waitingFor(row, today, inspectAtLabel);
+    // 缺日期先算一次，`waiting` 与卡片上那一格读同一份：两处各算一次就迟早会说
+    // 两个不同的答案（「卡片说缺提测日、waiting 说等开工日」）。
+    const missing = missingDeadlines(row);
+    const waiting = waitingFor(row, today, inspectAtLabel, missing);
     cards.push({
       id: row.id,
       number: Number(row.number),
@@ -355,6 +432,7 @@ export async function getBoard(me?: string): Promise<BoardColumn[]> {
       owner: row.owner,
       waiting: waiting.text,
       waitingOn: waiting.on,
+      missingDates: missing,
       late: lateDeadline({
         state: row.state,
         windowStart: row.window_start,

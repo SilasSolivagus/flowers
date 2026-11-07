@@ -475,6 +475,87 @@ describe('mine = 现在欠你一个动作（不是「跟你有关」）', () => 
   });
 });
 
+/**
+ * 裁定 6（2026-11-08）：缺日期的时钟状态要**被看板说破**。
+ *
+ * 这一组是「下一次别再让这种事悄悄发生」的那一半：迁移 `0024` 把已经缺日期的行退回
+ * 待排期，但将来还会有人（导入脚本、MCP、直接写库）把一条缺日期的行放进 `dev`——
+ * 那时 `schedule` 的 `missing_dates` 管不到，库里也没有 CHECK（理由见 0024 的注释）。
+ * 于是最后一层提醒只剩读模型：卡片必须点名缺的是哪一天，而不是显示一句看起来正常的
+ * 「等开工日 11-14」。
+ *
+ * 为什么不用字符串断言了事、而是连 `missingDates` 一起断言：那句话是从这一格拼出来的
+ * （`waiting` = 「缺」+ 词表），只钉字符串的话，把 `missingDates` 清空、留下一个写死的
+ * 字符串也能过——那样的用例什么都没钉住。
+ */
+describe('缺日期的时钟状态：卡片点名缺的是哪一天', () => {
+  /**
+   * 目标用例（缺警告就红）：一条 `ready` 行没有提测日。
+   *
+   * 形状是**迁移数据**的形状：版本与开工日都在（`seedReady` 排过期），提测日从来没填过。
+   * 这种行开工日到了会被时钟推进到开发中，然后永远冻在那里——所以它在待开发这一列
+   * 就已经是「排期没填完」，卡片该说的不是「等开工日」，是「缺提测日」。
+   */
+  it('待开发缺提测日：说「缺提测日」，不装作在等开工日', async () => {
+    const id = await seedReady('房超');
+    await db.execute(sql`update requirements set commit_test_at = null where id = ${id}`);
+
+    const card = await cardOf('ready', id, '房超');
+    expect(card.missingDates).toEqual(['commit_test_at']);
+    expect(card.waiting).toBe('缺提测日');
+    // 缺日期不产生「欠谁的卡」：该修的是数据，不是负责人欠一个动作。
+    expect(card.waitingOn).toBe('none');
+    expect(card.mine).toBe(false);
+  });
+
+  it('开发中缺承诺完成日：说「缺承诺完成日」（提测日在，但走出去就冻住）', async () => {
+    const { id } = await seedOneTesting();
+    await db.execute(sql`
+      update requirements set state = 'dev', commit_due_at = null where id = ${id}`);
+
+    const card = await cardOf('dev', id, '吕品');
+    expect(card.missingDates).toEqual(['commit_due_at']);
+    expect(card.waiting).toBe('缺承诺完成日');
+    expect(card.waitingOn).toBe('none');
+  });
+
+  it('测试中缺承诺完成日：说「缺承诺完成日」', async () => {
+    const { id } = await seedOneTesting();
+    await db.execute(sql`update requirements set commit_due_at = null where id = ${id}`);
+
+    const card = await cardOf('test', id, '吕品');
+    expect(card.missingDates).toEqual(['commit_due_at']);
+    expect(card.waiting).toBe('缺承诺完成日');
+  });
+
+  it('几个都缺就一起点名（词序按状态需要的那几列，不是按库里读出来的顺序）', async () => {
+    const id = await seedReady('房超');
+    // 没有版本 = 没有开工日；提测日也空着。这正是 0024 执行前那 18 条 ready 的形状。
+    await db.execute(sql`
+      update requirements set release_id = null, commit_test_at = null where id = ${id}`);
+
+    const card = await cardOf('ready', id, '房超');
+    expect(card.missingDates).toEqual(['window_start', 'commit_test_at']);
+    expect(card.waiting).toBe('缺开工日、提测日');
+  });
+
+  it('日期齐全的卡一条都不误报（missingDates 为空、仍然等日期）', async () => {
+    const ready = await seedReady('房超');
+    const testing = await seedOneTesting();
+
+    const readyCard = await cardOf('ready', ready, '房超');
+    expect(readyCard.missingDates).toEqual([]);
+    expect(readyCard.waiting).toMatch(/^等开工日 /);
+    expect(readyCard.waitingOn).toBe('clock');
+    expect((await cardOf('test', testing.id, '吕品')).missingDates).toEqual([]);
+  });
+
+  it('其它状态不看日期：收集列的 missingDates 恒为空', async () => {
+    const r = await seedInbox('房超');
+    expect((await cardOf('inbox', r.id, '房超')).missingDates).toEqual([]);
+  });
+});
+
 describe('getRequirementDetail', () => {
   it('六段齐全：信息 / 承诺 / 参考 / 评审 / 记录 / 动作', async () => {
     const { id, due, testAt } = await seedOneTesting();

@@ -56,6 +56,7 @@ function card(number: number): BoardCard {
     late: false,
     days: 3,
     inspectAtLabel: null,
+    missingDates: [],
     mine: false,
     claimable: false,
   };

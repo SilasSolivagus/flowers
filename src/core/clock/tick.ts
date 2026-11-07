@@ -15,7 +15,14 @@ const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
 /** 三个日期列在需求行上的列名，也是 tick 里唯一可能缺的字段。 */
 export type DeadlineField = 'window_start' | 'commit_test_at' | 'commit_due_at';
 
-const FIELD_LABEL: Record<DeadlineField, string> = {
+/**
+ * 三个日期列的中文名。
+ *
+ * 导出而不是留在这里私用：读模型（`read/board.ts`）要在卡片上写「缺开工日 / 缺提测日 /
+ * 缺承诺完成日」，tick 要在报错里写「处于「开发中」但缺少提测日」。两处说的是**同一个
+ * 日期**，各自抄一份词表迟早会出现「卡片说缺提测日、报错说缺测试日」这种对不上的话。
+ */
+export const DEADLINE_LABEL: Record<DeadlineField, string> = {
   window_start: '开工日',
   commit_test_at: '提测日',
   commit_due_at: '承诺完成日',
@@ -103,7 +110,7 @@ export function deadlineDay(
   raw: string | null,
   ctx: { requirementId: string; state: State; field: DeadlineField },
 ): number {
-  const label = FIELD_LABEL[ctx.field];
+  const label = DEADLINE_LABEL[ctx.field];
   const state = STATE_LABEL[ctx.state];
   if (raw === null) {
     throw new AppError(
