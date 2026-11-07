@@ -62,11 +62,21 @@ export const ABSENT_LINE = (why: string): string =>
  * 等于有了两套口径。末尾那句「以上是线索，不是结论」承担的是`low` 的语义——类型上
  * 是 `confidence: 'low'`，PM 看不到类型，只看到这句话。
  *
- * `items` 为空不是这里该修的状态：那说明检索层把一个失败当成空结果返回了，应该回去
- * 修检索层（`LocateResult` 的 `none` 就是为它准备的）。在这里悄悄改成「没找到」，
- * 等于把同一类 bug 又埋回文案层。
+ * **空数组直接抛，不渲染。** 理由不是洁癖：「最可能的位置（待研发确认）：」后面跟着
+ * 零条目，本身就是一句假话——它宣称我们找到了位置，而实际上一条都没有。这种材料不
+ * 会报错、不会缺块，只有一个真人逐字读才会发现，等于把一次失败伪装成一次干净的输出。
+ * 这正是本仓已经修过两遍的同一个形状（`mergeHistory` 把提交 0 条吞成成功、
+ * `ensureHistory` 写坏一批只留下半段历史）：**失败必须响亮**。
+ *
+ * 空 `items` 是调用方的 bug 而不是一种渲染状态：它说明检索层把一个失败当成空结果返回
+ * 了（`LocateResult` 的 `none` 就是为「读了但没有」准备的）。所以这里既不兜底成
+ * 「没找到」（那就把 bug 埋进文案层，谁也追不到了），也不渲染成空清单——直接抛，
+ * 让错误停在能追责的那一层。
  */
 export function CANDIDATES_LINE(items: readonly Candidate[]): string {
+  if (items.length === 0) {
+    throw new Error('CANDIDATES_LINE 不接受空数组：没有候选必须走 { kind: "none" }');
+  }
   const lines = items.map((c, i) => `${i + 1}. \`${c.path}\` ← ${c.reason}`);
   return `${LOW_CONFIDENCE_HEADLINE}\n${lines.join('\n')}\n以上是线索，不是结论。${CONFIRM_WITH_DEV}`;
 }
