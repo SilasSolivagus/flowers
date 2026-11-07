@@ -325,3 +325,13 @@ npx vitest run                         → 46 files / 1222 passed | 1 skipped（
 1. **#775 的平台**：复合值整条丢了（本库 `number=338`，状态 `rejected`），要不要人工补 `web,pc,mobile`？我没猜。
 2. **194 条无负责人**：搬进来的需求很多落在 `inbox`（收集，142 条），等接单是合理的；但 `design` 里也有 22 条没负责人，看板会显示「待接单」。
 3. **`restore-demo.sh` 要么删、要么加守卫**（比如库里 `count(legacy_ref) > 0` 就拒绝 `--reset`）。这一条建议做成 P1 的收尾动作，不然迟早有人手快。
+
+## 追加：#775 平台修正（owner 裁决 B）
+
+老系统里 #775 的平台是一整串自由文本：「Web / PC / App / H5商品中心 / 分享页」，混了两个层次
+（端 + 页面），多值字段表示不了，迁移时整条丢弃。owner 裁决 B：能对上的三个端落进 `platforms`，
+对不上的两个页面用文字留在 `context`。
+
+- 迁移 `0019_fix_775_platforms.sql`，用 `legacy_ref` 定位（不用 `number`——那是本库自己的序列）。
+- 结果：本库 #338 → `platforms = {web,pc,mobile}`，`context` 保留原串与解释。
+- 幂等：重复跑同一条 update，结果不变。
