@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 
 import type { Db } from '../../db/client.js';
-import { fail, mergeHistory, type MirrorResult } from '../codemirror/mirror.js';
+import { fail, mergeHistory, type MergeRecord, type MirrorResult } from '../codemirror/mirror.js';
 
 /**
  * 合并历史落库（读口 6 → `commit_history`）。
@@ -37,10 +37,71 @@ export type HistorySyncStats = {
   ms: number;
 };
 
-/** 库里的 `merged_at` 可能是 Date（pg 解析过）也可能是字符串（驱动参数化时）。 */
-function toIso(value: Date | string): string {
-  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+/** 一条通过校验、可以直接写库的合并记录：`mergedAt` 已经折成确定的 UTC ISO。 */
+export type ValidMerge = {
+  sha: string;
+  mergedAtIso: string;
+  branch: string | null;
+  message: string;
+  files: string[];
+};
+
+/**
+ * 时间值 → UTC ISO（`2025-06-02T02:00:00.000Z`）。解析不了返回 `null`，**不抛**。
+ *
+ * 为什么不直接用 `new Date(x).toISOString()`：它对非法值抛 `RangeError`。在
+ * `ensureHistory` 里抛出去就是一次「未处理的异常」，而这一层的规矩是失败必须是
+ * 返回值（见文件头），所以把「解析不了」变成一个可返回的 `null`。
+ */
+function toIso(value: Date | string): string | null {
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
+
+/**
+ * 整批校验：**先全部过一遍，再写**。
+ *
+ * 为什么必须两段式：边校验边写的话，一条坏记录会让在它之前的那半批已经落库；下一轮的
+ * `since` 从**新的** `max(merged_at)` 开始，于是坏记录之后那些更旧的合并再也补不回来。
+ * 结果就是「报了一次错」，但库里静默少了半段历史——比一次干净的失败糟得多。
+ * 所以：坏一行 = 一行都不写。
+ */
+export function validateMerges(
+  repo: string,
+  records: readonly MergeRecord[],
+): MirrorResult<ValidMerge[]> {
+  const out: ValidMerge[] = [];
+  for (const merge of records) {
+    const mergedAtIso = toIso(merge.mergedAt.trim());
+    // `%cI` 正常一定是合法 ISO；空串/怪值只可能来自被截断或串了行的输出。点名 sha：
+    // 这条信息是 owner 去镜像里复查的唯一线索，通用的「历史读不出来」帮不上忙。
+    if (mergedAtIso === null) {
+      return fail(
+        'git_failed',
+        `合并历史里 ${merge.sha} 的提交时间读不出来（「${merge.mergedAt}」），整批已拒收：${repo}`,
+      );
+    }
+    out.push({
+      sha: merge.sha,
+      mergedAtIso,
+      branch: merge.branch,
+      message: merge.message,
+      files: merge.files,
+    });
+  }
+  return { ok: true, data: out };
+}
+
+/**
+ * 增量边界往回让 1 秒。
+ *
+ * `git rev-list --since` 目前是**含等**的（`commit->date < max_age` 才丢），拿
+ * `max(merged_at)` 直接当边界在今天不会漏——但那是 git 的实现细节，不是我们买下的
+ * 承诺。真被收紧成「严格大于」，同一瞬间（同一秒）合进来的另一条会**永久**丢失：
+ * 下一轮的 `since` 已经越过它，而增量根本不会回头看。让 1 秒的代价只是重取一条
+ * 已经存在的行（`on conflict do nothing` 兜住），换来的是与 git 版本无关的正确性。
+ */
+const SINCE_MARGIN_MS = 1000;
 
 /**
  * 把某个仓的合并历史补进库。
@@ -59,33 +120,37 @@ export async function ensureHistory(db: Db, repo: string): Promise<MirrorResult<
   const latestRes = await db.execute<{ latest: Date | string | null }>(sql`
     select max(merged_at) as latest from commit_history where repo = ${repo}`);
   const latest = latestRes.rows[0]?.latest ?? null;
+  const latestIso = latest === null ? null : toIso(latest);
+  // 库里读得出 max 却解析不了：那是库里的一行脏数据。这时**不能**当成「没有历史」
+  // 去全量重取——那会把一次本该被看见的问题，变成 657 条重复 insert 的正常输出。
+  if (latest !== null && latestIso === null) {
+    return fail(
+      'bad_config',
+      `commit_history 里 ${repo} 的 merged_at 读不出来（「${String(latest)}」），`
+      + '先修那一行再补齐；这次一条都没写',
+    );
+  }
 
   // `since` 必须过 `mergeHistory` 的严格白名单（`YYYY-MM-DD[THH:MM[:SS][.frac][Z|±HH:MM]]`），
   // 所以从**真实的** merged_at 派生，而不是自己拼日期字符串：`toISOString()` 给的是
-  // `2025-06-02T02:00:00.000Z` 这种形式，白名单收，git 也认。
-  // 边界是含等的（实测 `git rev-list --since=<某次合并的 %cI>` 会**包含**那次合并本身），
-  // 所以同一秒里的另一条合并不会因为「恰好等于 since」被漏掉；重取到的那一条由
-  // on conflict 挡掉，不会重复。
-  const since = latest === null ? null : toIso(latest);
+  // `2025-06-02T02:00:00.000Z` 这种形式，白名单收，git 也认。往回让 1 秒的理由见
+  // `SINCE_MARGIN_MS`（不让就依赖 git 的边界含等）。
+  const since = latestIso === null
+    ? null
+    : new Date(Math.max(0, Date.parse(latestIso) - SINCE_MARGIN_MS)).toISOString();
 
   const got = await mergeHistory(repo, since === null ? {} : { since });
   if (!got.ok) return got;
 
+  // 两段式：整批校验在**任何写之前**（理由见 `validateMerges`）。
+  const valid = validateMerges(repo, got.data);
+  if (!valid.ok) return valid;
+
   let inserted = 0;
-  for (const merge of got.data) {
-    // `%cI` 一定是合法 ISO；空串/怪值只可能来自被截断或串了行的输出。这时不能塞给
-    // `::timestamptz`——那会抛异常，把一次「某一行有问题」变成整次补齐失败；也不能
-    // 悄悄跳过（那样历史里静默少一条）。点名 sha 返回失败，让人能去镜像里看。
-    const mergedAt = merge.mergedAt.trim();
-    if (mergedAt === '' || Number.isNaN(new Date(mergedAt).getTime())) {
-      return fail(
-        'git_failed',
-        `合并历史里 ${merge.sha} 的提交时间读不出来（「${merge.mergedAt}」），已中止：${repo}`,
-      );
-    }
+  for (const merge of valid.data) {
     const res = await db.execute(sql`
       insert into commit_history (repo, commit_sha, merged_at, branch, message, files)
-      values (${repo}, ${merge.sha}, ${mergedAt}::timestamptz, ${merge.branch},
+      values (${repo}, ${merge.sha}, ${merge.mergedAtIso}::timestamptz, ${merge.branch},
               ${merge.message}, ${JSON.stringify(merge.files)}::jsonb)
       on conflict (repo, commit_sha) do nothing`);
     inserted += res.rowCount ?? 0;
@@ -107,9 +172,14 @@ export async function ensureHistory(db: Db, repo: string): Promise<MirrorResult<
  * 一个仓的全部合并，**最新在前**（与 `mergeHistory` 同一个方向：Task 5 的检索要先看
  * 最近的那几次）。
  *
- * 时间统一成 ISO 字符串：库里是 `timestamptz`，pg 会把它解析成 `Date`，而调用方要的
- * 是能与镜像里的 `%cI` 直接比大小的字符串——两处都折成 `toISOString()`，比较才是
- * 同一把尺子。
+ * 排序带 `commit_sha` 兜底：同一秒里可以有两次合并（`%cI` 只到秒），没有第二把尺子
+ * 时 `order by merged_at desc` 是**不定的**——同一个库两次查询可能给出不同的「最新一条」，
+ * 而 CLI 正是把第一行当最新、最后一行当最早来打印的。
+ *
+ * 时间统一成 UTC ISO 字符串：库里是 `timestamptz`，pg 会把它解析成 `Date`，而调用方
+ * 要的是一个确定的字符串。**但不要拿它和镜像的 `%cI` 直接比大小**：镜像是
+ * `2025-06-02T10:00:00+08:00`，这里是 `2025-06-02T02:00:00.000Z`，两者字典序比是错的
+ * （`+08:00` 与 `Z` 的字符差会盖过时间差）。跨源比较一律先 `Date.parse` 折成毫秒。
  */
 export async function readHistory(db: Db, repo: string): Promise<HistoryRow[]> {
   const res = await db.execute<{
@@ -122,11 +192,11 @@ export async function readHistory(db: Db, repo: string): Promise<HistoryRow[]> {
     select commit_sha, merged_at, branch, message, files
       from commit_history
      where repo = ${repo}
-     order by merged_at desc`);
+     order by merged_at desc, commit_sha`);
   return res.rows.map((row) => ({
     repo,
     commitSha: row.commit_sha,
-    mergedAt: row.merged_at instanceof Date ? row.merged_at.toISOString() : String(row.merged_at),
+    mergedAt: toIso(row.merged_at) ?? String(row.merged_at),
     branch: row.branch,
     message: row.message,
     files: row.files,

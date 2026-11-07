@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
 import { db } from '../src/db/client.js';
-import { ensureHistory, readHistory } from '../src/core/locate/history-store.js';
+import { ensureHistory, readHistory, validateMerges } from '../src/core/locate/history-store.js';
 
 const git = (cwd: string, args: string[]) =>
   new Promise<string>((resolve, reject) => {
@@ -237,6 +237,9 @@ async function countRows(repo: string): Promise<number> {
 /** 两次合并的仓：2024 一次、2025 一次。增量口径只能靠真日期验。 */
 let agedBare = '';
 
+/** 同一**秒**里合并两次的仓：用来钉 since 的边界余量。 */
+let twinBare = '';
+
 beforeAll(async () => {
   const aged = path.join(root, 'aged');
   await mkdir(aged, { recursive: true });
@@ -265,6 +268,36 @@ beforeAll(async () => {
   agedBare = path.join(root, 'aged.git');
   await git(root, ['clone', '-q', '--bare', aged, agedBare]);
   register(`file://${agedBare}`, agedBare);
+
+  // 同一时刻（逐秒相同）的两次合并。%cI 只到秒，所以「库里最新那一刻」可能对应两条
+  // 合并——增量边界若退化成严格大于，被漏掉的那条就永远补不回来。
+  const twin = path.join(root, 'twin');
+  await mkdir(twin, { recursive: true });
+  await git(twin, ['init', '-q', '-b', 'master']);
+  await git(twin, ['config', 'user.email', 'dev@example.com']);
+  await git(twin, ['config', 'user.name', 'dev']);
+  await git(twin, ['config', 'commit.gpgsign', 'false']);
+  await writeFile(path.join(twin, 'README.md'), 'base\n');
+  await git(twin, ['add', '.']);
+  await gitWhen(twin, ['commit', '-q', '-m', 'chore: init'], '2023-01-01T00:00:00+08:00');
+
+  const sameMoment = '2025-06-02T10:00:00+08:00';
+  for (const branch of ['feat-a', 'feat-b']) {
+    await git(twin, ['checkout', '-q', '-B', branch, 'master']);
+    await writeFile(path.join(twin, `${branch}.ts`), 'export {};\n');
+    await git(twin, ['add', '.']);
+    await gitWhen(twin, ['commit', '-q', '-m', `feat: ${branch}`], sameMoment);
+    await git(twin, ['checkout', '-q', 'master']);
+    await gitWhen(
+      twin,
+      ['merge', '-q', '--no-ff', branch, '-m', `Merge #2 into master from ${branch}`],
+      sameMoment,
+    );
+  }
+
+  twinBare = path.join(root, 'twin.git');
+  await git(root, ['clone', '-q', '--bare', twin, twinBare]);
+  register(`file://${twinBare}`, twinBare);
 
   // 上一轮（或上次失败的运行）可能留着行；仓 id 里带的是这次的临时目录，所以只清这些。
   await db.execute(sql`delete from commit_history where repo like 'file://%'`);
@@ -349,6 +382,52 @@ describe('ensureHistory：增量补齐', () => {
     expect(res.data.total).toBe(1);
     const rows = await readHistory(db, repo);
     expect(rows.map((row) => row.commitSha)).toEqual(['f'.repeat(40)]);
+  });
+
+  it('同一瞬间的两次合并：删掉一条再跑，会补回来（since 有 1 秒余量）', async () => {
+    // git 的 `--since` 现在是含等的，所以这一条今天靠 git 也能过；它钉的是**我们的**
+    // 契约：边界往回让 1 秒（`SINCE_MARGIN_MS`）。git 哪天把它收紧成严格大于，这条
+    // 就会红——而不是让同一秒里的另一条合并静默消失（下一轮的 since 已经越过它）。
+    const repo = `file://${twinBare}`;
+    const first = await ensureHistory(db, repo);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.data.inserted).toBe(2);
+
+    const rows = await readHistory(db, repo);
+    expect(rows).toHaveLength(2);
+    // 两条 merged_at 完全相同，排序靠 commit_sha 兜底（没有它，「最新一条」是不定的）。
+    expect(rows[0]!.mergedAt).toBe(rows[1]!.mergedAt);
+    await db.execute(sql`
+      delete from commit_history where repo = ${repo} and commit_sha = ${rows[0]!.commitSha}`);
+
+    const second = await ensureHistory(db, repo);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    // 删掉的那条回来了，没删的那条没被重写。
+    expect(second.data.inserted).toBe(1);
+    expect(second.data.total).toBe(2);
+  });
+
+  it('整批校验：一条坏时间 = 一行都不写', async () => {
+    // 边校验边写的后果：坏行之前那半批已经落库，下一轮的 since 从新的 max 开始，
+    // 坏行之后那些更旧的合并再也补不回来。所以校验必须整批先过一遍——这里直接钉
+    // `validateMerges` 的返回值形状（失败时没有 data，调用方拿不到可写的行）。
+    const good = { sha: 'a'.repeat(40), mergedAt: '2025-06-02T10:00:00+08:00', branch: 'feat-a', message: 'x', files: ['a.ts'] };
+    const bad = { sha: 'b'.repeat(40), mergedAt: '   ', branch: null, message: 'y', files: [] };
+
+    const whole = validateMerges('file://x', [good, bad]);
+    expect(whole.ok).toBe(false);
+    if (whole.ok) return;
+    expect(whole.message).toContain('b'.repeat(40));
+    // 失败时没有 data：一行都交不出去。
+    expect('data' in whole).toBe(false);
+
+    const okOnly = validateMerges('file://x', [good]);
+    expect(okOnly.ok).toBe(true);
+    if (!okOnly.ok) return;
+    // 折成 UTC ISO：库里是 timestamptz，比较与展示都以这个形态为准。
+    expect(okOnly.data[0]!.mergedAtIso).toBe('2025-06-02T02:00:00.000Z');
   });
 
   it('readHistory 只回一个仓的行，且最新的排在最前', async () => {

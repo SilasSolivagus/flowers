@@ -22,6 +22,22 @@ import { ensureHistory, readHistory, type HistoryRow } from '../src/core/locate/
 
 type Args = { repos: string[]; dryRun: boolean };
 
+const USAGE = '用法：tsx scripts/index-history.ts --repo <id> [--repo <id>] [--dry-run]';
+
+/** 用法错误一律退 2（exec 的约定），不往下走。 */
+function usage(message: string): never {
+  console.error(message);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+/**
+ * 参数解析**严格**：只认 `--repo <id>`、`--dry-run`、`--help`，其余一律拒。
+ *
+ * 为什么不能"忽略不认识的参数"：这个脚本默认会**写库**。`--dryrun`（少一个横杠）
+ * 被静默忽略，就等于把一次本想只看一眼的运行变成了真写——而且看起来完全正常。
+ * 写库的开关宁可多问一句，也不能靠拼写正确。
+ */
 function parseArgs(argv: readonly string[]): Args {
   const args: Args = { repos: [], dryRun: false };
   for (let i = 0; i < argv.length; i += 1) {
@@ -30,18 +46,19 @@ function parseArgs(argv: readonly string[]): Args {
       // 可多次：一次把两个仓都补齐（合起来 657 条，读一轮就够了）。
       const value = (argv[i + 1] ?? '').trim();
       i += 1;
-      if (value !== '') args.repos.push(value);
+      if (value === '' || value.startsWith('-')) usage(`--repo 后面要跟仓库 id（现在跟的是「${value}」）`);
+      args.repos.push(value);
     } else if (flag === '--dry-run') {
       args.dryRun = true;
     } else if (flag === '--help' || flag === '-h') {
-      console.log('用法：tsx scripts/index-history.ts --repo <id> [--repo <id>] [--dry-run]');
+      console.log(USAGE);
       process.exit(0);
+    } else if (flag !== '') {
+      // 位置参数也拒：`--repo a b` 里的 b 多半是想再补一个仓，静默丢掉就是少补一个仓。
+      usage(`不认识的参数「${flag}」：这会静默变成一次真写库，所以先停下`);
     }
   }
-  if (args.repos.length === 0) {
-    console.error('缺 --repo <id>（例如 --repo 123pan-uni-app，可给多次）');
-    process.exit(2);
-  }
+  if (args.repos.length === 0) usage('缺 --repo <id>（例如 --repo 123pan-uni-app，可给多次）');
   return args;
 }
 
@@ -144,5 +161,13 @@ async function main(): Promise<void> {
   if (failed) process.exitCode = 1;
 }
 
-await main();
-await pool.end();
+// `pool.end()` 必须在**所有**路径上跑到：否则连接池挂着，tsx 不退出（看起来像卡住），
+// 而失败时那句中文已经在 stderr 里了，人只会以为脚本还在跑。
+try {
+  await main();
+} catch (error) {
+  console.error(`补齐合并历史失败：${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+} finally {
+  await pool.end();
+}
