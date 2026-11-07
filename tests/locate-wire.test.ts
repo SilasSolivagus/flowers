@@ -9,7 +9,7 @@ import {
   ABSENT_HEADLINE, LOW_CONFIDENCE_HEADLINE, NOT_FOUND_HEADLINE,
 } from '../src/core/locate/copy.js';
 import {
-  EXPAND_ASK, EXPAND_TIMEOUT_MS, createExpand, expandPrompt,
+  EXPAND_ASK, EXPAND_MAX_TOKENS, EXPAND_TIMEOUT_MS, createExpand, expandPrompt,
 } from '../src/core/locate/expand.js';
 import type { CodeIndex, FileKind, IndexFile } from '../src/core/codemirror/code-index.js';
 import type { RequirementRow } from '../src/core/uemaster/compose.js';
@@ -563,7 +563,7 @@ describe('真 expand（createExpand）：不重试、不白等，围栏照样认
     const { expand, seen } = expandWith({ ok: true, text: '["a"]' });
     await expand('t', '');
     expect(seen.opts[0]?.timeoutMs).toBe(EXPAND_TIMEOUT_MS);
-    expect(seen.opts[0]?.maxTokens).toBe(400);
+    expect(seen.opts[0]?.maxTokens).toBe(EXPAND_MAX_TOKENS);
   });
 
   it('```json 围栏里的数组照样取出来（围栏不是失败——词还是那个词），且只问一次', async () => {
@@ -580,13 +580,20 @@ describe('真 expand（createExpand）：不重试、不白等，围栏照样认
     expect(prompt).not.toContain('描述：');
   });
 
-  it('散文后面接一段数组也认；对象、混合类型、空数组一律 null', async () => {
+  it('散文后面接一段数组也认；对象、混合类型、空数组一律 null（且各只问一次）', async () => {
     expect(await expandWith({ ok: true, text: '好的：["a","b"]' }).expand('t', '')).toEqual(['a', 'b']);
-    expect(await expandWith({ ok: true, text: '{"keywords":["a"]}' }).expand('t', '')).toBeNull();
+
+    /** 解析失败也要数次数：只在「回的不是数组」这一支加重试，同样不许过。 */
+    const nullOnce = async (text: string): Promise<void> => {
+      const { expand, seen } = expandWith({ ok: true, text });
+      expect(await expand('t', ''), text).toBeNull();
+      expect(seen.calls, text).toBe(1);
+    };
+    await nullOnce('{"keywords":["a"]}');
     // 元素不是字符串：整条判失败，不做 `String(x)`（那会造出一个叫 null 的关键词）。
-    expect(await expandWith({ ok: true, text: '[1,"a"]' }).expand('t', '')).toBeNull();
-    expect(await expandWith({ ok: true, text: '[]' }).expand('t', '')).toBeNull();
-    expect(await expandWith({ ok: true, text: '没有词' }).expand('t', '')).toBeNull();
+    await nullOnce('[1,"a"]');
+    await nullOnce('[]');
+    await nullOnce('没有词');
   });
 
   it('非 2xx / 超时（complete 的 ok:false）→ null，不抛，也不再问一次', async () => {

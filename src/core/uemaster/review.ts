@@ -506,7 +506,7 @@ export async function gatherBaseline(
   if (!inputs.ok) {
     const located: LocateResult = { kind: 'absent', why: inputs.why };
     const text = renderLocate(located);
-    // 记账放在材料拼好之后（顺序见函数头第 6 条）：先写一行 `low`、后因为 `show` 抛了
+    // 记账放在材料拼好之后（顺序见函数头第 4–5 条）：先写一行 `low`、后因为 `show` 抛了
     // 而没产出材料，库里就会留下一条指向从未存在过的材料的记录。
     await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
     return { text, repos: [], trees: new Map(), locate: located };

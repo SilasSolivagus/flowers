@@ -586,8 +586,11 @@ describe('start.ts 接线', () => {
  * 钉三件事：
  * 1. `uemaster_job_attempts` 里有一行 `phase: 'locate'`——扩展词失败/成功都要留痕，
  *    删掉 `onAttempt` 这条会红；
- * 2. 检索用的是**模型的词**，不是回落词：两个路径集合刻意不重叠（`download` 只在模型
- *    给词的路径上，`Share/Search.tsx` 只在 PRD 关键词的路径上）；
+ * 2. 检索用的是**模型的词**，不是回落词。这一条要两边都真：夹具索引里放两个文件，
+ *    `src/utils/clipboard-helper.ts` 只被模型词（`clipboard`）命中，
+ *    `src/pages/search/search.vue` 只被回落词命中（`prd-pan6` 抽出来的「搜索」
+ *    经 `expandTerms` 翻成 `search`）。词汇集合互不重叠，所以「正的那一个在、负的
+ *    那一个不在」两条都能被 mutation 打红——只断言「模型词命中的那个在」是半条；
  * 3. `locate_runs` 记一条 `stage: 'review'`。
  */
 describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记账', () => {
@@ -607,7 +610,9 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
 
     const sha = 'a'.repeat(40);
     // 两个文件刻意与提示词里的形状示例（`src/pages/Share/Search.tsx`）不撞名。
-    const PATHS = ['src/utils/clipboard-helper.ts', 'src/services/download-risk.ts'];
+    // `search.vue` 是**回落侧**的靶子：`prd-pan6` 的关键词里有「搜索」，`expandTerms`
+    // 把它翻成 `search`——所以一旦这条链路退回落词，它一定会出现在材料里。
+    const PATHS = ['src/utils/clipboard-helper.ts', 'src/pages/search/search.vue'];
     const codeIndex = (repo: string, paths: string[]): CodeIndex => ({
       repo,
       sha,
@@ -638,10 +643,11 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
     expect(locateRows).toHaveLength(1);
     expect(locateRows[0]!.error).toBeNull();
 
-    // (2) 材料里出现的是模型词命中的那个文件；回落词（下载）命中的那个一个都不该出现。
+    // (2) 材料里出现的是模型词命中的那个文件；回落词（搜索→search）命中的那个一个都
+    //     不该出现。两个断言各自可被打红（见报告「修正 2」的 M12/M13）。
     const findingsPrompt = provider.prompts[2] ?? '';
     expect(findingsPrompt).toContain('src/utils/clipboard-helper.ts');
-    expect(findingsPrompt).not.toContain('src/services/download-risk.ts');
+    expect(findingsPrompt).not.toContain('src/pages/search/search.vue');
     expect(findingsPrompt).toContain('最可能的位置（待研发确认）');
 
     // (3) 记账：一条 review 行，有候选 → low，候选数 1。
