@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { db } from '../src/db/client.js';
 import { AppError } from '../src/core/errors.js';
+import { activeMemberByName } from '../src/core/auth/members.js';
 import { isPlainObject } from '../src/core/validate.js';
 import { CreateInput } from '../src/core/requirements/create.js';
 import { BOARD_STATES } from '../src/core/read/board.js';
@@ -395,12 +396,28 @@ async function listTool(identity: Identity, raw: unknown): Promise<string[]> {
   }, null, 2)];
 }
 
-/** 让 agent 不必再问人：现状、类型、负责人、PRD、已有产物、还缺哪几处。 */
+/**
+ * 让 agent 不必再问人：现状、类型、负责人、PRD、已有产物、还缺哪几处。
+ *
+ * ── `actions` / `permissions` 必须是「这个人能做的」，不是「这个状态允许的」（P2）
+ *
+ * 这里曾经调 `getRequirementDetail(id)`（不传身份），于是 `actions` 是
+ * `actionsFor(state)` 的原样——状态合法的**全部**动作。后果是一种不会报错的坏法：
+ * agent 被列表里一个 `reviewPass` 说服，去调 `requirement_review_pass`，然后拿到
+ * 一句「签字人不是这条需求派单到的评审人」。它没有说谎，写工具的 scope 也只管
+ * 「读 / 写」两级，管不了「这个人的角色」——于是读侧与写侧对同一件事给了两个答案，
+ * 而 agent 只能靠一次失败去猜。
+ *
+ * 现在身份来自 token（`identity.member`），读模型用它算 `visibleActions` /
+ * `permissionsFor`——与抽屉、动作条**同一个 `can()`**，没有第二套规则。
+ * 查不到这一行（停用 / 被删）时传 `null`：`getRequirementDetail` 对 `null` 给
+ * 空动作 + 全 false 权限，一个 token 换了主人也不该凭空看见动作。
+ */
 async function showTool(identity: Identity, raw: unknown): Promise<string[]> {
-  void identity;
   const { requirementId } = parseInput(showInput, raw);
 
-  const detail = await SERVICES.getRequirementDetail(requirementId);
+  const actor = await activeMemberByName(db, identity.member);
+  const detail = await SERVICES.getRequirementDetail(requirementId, actor);
   if (detail === null) throw new AppError('not_found', NO_REQUIREMENT);
 
   const artifacts = await SERVICES.listArtifacts(db, detail.id);
@@ -425,7 +442,10 @@ async function showTool(identity: Identity, raw: unknown): Promise<string[]> {
     priority: detail.info.priority,
     priorityLabel: detail.info.priorityLabel,
     skipReason: detail.info.skipReason,
+    // 两个字段都来自同一次 `can()`：`actions` 是「状态 ∩ 他能做」，`permissions`
+    // 是那几处控件各自的结论。只给其中一个会让 agent 用「有动作」去猜「能不能改描述」。
     actions: detail.actions,
+    permissions: detail.permissions,
     artifacts: artifacts.map((a) => ({ stage: a.stage, url: a.url, at: a.at.toISOString() })),
     missing: STAGES.filter((stage) => !attached.has(stage)),
   }, null, 2)];

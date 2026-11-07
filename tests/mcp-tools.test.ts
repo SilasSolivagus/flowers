@@ -153,14 +153,17 @@ describe('读工具', () => {
     expect(textOf(bad)).toBe('limit 至少是 1');
   });
 
-  it('requirement_show：与抽屉同一个读模型', async () => {
+  it('requirement_show：与抽屉同一个读模型，身份也一起传进去（P2）', async () => {
     const id = await inReview();
     const detail = vi.spyOn(SERVICES, 'getRequirementDetail');
 
     const parsed = jsonOf(await call('requirement_show', { requirementId: id }));
-    expect(detail).toHaveBeenCalledWith(id);
+    // 第二条参数是**这个 token 的成员行**：`actions` 因此是「状态 ∩ 他能做」，
+    // 与抽屉、动作条同一个 `can()`。这里曾经只传 id，于是读侧报的是状态允许的全部动作。
+    expect(detail).toHaveBeenCalledWith(id, expect.objectContaining({ name: '吕品' }));
     expect(parsed).toMatchObject({ id, state: 'review', stateLabel: '待评审' });
-    expect(parsed.actions).toEqual(['reviewPass', 'reviewReject', 'shelve']);
+    // 吕品是负责人（PM）：待评审状态下他能做的是「搁置」，签字不归他。
+    expect(parsed.actions).toEqual(['shelve']);
   });
 
   it('requirement_show：需求不存在是一句中文 isError', async () => {
@@ -213,6 +216,50 @@ describe('读工具', () => {
     expect(blocks).toHaveLength(2);
     expect(JSON.parse(blocks[0]!.text)).toMatchObject({ id, state: 'inbox', type: 'feature' });
     expect(blocks[1]!.text).toContain('PAN-1');
+  });
+});
+
+describe('读工具接权限（P2）：agent 不该被告知它的人做不到的动作', () => {
+  it('同一份需求、两个 token：PM 只有搁置，条线负责人多出签字', async () => {
+    // 一条「待评审」的需求，负责人是吕品（功能线 PM），派单派给吕正豪（功能线负责人）。
+    // 同一个状态、同一条需求，两个 token 读到两份不同的 actions —— 这正是这一项要的。
+    const id = await inReview();
+
+    const asPm = jsonOf(await call('requirement_show', { requirementId: id }, as('吕品')));
+    const asLead = jsonOf(await call('requirement_show', { requirementId: id }, as('吕正豪', 'read')));
+
+    expect(asPm.actions).toEqual(['shelve']);
+    expect(asLead.actions).toEqual(['reviewPass', 'reviewReject', 'shelve']);
+
+    // permissions 与 actions 同源：PM 能改（他是负责人）但不能签。
+    expect(asPm.permissions).toMatchObject({ edit: true, review: false });
+    expect(asLead.permissions).toMatchObject({ edit: true, review: true });
+  });
+
+  it('PM 读别人的需求是只读：一个动作都没有', async () => {
+    // 吕品的需求，李嘉来读。李嘉既不是负责人、也不是这条线的负责人：
+    // 收集状态下「立项 / 提交评审 / 拒绝 / 搁置」全部要 edit，而 edit 对他不成立；
+    // 「认领」也不行——这条需求已经有负责人。于是列表就是空的（不是报错、不是隐藏按钮）。
+    const id = await inInbox();
+
+    const parsed = jsonOf(await call('requirement_show', { requirementId: id }, as('李嘉')));
+
+    expect(parsed.actions).toEqual([]);
+    expect(parsed.permissions).toEqual({
+      edit: false, review: false, reassignOwner: false, claim: false, manageMembers: false,
+    });
+  });
+
+  it('token 指向的人被停用：动作清空，而不是退回「状态允许的全部」', async () => {
+    // 停用的人手里那张 token 仍然验得过（session_epoch 与 token 无关），所以身份必须
+    // 在读模型这一层失效。`null` 那条路给的是空动作 + 全 false 权限，与页面一致。
+    const id = await inInbox();
+    await db.execute(sql`update members set deactivated_at = now() where name = '吕品'`);
+
+    const parsed = jsonOf(await call('requirement_show', { requirementId: id }, as('吕品')));
+
+    expect(parsed.actions).toEqual([]);
+    expect(parsed.permissions).toMatchObject({ edit: false, review: false });
   });
 });
 

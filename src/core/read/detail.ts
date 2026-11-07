@@ -212,9 +212,10 @@ export type Detail = {
    * 只过滤服务层会让 owner 那句「别人连按钮都不出现」不成立；只过滤界面会让
    * 一个手写的请求仍然成功（那才是安全洞）。所以交集在这里算，规则从 `can()` 来。
    *
-   * 没有身份（`actor === undefined`，MCP 的纯读）时退回「这个状态合法的全部」：
-   * 那是这个字段在 P4-05 之前就有的口径，MCP 的漂移探测器逐状态钉着它。
-   * 明确「没有身份」（`null`）则是空数组——没有身份的人不该看见任何动作。
+   * 没有身份（`actor === undefined`）时退回「这个状态合法的全部」：那是这个字段在
+   * P4-05 之前就有的口径，现在只剩漂移探测器在用（它要的是 `actionsFor` 本身）。
+   * 明确「没有身份」（`null`）则是空数组——没有身份的人不该看见任何动作，
+   * MCP 里查不到成员行（停用 / 已删）时就落这一格。
    */
   actions: DetailAction[];
   /** 上面那几处控件各自要不要渲染。同样只来自 `can()`，页面不自己推导。 */
@@ -529,9 +530,12 @@ type ReviewRow = {
  * AppError 走，那是写路径的口径，读路径不需要一个错误码）。
  *
  * `actor` 是 P4-05 加的那一半：给了人，`actions` 就是「状态合法 ∩ 他能做」，
- * `permissions` 也按同一次 `can()` 算。页面**必须**给（Shell 已经保证有会话）；
- * 不给的那条路留给 MCP 的纯读——它要的是「这个状态有哪些动作」，
- * 而能不能做由调用服务时的那道闸回答（`tests/mcp-legal-from.test.ts` 钉着）。
+ * `permissions` 也按同一次 `can()` 算。页面**必须**给（Shell 已经保证有会话）。
+ *
+ * P2 起 **MCP 的 requirement_show 也给**（身份来自 token 的那个成员）：不给的后果是
+ * agent 被告知了一堆「它的主人做不到」的动作，然后靠一次写工具的失败去猜。今天唯一
+ * 还走「不给身份」这条路的只有 `tests/mcp-legal-from.test.ts`——它的对象是
+ * `actionsFor(state)` 本身（状态机 → MCP 声明的那张镜像表），与「谁在看」无关。
  */
 export async function getRequirementDetail(
   id: string, actor?: Member | null,
