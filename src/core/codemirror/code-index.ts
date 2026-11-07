@@ -617,6 +617,16 @@ export type LocateOptions = {
   limit?: number;
   /** 关键词→片段表（测试可注入；默认用 `terms.ts` 的那一张）。 */
   expand?: (keywords: readonly string[]) => Term[];
+  /**
+   * 通用词（`GENERIC_WORDS`）能不能在「非通用词一个都没命中」时补位。默认 `true`。
+   *
+   * **多仓定位时必须是 `false`**：一个仓没线索 ≠ 这份 PRD 没线索。PAN-6 的「搜索」
+   * 在 `123pan-pc` 里一个文件都不命中，若那一个仓自己降级到「文件」，它会吐出一堆
+   * 噪音（`videoFileUtils.ts`、`file/type.ts`），而那些噪音在**跨仓拼接**时会排在
+   * `search.vue` 前面——实测 rank 7。所以「要不要用通用词」这件事只能由**整个需求**
+   * 的结论决定，见 `locateAcross()`。
+   */
+  allowGeneric?: boolean;
 };
 
 type Evidence = {
@@ -667,11 +677,14 @@ export function locate(
   if (terms.length === 0) return [];
   if (Object.keys(index.files).length === 0) return [];
 
+  const allowGeneric = opts.allowGeneric ?? true;
   const specific = terms.filter((term) => !isGenericWord(term.cn));
   const first = specific.length === 0 ? [] : scoreTerms(index, specific);
-  // 非通用词一个都没命中：这时通用词就是这份 PRD 全部的线索。
-  const probes = first.length > 0 ? first : scoreTerms(index, terms);
-  return probes.slice(0, limit);
+  if (first.length > 0) return first.slice(0, limit);
+  // 非通用词一个都没命中。**这个仓**要不要拿通用词补位，由调用方决定：
+  // 单仓调用默认补（`allowGeneric` 默认 true），多仓定位时一律不补（见 `locateAcross`）。
+  if (!allowGeneric) return [];
+  return scoreTerms(index, terms).slice(0, limit);
 }
 
 /** 用给定的词表给整个索引打分（`locate` 的第一趟与兜底那一趟都是它）。 */
@@ -814,4 +827,70 @@ export function locateOrFallback(
     return { source: 'grep', reason: '索引是空的（这个仓里没有 JS/TS 的页面/组件/服务文件），退回 grep' };
   }
   return { source: 'index', probes: locate(index, keywords, opts) };
+}
+
+/**
+ * **所有仓库一起**定位：一条需求的候选清单，而不是每个仓各自的一份。
+ *
+ * 为什么不能每仓各判各的（P4-10 第 1–2 步的真实 bug）：`locate()` 的通用词补位是
+ * 「这个仓里非通用词一个都没命中就用通用词」。PAN-6 的关键词是
+ * 搜索/文件/目录/上一级/结果/返回/当前/范围，「搜索」在 `123pan-pc` 里一个文件都不命中，
+ * 于是 pc 那一仓自己降级到「文件」，吐出 8 个噪音文件（`videoFileUtils.ts`、
+ * `file/type.ts`……）；调用方把两个仓的候选**拼在一起**，`.vue` 的 16 分排在 pc 那些
+ * 9/6/3 分后面——实测 rank 7。分数是对的，错的是「谁来决定要不要用通用词」。
+ *
+ * 「这份 PRD 有没有具体线索」是**需求**的属性，不是每个仓的属性。所以：
+ * 1. **第一趟**：每个有索引的仓都按 `allowGeneric: false` 打分；
+ * 2. 只要**有任何一个仓**给出了候选，这一趟就是最终答案——没命中的仓贡献**零**个候选
+ *    （与旧 grep 路径的 `emptyRepos` 同一个口径：没有路径命中就是「这个功能不在这个仓」）；
+ * 3. 只有**整个需求**一个候选都没有（很薄的 PRD，比如「文件列表优化」），才允许通用词补位，
+ *    那时才回到「每个仓给自己最弱的候选」。
+ *
+ * 没有索引（`null`）或索引为空的仓不进第一趟，直接给 `source: 'grep'`——降级仍然是
+ * **每仓独立**的：pc 是索引可用、只是没线索；后端仓是索引根本不存在。这两件事不同。
+ */
+export type RepoIndexEntry = { repo: string; index: CodeIndex | null };
+
+export function locateAcross(
+  entries: readonly RepoIndexEntry[],
+  keywords: readonly string[],
+  opts: LocateOptions = {},
+): Map<string, LocateChoice> {
+  const out = new Map<string, LocateChoice>();
+  const usable = entries.filter((entry): entry is { repo: string; index: CodeIndex } =>
+    entry.index !== null && !isEmptyIndex(entry.index));
+
+  const first = new Map<string, Probe[]>();
+  for (const entry of usable) {
+    first.set(entry.repo, locate(entry.index, keywords, { ...opts, allowGeneric: false }));
+  }
+  const anyHit = [...first.values()].some((probes) => probes.length > 0);
+
+  for (const entry of entries) {
+    if (entry.index === null) {
+      out.set(entry.repo, {
+        source: 'grep',
+        reason: '没有可用的静态索引（镜像读不到或索引建失败），退回 grep',
+      });
+      continue;
+    }
+    if (isEmptyIndex(entry.index)) {
+      out.set(entry.repo, {
+        source: 'grep',
+        reason: '索引是空的（这个仓里没有 JS/TS 的页面/组件/服务文件），退回 grep',
+      });
+      continue;
+    }
+    if (anyHit) {
+      // 整个需求有具体线索：这一仓没有命中就是零候选，不拿通用词顶数。
+      out.set(entry.repo, { source: 'index', probes: first.get(entry.repo) ?? [] });
+      continue;
+    }
+    // 全需求都没线索：这时通用词是唯一的线索，允许每仓给自己最弱的候选。
+    out.set(entry.repo, {
+      source: 'index',
+      probes: locate(entry.index, keywords, { ...opts, allowGeneric: true }),
+    });
+  }
+  return out;
 }

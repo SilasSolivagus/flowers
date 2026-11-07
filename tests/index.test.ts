@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { db } from '../src/db/client.js';
 import {
-  classifyKind, conventionRoute, extractIndex, locate, locateOrFallback, resolveSpecifier,
-  classifyKind as kindOf,
+  classifyKind, conventionRoute, extractIndex, locate, locateAcross, locateOrFallback,
+  resolveSpecifier, classifyKind as kindOf,
 } from '../src/core/codemirror/code-index.js';
 import {
   LIVE_INDEX_DEPS, buildIndex, dropIndex, readIndex, repoIndex, type IndexDeps,
@@ -119,13 +119,23 @@ const REACT_FILES: Record<string, string> = {
   'public/logo.png': 'png-bytes-搜索',
 };
 
+/**
+ * 「只有通用词命中」的仓：`文件` 命中一堆，`搜索` 一个都不中。
+ * 这正是 PAN-6 里 `123pan-pc` 的形状——它自己降级到通用词时会吐出噪音。
+ */
+const FILES_ONLY: Record<string, string> = {
+  'src/components/file-list/index.tsx': "export function FileList() { return <ul />; }\n",
+  'src/services/file/type.ts': 'export type IFile = { id: string };\n',
+  'src/pages/Download/index.tsx': 'export default function Download() { return <div />; }\n',
+};
+
 /** 后端仓：一个 JS/TS 页面都没有，索引必须是空的。 */
 const GO_FILES: Record<string, string> = {
   'main.go': 'package main\n\nfunc main() {}\n',
   'pkg/util.go': 'package pkg\n\nfunc Search() {}\n',
 };
 
-type Fixture = { root: string; react: string; go: string };
+type Fixture = { root: string; react: string; go: string; files: string };
 
 async function buildRepo(root: string, name: string, files: Record<string, string>): Promise<string> {
   const work = path.join(root, `${name}-work`);
@@ -152,33 +162,40 @@ const savedEnv = new Map<string, string | undefined>();
 let fixture: Fixture;
 let reactSha = '';
 let goSha = '';
+let filesSha = '';
 
 beforeAll(async () => {
   for (const key of ENV_KEYS) savedEnv.set(key, process.env[key]);
   const root = await mkdtemp(path.join(tmpdir(), 'flowers-index-'));
   const react = await buildRepo(root, 'fixture-react', REACT_FILES);
   const go = await buildRepo(root, 'fixture-go', GO_FILES);
-  fixture = { root, react, go };
+  const files = await buildRepo(root, 'fixture-files', FILES_ONLY);
+  fixture = { root, react, go, files };
 
   process.env.FLOWERS_MIRROR_TRANSPORT = 'local';
   process.env.FLOWERS_MIRROR_SSH_HOST = DEFAULT_SSH_HOST;
   process.env.FLOWERS_MIRROR_REPOS = JSON.stringify([
     { id: 'fixture-react', path: react },
     { id: 'fixture-go', path: go },
+    { id: 'fixture-files', path: files },
   ]);
 
   // 库里可能留着上一轮的行（code_index 不参与 `resetDb` 的 truncate）：先删干净。
-  for (const repo of ['fixture-react', 'fixture-go']) {
+  for (const repo of ['fixture-react', 'fixture-go', 'fixture-files']) {
     for (const sha of (await lsTreeShas(repo))) await dropIndex(db, repo, sha);
   }
   const reactHead = await head('fixture-react');
   const goHead = await head('fixture-go');
   if (!reactHead.ok || reactHead.data === null) throw new Error('夹具仓读不到 HEAD');
   if (!goHead.ok || goHead.data === null) throw new Error('夹具仓读不到 HEAD');
+  const filesHead = await head('fixture-files');
+  if (!filesHead.ok || filesHead.data === null) throw new Error('夹具仓读不到 HEAD');
   reactSha = reactHead.data.sha;
   goSha = goHead.data.sha;
+  filesSha = filesHead.data.sha;
   await dropIndex(db, 'fixture-react', reactSha);
   await dropIndex(db, 'fixture-go', goSha);
+  await dropIndex(db, 'fixture-files', filesSha);
 });
 
 /** 库里已有的 sha（清理用）：不依赖 head，直接问表。 */
@@ -191,6 +208,7 @@ async function lsTreeShas(repo: string): Promise<string[]> {
 afterAll(async () => {
   await dropIndex(db, 'fixture-react', reactSha);
   await dropIndex(db, 'fixture-go', goSha);
+  await dropIndex(db, 'fixture-files', filesSha);
   for (const key of ENV_KEYS) {
     const value = savedEnv.get(key);
     if (value === undefined) delete process.env[key];
@@ -332,6 +350,69 @@ describe('locate：在索引上打分', () => {
     // 有非通用词时，通用词不参与：搜索页仍然是第一。
     const mixed = locate(built.data.index, ['文件', '搜索']);
     expect(mixed[0]?.path).toBe('src/pages/Search/Search.tsx');
+  });
+});
+
+// ─── 5b. 跨仓定位：通用词补位属于「整个需求」，不属于单个仓 ────────────────
+
+describe('locateAcross：一条需求的候选，不是每仓各自的一份', () => {
+  const PAN6 = ['搜索', '文件', '目录', '上一级', '结果', '返回', '当前', '范围'];
+
+  it('PAN-6 形状：A 仓有具体命中、B 仓只有通用词命中 → B 贡献 0 个候选', async () => {
+    const react = await buildIndex('fixture-react', reactSha);
+    const files = await buildIndex('fixture-files', filesSha);
+    if (!react.ok || !files.ok) return;
+
+    // 先复现 bug 的形状：每仓各自降级时，只有通用词的 B 仓会吐出一串「文件」噪音。
+    const perRepo = locate(files.data.index, PAN6);
+    expect(perRepo.length).toBeGreaterThan(0);
+    expect(locate(files.data.index, PAN6, { allowGeneric: false })).toEqual([]);
+
+    const across = locateAcross([
+      { repo: 'fixture-react', index: react.data.index },
+      { repo: 'fixture-files', index: files.data.index },
+    ], PAN6, { limit: 6 });
+
+    const a = across.get('fixture-react');
+    const b = across.get('fixture-files');
+    expect(a?.source).toBe('index');
+    expect(b?.source).toBe('index');
+    // B 仓一个候选都不给（与旧 grep 路径的 emptyRepos 同一个口径）。
+    expect(b?.source === 'index' ? b.probes : []).toEqual([]);
+    // A 仓的顺序原样保留：路由命中的页面第一。
+    expect(a?.source === 'index' ? a.probes[0]?.path : undefined)
+      .toBe('src/pages/Search/Search.tsx');
+    expect(a?.source === 'index' ? a.probes[1]?.path : undefined)
+      .toBe('src/components/SearchEntrance/index.tsx');
+  });
+
+  it('很薄的 PRD（全仓都没有具体命中）→ 通用词那一趟仍然生效', async () => {
+    const files = await buildIndex('fixture-files', filesSha);
+    const react = await buildIndex('fixture-react', reactSha);
+    if (!files.ok || !react.ok) return;
+    // 「文件」是通用词，两个仓都没有非通用词命中 → 整个需求走通用词补位。
+    const across = locateAcross([
+      { repo: 'fixture-files', index: files.data.index },
+      { repo: 'fixture-react', index: react.data.index },
+    ], ['文件'], { limit: 6 });
+    const b = across.get('fixture-files');
+    expect(b?.source).toBe('index');
+    expect(b?.source === 'index' ? b.probes.length : 0).toBeGreaterThan(0);
+  });
+
+  it('`allowGeneric: false` 在噪音仓上返回空（这一集就是那个回归）', async () => {
+    const files = await buildIndex('fixture-files', filesSha);
+    if (!files.ok) return;
+    expect(locate(files.data.index, ['文件'], { allowGeneric: false })).toEqual([]);
+    expect(locate(files.data.index, ['文件']).length).toBeGreaterThan(0);
+  });
+
+  it('确定性：同样的输入两次 → 同样的顺序', async () => {
+    const react = await buildIndex('fixture-react', reactSha);
+    if (!react.ok) return;
+    const first = locateAcross([{ repo: 'fixture-react', index: react.data.index }], PAN6, { limit: 6 });
+    const second = locateAcross([{ repo: 'fixture-react', index: react.data.index }], PAN6, { limit: 6 });
+    expect(JSON.stringify([...first])).toBe(JSON.stringify([...second]));
   });
 });
 

@@ -14,7 +14,9 @@ import {
   type MirrorResult,
 } from '../codemirror/mirror.js';
 import { repoShape, type RepoShape } from '../codemirror/route.js';
-import { locateOrFallback, type Probe } from '../codemirror/code-index.js';
+import {
+  locateAcross, type CodeIndex, type LocateChoice, type Probe,
+} from '../codemirror/code-index.js';
 import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
@@ -388,13 +390,21 @@ export function rankCandidates(
     .map(({ path, hits: n }) => ({ path, hits: n }));
 }
 
-/** 一个仓库的基线：HEAD、树、形状、候选集。失败一律是那句中文。 */
-async function baselineOf(
-  repoId: string,
-  keywords: string[],
-  deps: InspectDeps,
-  db: Db,
-): Promise<RepoBaseline> {
+/** 一个仓库的结构基线：HEAD、树、形状、索引（**不含候选**）。 */
+type RepoStructure = {
+  id: string;
+  sha: string;
+  date: string;
+  subject: string;
+  files: number;
+  tree: Set<string>;
+  shape: RepoShape;
+  /** 静态索引；读不到就是 `null`（那一仓退回 grep）。 */
+  index: CodeIndex | null;
+};
+
+/** 一个仓库的结构：HEAD、树、形状、索引。失败一律是那句中文。 */
+async function structureOf(repoId: string, deps: InspectDeps, db: Db): Promise<RepoStructure> {
   const [headRes, treeRes, shapeRes] = await Promise.all([
     deps.head(repoId),
     deps.lsTree(repoId),
@@ -408,63 +418,73 @@ async function baselineOf(
   if (!treeRes.ok) throw mirrorFailure(treeRes.code, repoId, treeRes.message);
   if (!shapeRes.ok) throw mirrorFailure(shapeRes.code, repoId, shapeRes.message);
 
-  const sha = headRes.data.sha;
-
-  // ── 定位：先问静态索引（P4-10） ──
-  //
-  // 有索引就**一次 grep 都不发**：结构早就在库里，按路由(10)/名字(6)/被引用(4)/
-  // 符号(3) 打分即可。索引不可用（后端仓、镜像读不通、建索引失败）才走下面那条
-  // 旧的 grep 路径——那段代码原样保留，`source` 字段把「走的是哪条」写下来，
-  // 报告与用例都能查到（§3.5）。
-  const indexed = await deps.repoIndex(db, repoId, sha);
-  const choice = locateOrFallback(indexed.ok ? indexed.data.index : null, keywords, {
-    limit: CANDIDATE_CAP,
-  });
-  if (choice.source === 'index') {
-    return {
-      id: repoId,
-      sha,
-      date: headRes.data.date,
-      subject: headRes.data.subject,
-      files: treeRes.data.length,
-      tree: new Set(treeRes.data),
-      shape: shapeRes.data,
-      candidates: choice.probes.map((probe) => ({ path: probe.path, hits: probe.score })),
-      source: 'index',
-      probes: choice.probes,
-    };
-  }
-
-  // ── 降级：旧的 grep（§3.5，保留原样） ──
-  // 关键词逐个 grep；同一仓的几次搜索并发发出去（互不依赖），失败**不吞**：
-  // 一次 grep 失败说明镜像读不通，那时给部分结果只会让人以为「代码里没有」。
-  const results = await Promise.all(keywords.map((word) => deps.grep(repoId, word, { max: GREP_MAX })));
-  const perKeyword: Array<{ word: string; files: Set<string> }> = [];
-  for (let i = 0; i < results.length; i += 1) {
-    const result = results[i]!;
-    if (!result.ok) throw mirrorFailure(result.code, repoId, result.message);
-    const files = new Set<string>();
-    for (const hit of result.data) {
-      if (!treeRes.data.includes(hit.path)) continue; // 双保险：grep 与 ls-tree 必须同一份 HEAD
-      files.add(hit.path);
-    }
-    perKeyword.push({ word: keywords[i] ?? '', files });
-  }
-
-  const candidates = rankCandidates(perKeyword);
-
+  const indexed = await deps.repoIndex(db, repoId, headRes.data.sha);
   return {
     id: repoId,
-    sha,
+    sha: headRes.data.sha,
     date: headRes.data.date,
     subject: headRes.data.subject,
     files: treeRes.data.length,
     tree: new Set(treeRes.data),
     shape: shapeRes.data,
-    candidates,
-    source: 'grep',
-    probes: [],
+    index: indexed.ok ? indexed.data.index : null,
   };
+}
+
+/**
+ * 旧的 grep 候选集（§3.5 的降级路径，**原样保留**）。
+ *
+ * 关键词逐个 grep；同一仓的几次搜索并发发出去（互不依赖），失败**不吞**：
+ * 一次 grep 失败说明镜像读不通，那时给部分结果只会让人以为「代码里没有」。
+ */
+async function grepCandidates(
+  struct: RepoStructure,
+  keywords: string[],
+  deps: InspectDeps,
+): Promise<Array<{ path: string; hits: number }>> {
+  const results = await Promise.all(
+    keywords.map((word) => deps.grep(struct.id, word, { max: GREP_MAX })),
+  );
+  const perKeyword: Array<{ word: string; files: Set<string> }> = [];
+  const tree = [...struct.tree];
+  for (let i = 0; i < results.length; i += 1) {
+    const result = results[i]!;
+    if (!result.ok) throw mirrorFailure(result.code, struct.id, result.message);
+    const files = new Set<string>();
+    for (const hit of result.data) {
+      if (!tree.includes(hit.path)) continue; // 双保险：grep 与 ls-tree 必须同一份 HEAD
+      files.add(hit.path);
+    }
+    perKeyword.push({ word: keywords[i] ?? '', files });
+  }
+  return rankCandidates(perKeyword);
+}
+
+/**
+ * 一个仓的基线：结构 + 候选。
+ *
+ * 候选来自哪条路由由**调用方**决定（`locateAcross` 的结果）：`index` → 直接用
+ * `Probe[]`；`grep` → 跑上面那段旧算法。判断放不到这里的原因见 `locateAcross` 的
+ * 注释——「这份 PRD 有没有具体线索」是整个需求的事，不是单个仓的事。
+ */
+async function baselineOf(
+  struct: RepoStructure,
+  choice: LocateChoice,
+  keywords: string[],
+  deps: InspectDeps,
+): Promise<RepoBaseline> {
+  // `index` 不进 `RepoBaseline`：它是「怎么定位的」，不是「定位到了什么」。
+  const { index: _index, ...base } = struct;
+  if (choice.source === 'index') {
+    return {
+      ...base,
+      candidates: choice.probes.map((probe) => ({ path: probe.path, hits: probe.score })),
+      source: 'index',
+      probes: choice.probes,
+    };
+  }
+  const candidates = await grepCandidates(struct, keywords, deps);
+  return { ...base, candidates, source: 'grep', probes: [] };
 }
 
 /**
@@ -1188,9 +1208,20 @@ export async function inspect(
   // ── 阶段一：关键词 → 两个仓的候选集 ──
   const keywords = keywordsFrom(prd.markdown, req.title);
   stats.keywords = keywords;
+  // 结构先全部拿到手，**再**一起定位：`locateAcross` 要看到所有仓才判得了「这份 PRD
+  // 到底有没有具体线索」（见 code-index.ts 的注释：每仓各判各的会把 pc 的噪音排到
+  // search.vue 前面）。
+  const structures: RepoStructure[] = [];
+  for (const repoId of INSPECT_REPOS) structures.push(await structureOf(repoId, full, db));
+  const choices = locateAcross(
+    structures.map((struct) => ({ repo: struct.id, index: struct.index })),
+    keywords,
+    { limit: CANDIDATE_CAP },
+  );
   const repos: RepoBaseline[] = [];
-  for (const repoId of INSPECT_REPOS) {
-    repos.push(await baselineOf(repoId, keywords, full, db));
+  for (const struct of structures) {
+    const choice = choices.get(struct.id) ?? { source: 'index' as const, probes: [] };
+    repos.push(await baselineOf(struct, choice, keywords, full));
   }
   stats.repos = repos.map((repo) => ({ id: repo.id, sha: repo.sha, date: repo.date, files: repo.files }));
   stats.candidates = Object.fromEntries(repos.map((repo) => [repo.id, repo.candidates.length]));

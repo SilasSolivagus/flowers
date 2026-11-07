@@ -17,7 +17,7 @@ import { renderFlowchart } from './flow.js';
 import { head, lsTree, grep, show, type MirrorResult } from '../codemirror/mirror.js';
 import { repoShape } from '../codemirror/route.js';
 import { isGenericWord, pathTokens } from '../codemirror/terms.js';
-import { locateOrFallback, type Probe } from '../codemirror/code-index.js';
+import { locateAcross, type CodeIndex, type Probe } from '../codemirror/code-index.js';
 import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
 import { keywordsFrom, prdVersionOf } from './inspect.js';
 import {
@@ -374,21 +374,35 @@ export async function gatherBaseline(
   const probes: Array<{ repo: string } & Probe> = [];
   /** 没有路径命中的仓：现状里要对读者说清楚「这一侧没定位到」。 */
   const emptyRepos: string[] = [];
+  // ── 第一趟：每仓的树与索引 ──
+  //
+  // 先全部拿到手、**再**一起定位：`locateAcross` 要看到所有仓才判得了「这份 PRD 到底
+  // 有没有具体线索」。每仓各判各的会把 `123pan-pc` 的「文件」噪音排到 `search.vue`
+  // 前面（实测 rank 7）——那正是旧路径靠全局 `STOP_WORDS` 侥幸做对、我们做错的一处。
+  const structs: Array<{ repo: (typeof repos)[number]; set: Set<string> }> = [];
   for (const repo of repos) {
     const tree = await deps.lsTree(repo.id);
     if (!tree.ok) return null;
     const set = new Set(tree.data);
     trees.set(repo.id, set);
+    structs.push({ repo, set });
+  }
 
-    // ── 定位：先问静态索引（P4-10） ──
+  const indexes: Array<{ repo: string; index: CodeIndex | null }> = [];
+  for (const struct of structs) {
+    const indexed = await deps.repoIndex(db, struct.repo.id, struct.repo.sha);
+    indexes.push({ repo: struct.repo.id, index: indexed.ok ? indexed.data.index : null });
+  }
+  const choices = locateAcross(indexes, keywords, { limit: BASELINE_FILES });
+
+  for (const struct of structs) {
+    const { repo, set } = struct;
+    const choice = choices.get(repo.id) ?? { source: 'grep' as const, reason: '没有索引' };
+
+    // ── 定位：走索引（P4-10） ──
     //
-    // 走索引这一支**不发一次 grep**：一个仓的页面/组件/服务结构早就在库里，按
-    // 路由 > 名字 > 被引用 > 导出符号的固定权重打分即可（实测 3–50 ms）。
-    // 索引不可用（后端仓、镜像读不到、建索引失败）才往下走到旧的 grep 那一支。
-    const indexed = await deps.repoIndex(db, repo.id, repo.sha);
-    const choice = locateOrFallback(indexed.ok ? indexed.data.index : null, keywords, {
-      limit: BASELINE_FILES,
-    });
+    // 走这一支**不发一次 grep**：结构早就在库里，按路由 > 名字 > 被引用 > 导出符号
+    // 的固定权重打分即可（实测 3–50 ms）。
     if (choice.source === 'index') {
       if (choice.probes.length === 0) emptyRepos.push(repo.id);
       for (const probe of choice.probes) {
