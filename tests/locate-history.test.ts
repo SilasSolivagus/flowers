@@ -7,7 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { DEFAULT_SSH_HOST, mergeHistory } from '../src/core/codemirror/mirror.js';
 import { db } from '../src/db/client.js';
-import { ensureHistory, readHistory, validateMerges } from '../src/core/locate/history-store.js';
+import {
+  ensureHistory, readHistory, sinceFor, validateMerges, type FetchMerges,
+} from '../src/core/locate/history-store.js';
 
 const git = (cwd: string, args: string[]) =>
   new Promise<string>((resolve, reject) => {
@@ -234,6 +236,13 @@ async function countRows(repo: string): Promise<number> {
   return Number(res.rows[0]?.n ?? '0');
 }
 
+/** 库里某个仓的 sha 集合（排序后）。坏批次用例要证明的是「一个 sha 都没变」。 */
+async function shasOf(repo: string): Promise<string[]> {
+  const res = await db.execute<{ commit_sha: string }>(sql`
+    select commit_sha from commit_history where repo = ${repo} order by commit_sha`);
+  return res.rows.map((row) => row.commit_sha);
+}
+
 /** 两次合并的仓：2024 一次、2025 一次。增量口径只能靠真日期验。 */
 let agedBare = '';
 
@@ -384,10 +393,10 @@ describe('ensureHistory：增量补齐', () => {
     expect(rows.map((row) => row.commitSha)).toEqual(['f'.repeat(40)]);
   });
 
-  it('同一瞬间的两次合并：删掉一条再跑，会补回来（since 有 1 秒余量）', async () => {
-    // git 的 `--since` 现在是含等的，所以这一条今天靠 git 也能过；它钉的是**我们的**
-    // 契约：边界往回让 1 秒（`SINCE_MARGIN_MS`）。git 哪天把它收紧成严格大于，这条
-    // 就会红——而不是让同一秒里的另一条合并静默消失（下一轮的 since 已经越过它）。
+  it('同一瞬间的两次合并：删掉一条再跑，会补回来', async () => {
+    // 注意这条用例**钉不住 1 秒余量**：git 今天对 `--since=<该合并自己的 %cI>` 是含等的，
+    // 所以有没有余量它都过。它钉的是真实增量行为（同一秒的两条合并、删一条后能补回来）。
+    // 「让 1 秒」这个契约由下面的 `sinceFor` 单元用例直接断言输出。
     const repo = `file://${twinBare}`;
     const first = await ensureHistory(db, repo);
     expect(first.ok).toBe(true);
@@ -407,6 +416,47 @@ describe('ensureHistory：增量补齐', () => {
     // 删掉的那条回来了，没删的那条没被重写。
     expect(second.data.inserted).toBe(1);
     expect(second.data.total).toBe(2);
+  });
+
+  it('sinceFor：边界正好往回让 1 秒，且不夹取纪元', () => {
+    // 这三个值是契约本身（不是「顺手写下来的实现输出」）：改动余量、或者偷偷把边界
+    // 夹到纪元零点，都会在这里红。
+    expect(sinceFor('2025-06-02T02:00:00.000Z')).toBe('2025-06-02T01:59:59.000Z');
+    expect(sinceFor(null)).toBeUndefined();
+    // 1970 之前：如实往回退一秒，**不**夹到 1970-01-01。
+    expect(sinceFor('1970-01-01T00:00:00.000Z')).toBe('1969-12-31T23:59:59.000Z');
+    // Date 也收（库里的 max 可能已经是 Date）。
+    expect(sinceFor(new Date('2025-06-02T02:00:00.000Z'))).toBe('2025-06-02T01:59:59.000Z');
+  });
+
+  it('坏批次：库里原本的行一个都不动（不是半写）', async () => {
+    // 这条必须走 ensureHistory 本身：validateMerges 返回失败只证明「没有可写的行」，
+    // 而真正要防的是**边校验边写**留下的半批。所以先真写真读一行，再拿一个含坏行的
+    // 批次覆盖进去，断言行数与 sha 集合与调用前完全一致。
+    const repo = `file://${bare}`;
+    await db.execute(sql`delete from commit_history where repo = ${repo}`);
+    const seeded = await ensureHistory(db, repo);
+    expect(seeded.ok).toBe(true);
+    const before = await shasOf(repo);
+    expect(before).toHaveLength(1);
+
+    // 头一条是「更新的」合并：一段式实现会先把它写进去，再栽在第二条的坏时间上。
+    const badBatch: FetchMerges = async () => ({
+      ok: true,
+      data: [
+        { sha: 'c'.repeat(40), mergedAt: '2026-01-01T00:00:00+08:00', branch: null, message: '新的', files: [] },
+        { sha: 'd'.repeat(40), mergedAt: '不是时间', branch: null, message: '坏的', files: [] },
+        { sha: 'e'.repeat(40), mergedAt: '2023-01-01T00:00:00+08:00', branch: null, message: '更旧的', files: [] },
+      ],
+    });
+
+    const res = await ensureHistory(db, repo, { fetch: badBatch });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).toContain('d'.repeat(40));
+    // 行数与 sha 集合都没变：一行都没写。
+    expect(await shasOf(repo)).toEqual(before);
+    expect(await countRows(repo)).toBe(1);
   });
 
   it('整批校验：一条坏时间 = 一行都不写', async () => {

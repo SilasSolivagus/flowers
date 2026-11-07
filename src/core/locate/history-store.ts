@@ -101,7 +101,36 @@ export function validateMerges(
  * 下一轮的 `since` 已经越过它，而增量根本不会回头看。让 1 秒的代价只是重取一条
  * 已经存在的行（`on conflict do nothing` 兜住），换来的是与 git 版本无关的正确性。
  */
-const SINCE_MARGIN_MS = 1000;
+export const SINCE_MARGIN_MS = 1000;
+
+/**
+ * 增量的下界：`max(merged_at)` 往回让 `SINCE_MARGIN_MS`；没有历史时**不设界**
+ * （`undefined` = 全量）。
+ *
+ * 抽成导出的纯函数是为了让「让 1 秒」这件事**可被钉住**：拿真仓去测是测不出来的
+ * ——git 今天对 `--since=<某次合并自己的 %cI>` 是含等的，所以「同一瞬间两条合并、
+ * 删一条再跑会补回来」这个用例有没有 1 秒余量都过。契约必须落到一个能直接断言
+ * 输出的地方，而不是靠一个碰巧也成立的端到端用例。
+ *
+ * 不做 `Math.max(0, …)` 之类的夹取：1970 附近的合并（测试仓、导入的老历史）往回
+ * 让 1 秒就是 `1969-12-31T23:59:59.000Z`，那是个合法的 ISO，也是 git 能接受的
+ * `--since`（给得早只会多取，不会漏）。悄悄把它夹到纪元零点等于改了边界却没人知道。
+ *
+ * 解析不了的值返回 `undefined`（等于全量重取一遍：不会丢数据，只是白读一次）。
+ * `ensureHistory` 在读库那一步就把脏的 `max` 挡成 `bad_config`，走不到这里。
+ */
+export function sinceFor(max: string | Date | null): string | undefined {
+  if (max === null) return undefined;
+  const ms = max instanceof Date ? max.getTime() : Date.parse(max);
+  if (Number.isNaN(ms)) return undefined;
+  return new Date(ms - SINCE_MARGIN_MS).toISOString();
+}
+
+/** 取合并历史的那一步。可注入**只**为了测「坏批次一行都不写」——真仓造不出坏 `%cI`。 */
+export type FetchMerges = (
+  repo: string,
+  opts?: { since?: string },
+) => Promise<MirrorResult<MergeRecord[]>>;
 
 /**
  * 把某个仓的合并历史补进库。
@@ -114,7 +143,11 @@ const SINCE_MARGIN_MS = 1000;
  * 被 git 拒，都是 `ok: false` 加一句中文。这一层如果把它变成空历史，上层看到的
  * 就是「这个仓从来没有过合并」——比一次明确的失败难发现得多。
  */
-export async function ensureHistory(db: Db, repo: string): Promise<MirrorResult<HistorySyncStats>> {
+export async function ensureHistory(
+  db: Db,
+  repo: string,
+  opts: { fetch?: FetchMerges } = {},
+): Promise<MirrorResult<HistorySyncStats>> {
   const started = Date.now();
 
   const latestRes = await db.execute<{ latest: Date | string | null }>(sql`
@@ -134,12 +167,11 @@ export async function ensureHistory(db: Db, repo: string): Promise<MirrorResult<
   // `since` 必须过 `mergeHistory` 的严格白名单（`YYYY-MM-DD[THH:MM[:SS][.frac][Z|±HH:MM]]`），
   // 所以从**真实的** merged_at 派生，而不是自己拼日期字符串：`toISOString()` 给的是
   // `2025-06-02T02:00:00.000Z` 这种形式，白名单收，git 也认。往回让 1 秒的理由见
-  // `SINCE_MARGIN_MS`（不让就依赖 git 的边界含等）。
-  const since = latestIso === null
-    ? null
-    : new Date(Math.max(0, Date.parse(latestIso) - SINCE_MARGIN_MS)).toISOString();
+  // `sinceFor`（不让就依赖 git 的边界含等）。
+  const since = sinceFor(latestIso);
 
-  const got = await mergeHistory(repo, since === null ? {} : { since });
+  const fetchMerges = opts.fetch ?? mergeHistory;
+  const got = await fetchMerges(repo, since === undefined ? {} : { since });
   if (!got.ok) return got;
 
   // 两段式：整批校验在**任何写之前**（理由见 `validateMerges`）。
