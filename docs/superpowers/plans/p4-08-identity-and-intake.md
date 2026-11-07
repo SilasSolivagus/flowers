@@ -355,7 +355,7 @@ out_of_scope ← 「分享页搜索补齐 H5，支持面包屑导航，App 端�
 | `npx vitest run` | **1063 passed / 1 skipped**（原有 1030，新增 `tests/intake.test.ts` 13 条 + `tests/platforms.test.ts` 16 条 + 邮箱登录那几条） |
 | `npm run build` | 通过（六条路由照旧全 ƒ） |
 | 邮箱登录（浏览器） | `fangchao@123pan.com` + 初始口令 → 进看板，身份显示「房超 / 超管」 |
-| 平台往返（浏览器） | 编辑 PAN-6 → 勾 H5 + Android → 保存 → 抽屉「平台 H5 · Android」，时间轴「房超 更新描述 · 平台」，库里 `{h5,android}` |
+| 平台往返（浏览器） | 编辑 PAN-6 → 勾 H5 + Android → 保存 → 抽屉「平台 H5 · Android」，时间轴「房超 更新描述 · 平台」，库里 `{h5,android}`（种子现在也用真实服务 `updateRequirement` 给 PAN-6 打上 H5 + Android，所以恢复之后抽屉里直接看得见） |
 | 指纹变旧 | `tests/platforms.test.ts`：同一条需求「先按当前描述交一份材料（fresh）→ 补一个平台 → stale」 |
 | 拆分器（CLI） | 两次真跑，见 §5 |
 | 拆分器（界面） | 见 §5.4 |
@@ -376,17 +376,22 @@ out_of_scope ← 「分享页搜索补齐 H5，支持面包屑导航，App 端�
 
 | 名字 | 邮箱（登录名） | 角色 | 口令 |
 |---|---|---|---|
-| 房超 | fangchao@123pan.com | 超管 | `YpiZ3sNTREHjxK` |
-| 吕正豪 | lvzhenghao@123pan.com | 功能线负责人 | `E58aKmjKrJygk5` |
-| 赵越 | zhaoyue@123pan.com | 商业线负责人 | `yPUDAFV7sJJya2` |
-| 吕品 | lvpin@123pan.com | PM（功能线） | `97s4fRfEqcKVqW` |
-| 李嘉 | lijia@123pan.com | PM（功能线） | `jxPkLZxkscFYfr` |
-| 罗丹 | luodan@123pan.com | PM（商业线） | `y2mqkWGW6TUrkw` |
-| 王妍 | wangyan@123pan.com | PM（商业线） | `dY3qCG8jGgmsdH` |
+| 房超 | fangchao@123pan.com | 超管 | `6awUAaYLHS9EaF` |
+| 吕正豪 | lvzhenghao@123pan.com | 功能线负责人 | `Cpt4VQQxQmA3Af` |
+| 赵越 | zhaoyue@123pan.com | 商业线负责人 | `JijGfDq5R2esNb` |
+| 吕品 | lvpin@123pan.com | PM（功能线） | `wnbNvEbGY2KLy5` |
+| 李嘉 | lijia@123pan.com | PM（功能线） | `mvSJ7sNtszM5Jv` |
+| 罗丹 | luodan@123pan.com | PM（商业线） | `7ccPNMhxZwQZFq` |
+| 王妍 | wangyan@123pan.com | PM（商业线） | `Ap5dP66XUKW474` |
 
-（这七行是 `bash /tmp/restore-demo.sh` 最后一次种子后的口令。库里的成员、需求、
-`app_settings` 的 provider / mirror 五行、PAN-6 的 `prd_url` 都在那次恢复之后，
-owner 现在打开 :3000 看到的正是这份数据。）
+（这七行是**最后一次** `bash /tmp/restore-demo.sh` 之后库里的口令——种子的口令每人
+每次随机，所以之前任何一次跑出来的口令都已经失效。库里的成员、需求、`app_settings` 的
+provider / mirror 五行、PAN-6 的 `prd_url` 都在那次恢复之后，owner 现在打开 :3000
+看到的正是这份数据。）
+
+> 提醒：`npx vitest run` 会 `truncate ... app_settings`（`resetDb` 的一部分），
+> 所以**跑完测试必须再跑一次恢复脚本**，否则设置页会显示「未配置模型接口」。
+> 这一轮就是按「tsc → vitest → build → restore」的顺序收尾的。
 
 ---
 
