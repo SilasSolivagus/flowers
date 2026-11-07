@@ -156,7 +156,19 @@ export const requirements = pgTable('requirements', {
   // PAN-1、PAN-2…：值来自 requirements_number_seq，不扫 max。
   number: integer('number').notNull().default(sql`nextval('requirements_number_seq')`),
   title: text('title').notNull(),
-  type: text('type').notNull(),                              // commercial | feature
+  /**
+   * 类型（Ruling 1，2026-11-08 起**可空**）：`commercial` / `feature` / null。
+   *
+   * 它**不承载权限**：P4-06 之后派单与「这条需求是不是你的」都锚在负责人那一行的
+   * `members.line`（见 `auth/roles.ts`、`read/notify.ts`），类型只剩一条内容属性。
+   * 所以 `null` 是一个真值（「还没说要算商业还是功能」，界面写「未指定」），不是
+   * 缺失数据，也不该拦住流程——`inbox → design` 上那道 `guard: 'type'` 一并摘掉了
+   * （见 `state-machine.ts`）。词表与标签在 `requirements/type.ts`。
+   *
+   * 不参与指纹（`fingerprint.ts` 文件头：type 不是「描述」），所以补上 / 清掉类型
+   * 都不会把已有产物打成「需求已更新」。
+   */
+  type: text('type'),                                        // commercial | feature | null
   state: text('state').notNull(),
   stateEnteredAt: timestamp('state_entered_at', { withTimezone: true }).notNull().defaultNow(),
   requester: text('requester').notNull(),                    // 只是字段，不是账号
@@ -228,6 +240,31 @@ export const requirements = pgTable('requirements', {
    * 不是静默丢掉——单选被丢掉等于把一次表态变成没表态）。
    */
   priority: text('priority'),
+
+  /**
+   * 来源（Ruling 3）：这条需求是谁提的 / 从哪来的。
+   *
+   * 六类 + 自定义：线上问题 / 客服反馈 / 领导需求 / 需求挖掘 / 技术反馈 / 其他。
+   * 词表在 `src/core/requirements/source.ts`，**库里没有 CHECK**（与 `platforms` /
+   * `priority` 同一条理由：加一类来源不该是一次迁移）；写入端（`create.ts`）按词表
+   * 校验且认不出的值**报错**（单选被静默丢掉等于把一次表态变成没表态）。
+   *
+   * **可空，而且空是常见的**：803 条迁移数据里 463 条从来没有过来源，12 条演示数据
+   * 也没有。`null` = 未标注，界面写「未标注」，不编。
+   *
+   * 存中文而不是英文键的理由写在迁移 0022 的注释里：六类里只有两类在老系统有英文键
+   * （`online_issue` / `original`），「原创 → 需求挖掘」是一次判断而不是一次翻译。
+   */
+  source: text('source'),
+
+  /**
+   * 来源 = 其他 时的一句自述（Ruling 3）。
+   *
+   * 与 `source` 分开两列而不是塞进一个「其他：xxx」的串：词表要能按 `source` 分组
+   * 统计（`select source, count(*)`），自述是自由文本，两者混在一列会让那句统计永远
+   * 需要正则。服务层不强制「只有其他才有它」——静默丢掉调用方给的一句话比留着更坏。
+   */
+  sourceNote: text('source_note'),
 
   /**
    * 软删除（P4-02）。
