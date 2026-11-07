@@ -117,7 +117,9 @@ const RELEASE_2 = monthName(day(31));      // 下月版本：开工日还没到
 
 const failures: string[] = [];
 
-type Person = { id: string; name: string; role: string; line: string | null };
+type Person = {
+  id: string; name: string; email: string; role: string; line: string | null;
+};
 let people: Person[] = [];
 
 /** 一条需求 + 它的负责人（种子后面所有动作都要以负责人身份做）。 */
@@ -200,7 +202,7 @@ async function main() {
   head('准备');
 
   people = await seedPeople();
-  log(`成员 ${people.length} 人：${people.map((p) => `${p.name}/${p.role}${p.line ? `/${p.line}` : ''}`).join('、')}`);
+  log(`成员 ${people.length} 人：${people.map((p) => `${p.name}(${p.email})/${p.role}${p.line ? `/${p.line}` : ''}`).join('、')}`);
 
   /**
    * 初始口令（P4-04）：**只在这里打印一次**，库里只有 scrypt 串。
@@ -209,17 +211,21 @@ async function main() {
    * 能用的口令。生成随机的、每人一个，比所有人共用一个 `123456` 好得多——后者一旦
    * 泄露，泄露的是整个部署；而且它会被当成「默认密码」，永远没人改。
    *
-   * 这一屏要被人抄走（或者至少贴进密码管理器），所以排版按「名字 + 口令」一行一个，
+   * 这一屏要被人抄走（或者至少贴进密码管理器），所以排版按「邮箱 + 口令」一行一个，
    * 字符表里没有 `0O1lI`（见 password.ts 的 ALPHABET）。
+   *
+   * P4-08 起登录名是**邮箱**（`<拼音>@123pan.com`，来自企微通讯录），所以这一行印的是
+   * 邮箱而不是名字：让 owner 抄下来的是**能用来登录的东西**。名字仍然在后面那列，
+   * 因为界面上、事件流里认的是名字——两列都要在，才不会有人以为登录也填名字。
    */
   head('初始口令（只显示这一次，库里只有 scrypt 串）');
   for (const person of people) {
     const password = generatePassword();
     await setPassword(db, person.id, password);
-    log(`${padTo(person.name, 8)}${padTo(person.role, 20)}${password}`);
+    log(`${padTo(person.name, 8)}${padTo(person.email, 26)}${padTo(person.role, 20)}${password}`);
   }
   log('');
-  log('把这七行抄下来。丢了只能在设置页让超管重置（或重跑种子）。');
+  log('把这七行抄下来（登录用第二列那个邮箱）。丢了只能在设置页让超管重置（或重跑种子）。');
 
   // P1 没有 releases 服务（版本只有建表和排期时的一次读取），所以这两行只能落 SQL。
   const releaseRows = await db.execute<{ id: string; name: string }>(sql`

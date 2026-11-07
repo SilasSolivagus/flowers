@@ -15,6 +15,7 @@ import type { Member } from './roles.js';
 type Row = {
   id: string;
   name: string;
+  email: string;
   role: string;
   line: string | null;
   deactivated_at: Date | string | null;
@@ -27,6 +28,7 @@ function toMember(row: Row): Member {
   return {
     id: row.id,
     name: row.name,
+    email: row.email,
     role: row.role,
     line: row.line,
     deactivatedAt: row.deactivated_at === null
@@ -46,7 +48,7 @@ export async function memberByName(exec: Exec, name: string): Promise<Member | n
   const trimmed = name.trim();
   if (trimmed === '') return null;
   const res = await exec.execute<Row>(sql`
-    select id, name, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
       from members
      where name = ${trimmed}
      order by id
@@ -55,10 +57,32 @@ export async function memberByName(exec: Exec, name: string): Promise<Member | n
   return row === undefined ? null : toMember(row);
 }
 
+/**
+ * 按**邮箱**取一行（含已停用的）——登录的唯一入口（P4-08）。
+ *
+ * 输入折小写、去首尾空白：邮箱的本地部分技术上区分大小写，但在这里区分它只会制造
+ * 「明明填对了却进不去」（见 `schema.ts` 里 `email` 那一列的注释）。
+ *
+ * 与 `memberByName` 一样返回**整行**，包括停用的人：登录要拿它判断「这个账号停了」，
+ * 而这个判断必须发生在密码校验之**后**、且说同一句话（见 `login.ts` 第 1 条）。
+ * 唯一索引保证这里最多一行，所以没有 `order by` 的歧义。
+ */
+export async function memberByEmail(exec: Exec, email: string): Promise<Member | null> {
+  const wanted = email.trim().toLowerCase();
+  if (wanted === '') return null;
+  const res = await exec.execute<Row>(sql`
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+      from members
+     where lower(email) = ${wanted}
+     limit 1`);
+  const row = res.rows[0];
+  return row === undefined ? null : toMember(row);
+}
+
 /** 按 id 取一行（含已停用的）。转交、成员管理都用它。 */
 export async function memberById(exec: Exec, memberId: string): Promise<Member | null> {
   const res = await exec.execute<Row>(sql`
-    select id, name, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
       from members where id = ${memberId} limit 1`);
   const row = res.rows[0];
   return row === undefined ? null : toMember(row);
@@ -81,7 +105,7 @@ export async function activeMemberByName(exec: Exec, name: string): Promise<Memb
  */
 export async function firstProductOwner(exec: Exec): Promise<Member | null> {
   const res = await exec.execute<Row>(sql`
-    select id, name, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
       from members
      where role = 'product_owner' and deactivated_at is null
      order by created_at, id
@@ -97,7 +121,7 @@ export async function loadMembers(
 ): Promise<Member[]> {
   const where = opts.includeDeactivated === true ? sql`` : sql`where deactivated_at is null`;
   const res = await exec.execute<Row>(sql`
-    select id, name, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
       from members ${where}
      order by name, id`);
   return res.rows.map(toMember);

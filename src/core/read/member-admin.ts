@@ -16,6 +16,8 @@ import { can, NO_REQUIREMENT, type Member } from '../auth/roles.js';
 export type MemberAdminRow = {
   id: string;
   name: string;
+  /** 登录名（P4-08）。这一页是唯一能回答「这个人怎么登进来」的地方。 */
+  email: string;
   role: string;
   line: string | null;
   /** false = 已停用（列表里仍然要出现：历史行还指着他）。 */
@@ -30,10 +32,10 @@ export async function memberAdminView(actor: Member | null): Promise<MemberAdmin
   if (!can(actor, NO_REQUIREMENT, 'manageMembers')) return null;
 
   const res = await db.execute<{
-    id: string; name: string; role: string; line: string | null;
+    id: string; name: string; email: string; role: string; line: string | null;
     deactivated_at: Date | null; owned: number;
   }>(sql`
-    select m.id, m.name, m.role, m.line, m.deactivated_at,
+    select m.id, m.name, m.email, m.role, m.line, m.deactivated_at,
            (select count(*)::int
               from requirements r
              where r.owner_member_id = m.id and r.deleted_at is null) as owned
@@ -43,6 +45,7 @@ export async function memberAdminView(actor: Member | null): Promise<MemberAdmin
   return res.rows.map((row) => ({
     id: row.id,
     name: row.name,
+    email: row.email,
     role: row.role,
     line: row.line,
     active: row.deactivated_at === null,

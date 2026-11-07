@@ -36,7 +36,7 @@ import { notificationsFor } from '../src/core/read/notify.js';
 import { runTool, toolByName } from '../mcp/tools.js';
 import type { Identity } from '../mcp/tokens.js';
 import { memberByName } from '../src/core/auth/members.js';
-import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
+import { emailOf, resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
 
 /**
@@ -79,6 +79,11 @@ function idOf(name: string): string {
   const found = people.find((person) => person.name === name);
   if (found === undefined) throw new Error(`名册里没有 ${name}`);
   return found.id;
+}
+
+/** 登录名是邮箱（P4-08）：用例里仍然按人名说话，这里换成凭证。 */
+function emailFor(name: string): string {
+  return emailOf(people, name);
 }
 
 /**
@@ -732,38 +737,58 @@ describe('MCP：权限跟人走，scope 只是「能不能写」', () => {
 describe('登录', () => {
   it('未知用户与密码错是同一句话（code 也相同）', async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
-    const wrong = await caught(attemptLogin(db, PM, 'wrong-password'));
-    const unknown = await caught(attemptLogin(db, '查无此人', 'whatever'));
+    const wrong = await caught(attemptLogin(db, emailFor(PM), 'wrong-password'));
+    const unknown = await caught(attemptLogin(db, 'nobody@123pan.com', 'whatever'));
     expect(wrong).toEqual({ code: 'bad_credentials', message: BAD_CREDENTIALS });
     expect(unknown).toEqual(wrong);
   });
 
-  it('口令正确就通过，并且大小写/空白按原样（登录名去首尾空白）', async () => {
+  it('凭证是邮箱：用名字登不进来（这条兜底是故意没有的）', async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
-    expect((await attemptLogin(db, ` ${PM} `, 'correct-horse')).name).toBe(PM);
+    expect(await caught(attemptLogin(db, PM, 'correct-horse'))).toMatchObject({
+      code: 'bad_credentials',
+    });
+  });
+
+  it('口令正确就通过，登录名去空白、折小写，返回的仍然是名字', async () => {
+    await setPassword(db, idOf(PM), 'correct-horse');
+    // 大小写与首尾空白都不是问题：`memberByEmail` 与限速键走同一条归一。
+    expect((await attemptLogin(db, `  ${emailFor(PM).toUpperCase()}  `, 'correct-horse')).name)
+      .toBe(PM);
   });
 
   it(`连续失败 ${MAX_FAILURES} 次后锁 ${LOCK_MS / 60000} 分钟：正确口令也进不来`, async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
     const now = 1_800_000_000_000;
     for (let i = 0; i < MAX_FAILURES; i += 1) {
-      expect(await caught(attemptLogin(db, PM, 'wrong', now))).toMatchObject({
+      expect(await caught(attemptLogin(db, emailFor(PM), 'wrong', now))).toMatchObject({
         code: 'bad_credentials',
       });
     }
-    expect(await caught(attemptLogin(db, PM, 'correct-horse', now)))
+    expect(await caught(attemptLogin(db, emailFor(PM), 'correct-horse', now)))
       .toMatchObject({ code: 'rate_limited' });
     // 窗口过去之后又能试了（不是永久封）
-    expect((await attemptLogin(db, PM, 'correct-horse', now + LOCK_MS + 1)).name).toBe(PM);
+    expect((await attemptLogin(db, emailFor(PM), 'correct-horse', now + LOCK_MS + 1)).name)
+      .toBe(PM);
+  });
+
+  it('锁是按邮箱算的：锁住一个人不影响另一个人', async () => {
+    await setPassword(db, idOf(PM), 'correct-horse');
+    await setPassword(db, idOf(PM_OTHER), 'correct-horse');
+    const now = 1_800_000_000_000;
+    for (let i = 0; i < MAX_FAILURES; i += 1) await caught(attemptLogin(db, emailFor(PM), 'wrong', now));
+    expect(await caught(attemptLogin(db, emailFor(PM), 'correct-horse', now)))
+      .toMatchObject({ code: 'rate_limited' });
+    expect((await attemptLogin(db, emailFor(PM_OTHER), 'correct-horse', now)).name).toBe(PM_OTHER);
   });
 
   it('成功一次清零：4 次失败 + 1 次成功 + 4 次失败 = 还没锁', async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
     const now = 1_800_000_000_000;
-    for (let i = 0; i < 4; i += 1) await caught(attemptLogin(db, PM, 'wrong', now));
-    await attemptLogin(db, PM, 'correct-horse', now);
+    for (let i = 0; i < 4; i += 1) await caught(attemptLogin(db, emailFor(PM), 'wrong', now));
+    await attemptLogin(db, emailFor(PM), 'correct-horse', now);
     for (let i = 0; i < 4; i += 1) {
-      expect(await caught(attemptLogin(db, PM, 'wrong', now))).toMatchObject({
+      expect(await caught(attemptLogin(db, emailFor(PM), 'wrong', now))).toMatchObject({
         code: 'bad_credentials',
       });
     }
@@ -772,13 +797,15 @@ describe('登录', () => {
   it('停用的人：与密码错同一句话（不暴露「这个账号停了」）', async () => {
     await setPassword(db, idOf(PM_OTHER), 'correct-horse');
     await deactivateMember(db, ADMIN, { memberId: idOf(PM_OTHER) });
-    expect(await caught(attemptLogin(db, PM_OTHER, 'correct-horse'))).toMatchObject({
+    expect(await caught(attemptLogin(db, emailFor(PM_OTHER), 'correct-horse'))).toMatchObject({
       code: 'bad_credentials', message: BAD_CREDENTIALS,
     });
   });
 
   it('没有口令的账号一律登录失败（绝不当成空密码）', async () => {
-    expect(await caught(attemptLogin(db, PM, ''))).toMatchObject({ code: 'bad_credentials' });
+    expect(await caught(attemptLogin(db, emailFor(PM), ''))).toMatchObject({
+      code: 'bad_credentials',
+    });
   });
 });
 
@@ -903,7 +930,7 @@ describe('成员管理', () => {
   it('只有超管能建人 / 改人 / 停用 / 重置口令', async () => {
     for (const actor of [PM, FEATURE_LEAD, COMMERCIAL_LEAD]) {
       expect(await caught(createMember(db, actor, {
-        name: '新人', role: 'pm', line: 'feature',
+        name: '新人', email: 'xinren@123pan.com', role: 'pm', line: 'feature',
       }))).toMatchObject({ code: 'forbidden', message: '只有超管可以管理成员' });
       expect(await caught(updateMember(db, actor, {
         memberId: idOf(PM), role: 'product_owner',
@@ -915,28 +942,45 @@ describe('成员管理', () => {
     }
   });
 
-  it('建人：返回一次初始口令，登录能过；名字重复被拒', async () => {
+  it('建人：返回一次初始口令，用邮箱登录能过；名字或邮箱重复被拒', async () => {
     const created = await createMember(db, ADMIN, {
-      name: '新同学', role: 'pm', line: 'commercial',
+      name: '新同学', email: 'xintongxue@123pan.com', role: 'pm', line: 'commercial',
     });
     expect(created.member.role).toBe('pm');
     expect(created.member.line).toBe('commercial');
-    expect((await attemptLogin(db, '新同学', created.password)).name).toBe('新同学');
+    expect(created.member.email).toBe('xintongxue@123pan.com');
+    // 凭证是邮箱（P4-08）：建出来的人用邮箱登录，返回的 actor 仍然是名字。
+    expect((await attemptLogin(db, 'xintongxue@123pan.com', created.password)).name).toBe('新同学');
+    // 名字登录没有兜底：同一个人换一个名字是另一行，而他只能用一个邮箱登。
+    expect(await caught(attemptLogin(db, '新同学', created.password)))
+      .toMatchObject({ code: 'bad_credentials' });
 
     expect(await caught(createMember(db, ADMIN, {
-      name: '新同学', role: 'pm', line: 'feature',
+      name: '新同学', email: 'another@123pan.com', role: 'pm', line: 'feature',
+    }))).toMatchObject({ code: 'conflict' });
+  });
+
+  it('建人：邮箱必填、形状要像个邮箱、重复的邮箱被拒', async () => {
+    expect(await caught(createMember(db, ADMIN, {
+      name: '没邮箱', role: 'pm', line: 'feature',
+    }))).toMatchObject({ code: 'invalid' });
+    expect(await caught(createMember(db, ADMIN, {
+      name: '坏邮箱', email: 'not-an-email', role: 'pm', line: 'feature',
+    }))).toMatchObject({ code: 'invalid' });
+    expect(await caught(createMember(db, ADMIN, {
+      name: '撞邮箱', email: 'lvpin@123pan.com', role: 'pm', line: 'feature',
     }))).toMatchObject({ code: 'conflict' });
   });
 
   it('角色与条线必须一致', async () => {
     expect(await caught(createMember(db, ADMIN, {
-      name: '错线', role: 'feature_reviewer', line: 'commercial',
+      name: '错线', email: 'cuoxian@123pan.com', role: 'feature_reviewer', line: 'commercial',
     }))).toMatchObject({ code: 'invalid' });
     expect(await caught(createMember(db, ADMIN, {
-      name: '超管有线', role: 'product_owner', line: 'feature',
+      name: '超管有线', email: 'chaoguan@123pan.com', role: 'product_owner', line: 'feature',
     }))).toMatchObject({ code: 'invalid' });
     expect(await caught(createMember(db, ADMIN, {
-      name: 'PM 没线', role: 'pm', line: null,
+      name: 'PM 没线', email: 'pmmeixian@123pan.com', role: 'pm', line: null,
     }))).toMatchObject({ code: 'invalid' });
   });
 
@@ -971,8 +1015,8 @@ describe('成员管理', () => {
   it('重置口令：新口令能登，旧口令不能', async () => {
     await setPassword(db, idOf(PM), 'old-password');
     const result = await resetPassword(db, ADMIN, { memberId: idOf(PM) });
-    expect((await attemptLogin(db, PM, result.password)).name).toBe(PM);
-    expect(await caught(attemptLogin(db, PM, 'old-password')))
+    expect((await attemptLogin(db, emailFor(PM), result.password)).name).toBe(PM);
+    expect(await caught(attemptLogin(db, emailFor(PM), 'old-password')))
       .toMatchObject({ code: 'bad_credentials' });
   });
 
@@ -1134,9 +1178,9 @@ describe('会话纪元', () => {
    */
   it('改角色 → 纪元推进，旧票立刻对不上', async () => {
     const created = await createMember(db, ADMIN, {
-      name: '纪元甲', role: 'pm', line: 'feature', password: 'pw-epoch-1',
+      name: '纪元甲', email: 'jiyuana@123pan.com', role: 'pm', line: 'feature', password: 'pw-epoch-1',
     });
-    const ticket = await attemptLogin(db, '纪元甲', 'pw-epoch-1');
+    const ticket = await attemptLogin(db, 'jiyuana@123pan.com', 'pw-epoch-1');
     const before = await memberByName(db, '纪元甲');
     expect(before!.sessionEpoch!.getTime()).toBe(ticket.epoch);
 
@@ -1148,7 +1192,8 @@ describe('会话纪元', () => {
 
   it('重置口令 → 纪元也推进（旧票作废）', async () => {
     await createMember(db, ADMIN, {
-      name: '纪元乙', role: 'pm', line: 'commercial', password: 'pw-epoch-2',
+      name: '纪元乙', email: 'jiyuanb@123pan.com', role: 'pm', line: 'commercial',
+      password: 'pw-epoch-2',
     });
     const before = await memberByName(db, '纪元乙');
     await resetPassword(db, ADMIN, { memberId: before!.id });
@@ -1158,7 +1203,8 @@ describe('会话纪元', () => {
 
   it('停用 → 纪元推进，旧票也过不了「还在名册上」那一关', async () => {
     const created = await createMember(db, ADMIN, {
-      name: '纪元丙', role: 'pm', line: 'feature', password: 'pw-epoch-4',
+      name: '纪元丙', email: 'jiyuanc@123pan.com', role: 'pm', line: 'feature',
+      password: 'pw-epoch-4',
     });
     await deactivateMember(db, ADMIN, { memberId: created.member.id });
     const after = await memberByName(db, '纪元丙');

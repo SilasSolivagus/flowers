@@ -304,15 +304,21 @@ describe('派生规则：谁收到哪条事件', () => {
 
 describe('提出人：自由文本 → 成员', () => {
   /**
-   * P4-04 把「重名」从一条要处理的边界改成了**不可能**：登录名必须唯一（`members_name_unique`）。
-   * 名字是登录名，两个「王妍」会让登录、通知、派单全都取决于 `order by id limit 1`。
+   * P4-04 把「重名」从一条要处理的边界改成了**不可能**：名字必须唯一
+   * （`members_name_unique`）。名字仍然是**身份**（事件、通知、派单都按它），两个
+   * 「王妍」会让这些全都取决于 `order by id limit 1`。
    *
    * 所以这条用例改成钉那个唯一索引本身——它是「提出人按姓名匹配」这条规则的前置条件。
-   * 姓名匹配仍然成立：提出人写的是名册上的名字，那个人收到。
+   * P4-08 起凭证换成邮箱（`members_email_unique`），两个索引一起钉：名字撞、邮箱撞
+   * 都建不出第二行。
    */
-  it('登录名唯一：第二个同名成员建不出来', async () => {
+  it('名字与邮箱各自唯一：第二个同名/同邮箱成员建不出来', async () => {
     await expect(db.execute(sql`
-      insert into members (name, role) values ('王妍','pm')`)).rejects.toThrow(/duplicate key/);
+      insert into members (name, email, role)
+      values ('王妍','wangyan2@123pan.com','pm')`)).rejects.toThrow(/duplicate key/);
+    await expect(db.execute(sql`
+      insert into members (name, email, role)
+      values ('另一个王妍','wangyan@123pan.com','pm')`)).rejects.toThrow(/duplicate key/);
 
     const created = await createRequirement(db, PM, {
       title: '外部提的需求', type: 'feature', requester: '王妍',

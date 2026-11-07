@@ -16,8 +16,9 @@ import { LINE_LABEL, lineLabel } from './roles';
  * 三件事，全部只摆字段与值：
  * 1. **列表**：名字 / 角色 / 条线 / 状态（在用 / 已停用）/ 负责需求数。已停用的人也
  *    出现在列表里——历史行还指着他，删掉一行不会让那条审计线消失。
- * 2. **新增**：名字 + 角色 + 条线。初始口令由服务端生成，**只显示这一次**（`createMember`
- *    的返回值），之后库里只有 scrypt 串。
+ * 2. **新增**：名字 + 邮箱 + 角色 + 条线。邮箱是**登录名**（P4-08），不填这个人就登不
+ *    进来；初始口令由服务端生成，**只显示这一次**（`createMember` 的返回值），之后库里
+ *    只有 scrypt 串。
  * 3. **改**：角色 / 条线 / 停用 / 重置口令（同样只显示一次）。停用还占着需求的负责人时，
  *    服务层会拒绝并说「这个人还负责 N 条需求，先转交」——那句话原文显示在行下，
  *    旁边就是「转交」：选一个人，一次把他名下全部需求转过去（逐条走 `reassignOwner`，
@@ -39,6 +40,7 @@ function NewMemberRow() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('pm');
   const [line, setLine] = useState<'feature' | 'commercial'>('feature');
   const [busy, setBusy] = useState(false);
@@ -50,6 +52,7 @@ function NewMemberRow() {
     setError(null);
     const form = new FormData();
     form.set('name', name);
+    form.set('email', email);
     form.set('role', role);
     form.set('line', role === 'product_owner' ? '' : line);
     try {
@@ -60,6 +63,7 @@ function NewMemberRow() {
       }
       setPassword(result.password);
       setName('');
+      setEmail('');
       setOpen(false);
       router.refresh();
     } catch {
@@ -94,6 +98,17 @@ function NewMemberRow() {
               autoComplete="off"
               value={name}
               onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <label className="mk-f">
+            <span>邮箱</span>
+            <input
+              className="gen-input"
+              type="email"
+              autoComplete="off"
+              placeholder="lvpin@123pan.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
             />
           </label>
           <label className="mk-f">
@@ -228,6 +243,9 @@ function MemberRow({ row, rows }: { row: MemberAdminRow; rows: MemberAdminRow[] 
           <span className="mem-sub">
             {ROLE_LABEL[row.role as Role] ?? row.role} · {lineLabel(row.line) || '—'}
           </span>
+          {/* 登录名（P4-08）：这一行回答「这个人怎么登进来」。它不是名字的重复——
+              名字是身份，邮箱是凭证，两者可能完全不同。 */}
+          <span className="mem-sub">{row.email}</span>
         </div>
         <div className="v gen-actions">
           <span className={`pill ${row.active ? 'ok' : 'no'}`}>{row.active ? '在用' : '已停用'}</span>

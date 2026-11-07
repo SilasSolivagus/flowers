@@ -107,6 +107,13 @@ export function leadRoleOf(line: string | null | undefined): Role | null {
 export type Member = {
   id: string;
   name: string;
+  /**
+   * 邮箱（P4-08）：**凭证**，不是身份。
+   *
+   * 可选与下面几列同一条理由：权限结论不依赖它（`actor` 仍然是名字）。成员管理页拿它
+   * 显示「这个人怎么登录」，设置页的「我的安全」也不需要它。
+   */
+  email?: string;
   role: string;
   line?: string | null;
   deactivatedAt?: Date | null;

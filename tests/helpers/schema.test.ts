@@ -29,7 +29,7 @@ it('schema is real: all 5 tables exist', async () => {
 it('insert one member and read it back', async () => {
   const [inserted] = await db
     .insert(members)
-    .values({ name: '房超', role: 'pm' })
+    .values({ name: '房超', email: 'fangchao@123pan.com', role: 'pm' })
     .returning();
   expect(inserted).toBeDefined();
   expect(inserted!.id).toMatch(/^[0-9a-f-]{36}$/);
@@ -37,7 +37,9 @@ it('insert one member and read it back', async () => {
 
   const found = await db.select().from(members).where(sql`id = ${inserted!.id}`);
   expect(found).toHaveLength(1);
-  expect(found[0]).toMatchObject({ id: inserted!.id, name: '房超', role: 'pm' });
+  expect(found[0]).toMatchObject({
+    id: inserted!.id, name: '房超', email: 'fangchao@123pan.com', role: 'pm',
+  });
 });
 
 it('requirements.number is unique', async () => {

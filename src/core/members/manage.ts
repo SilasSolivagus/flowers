@@ -35,7 +35,29 @@ import { resolveUserid } from '../notify/wecom.js';
  */
 
 const BAD_NAME = '名字不能为空';
-const DUPLICATE_NAME = '已经有同名成员了（登录名必须唯一）';
+const DUPLICATE_NAME = '已经有同名成员了';
+/**
+ * 邮箱是**登录名**（P4-08）。三句话分开说：
+ *
+ * - 空的：告诉他该填什么形状（`<拼音>@123pan.com`），而不是「必填」；
+ * - 形状不对：只判「有@、两边都不空、没有空白」，**不判域名**——域名是公司的规矩，
+ *   不是这个系统的规矩，写死 `@123pan.com` 只会让「换域名」变成一次代码改动；
+ * - 重复：唯一索引兜底（并发建人撞 23505），这里先查一次是为了给中文。
+ */
+const BAD_EMAIL = '邮箱不能为空（登录名是 <拼音>@123pan.com）';
+const WRONG_EMAIL = '邮箱格式不对（登录名是 <拼音>@123pan.com）';
+const DUPLICATE_EMAIL = '这个邮箱已经有账号了（登录名必须唯一）';
+
+/** 邮箱归一：去空白、折小写。写入与比较都用这一个结果。 */
+function normalizeEmail(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+}
+
+function assertEmailShape(email: string): string {
+  if (email === '') throw new AppError('invalid', BAD_EMAIL);
+  if (!/^[^\s@]+@[^\s@]+$/.test(email)) throw new AppError('invalid', WRONG_EMAIL);
+  return email;
+}
 const BAD_ROLE = '角色只能是超管、功能线负责人、商业线负责人、PM 之一';
 const BAD_LINE = '条线只能是功能线或商业线';
 const LINE_MISMATCH = '条线负责人的条线必须与角色对应：功能线 → 功能线负责人，商业线 → 商业线负责人';
@@ -66,6 +88,8 @@ async function countOwned(exec: Exec, memberId: string): Promise<number> {
 
 export type CreateMemberInput = {
   name: string;
+  /** 登录名（P4-08）。必填：新的人没有邮箱就登不进来。 */
+  email: string;
   role: Role;
   line: Line | null;
   /** 不给就生成一个（返回值里带一次，之后就再也拿不到）。 */
@@ -88,6 +112,7 @@ export async function createMember(
 
   const name = asText(input.name)?.trim() ?? '';
   if (name === '') throw new AppError('invalid', BAD_NAME);
+  const email = assertEmailShape(normalizeEmail(input.email));
   if (!isRole(input.role)) throw new AppError('invalid', BAD_ROLE);
   const role = input.role;
   const rawLine = input.line;
@@ -97,21 +122,32 @@ export async function createMember(
   const line = lineFor(role, (rawLine ?? null) as Line | null);
 
   if ((await memberByName(db, name)) !== null) throw new AppError('conflict', DUPLICATE_NAME);
+  // 邮箱唯一：同一个人可以有两条名字不同的行，但登录名只能有一个主人。
+  {
+    const taken = await db.execute<{ n: number }>(
+      sql`select count(*)::int as n from members where lower(email) = ${email}`);
+    if (Number(taken.rows[0]?.n ?? 0) > 0) throw new AppError('conflict', DUPLICATE_EMAIL);
+  }
 
   const password = input.password === undefined || input.password === null
     ? generatePassword()
     : assertPassword(input.password);
   const hash = await hashPassword(password);
 
-  const inserted = await db.execute<{ id: string; name: string; role: string; line: string | null }>(sql`
-    insert into members (name, role, line, password_hash, password_updated_at)
-    values (${name}, ${role}, ${line}, ${hash}, now())
-    returning id, name, role, line`);
+  const inserted = await db.execute<{
+    id: string; name: string; email: string; role: string; line: string | null;
+  }>(sql`
+    insert into members (name, email, role, line, password_hash, password_updated_at)
+    values (${name}, ${email}, ${role}, ${line}, ${hash}, now())
+    returning id, name, email, role, line`);
   const row = inserted.rows[0];
   if (row === undefined) throw new Error('建人失败：insert 没有返回行');
 
   return {
-    member: { id: row.id, name: row.name, role: row.role, line: row.line, deactivatedAt: null },
+    member: {
+      id: row.id, name: row.name, email: row.email, role: row.role, line: row.line,
+      deactivatedAt: null,
+    },
     password,
   };
 }
@@ -229,13 +265,19 @@ async function revokeTokensOf(db: Db, memberId: string): Promise<void> {
 
 async function loadMember(exec: Exec, memberId: string): Promise<Member | null> {
   const res = await exec.execute<{
-    id: string; name: string; role: string; line: string | null; deactivated_at: Date | null;
-  }>(sql`select id, name, role, line, deactivated_at from members where id = ${memberId}`);
+    id: string; name: string; email: string; role: string;
+    line: string | null; deactivated_at: Date | null;
+  }>(sql`select id, name, email, role, line, deactivated_at from members where id = ${memberId}`);
   const row = res.rows[0];
   return row === undefined
     ? null
     : {
-      id: row.id, name: row.name, role: row.role, line: row.line, deactivatedAt: row.deactivated_at,
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      line: row.line,
+      deactivatedAt: row.deactivated_at,
     };
 }
 

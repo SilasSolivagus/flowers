@@ -19,6 +19,9 @@ import './login.css';
  *    而其中一句会把答案说出去。
  * 3. **名册空的时候说清原因**。空库上任何口令都不可能对；只说「账号或密码不对」会让
  *    人一遍遍试。这里查一次人数，空就给一句「先去跑种子」（`NO_MEMBER` 的同一个常量）。
+ * 4. **登录字段是邮箱**（P4-08）：公司口径是 `<拼音>@123pan.com`。标签写「邮箱」而不是
+ *    「账号」——填错了要能一眼看出来该填什么形状；`type="email"` 让浏览器给出键盘与
+ *    粘贴提示，但不做前端校验（形状由服务层判，界面只负责说清填什么）。
  *
  * 这一页**不渲染 `Shell`**：左轨底部那块身份、顶栏铃铛、进度卡都属于「已经登录的人」，
  * 出现在这里等于告诉一个还没登录的人「你现在是谁」。根布局只剩 `<html>/<body>`，
@@ -28,7 +31,7 @@ import './login.css';
 const ERROR_TEXT: Record<string, string> = {
   bad: BAD_CREDENTIALS,
   rate: RATE_LIMITED,
-  missing: '请填写姓名和密码',
+  missing: '请填写邮箱和密码',
 };
 
 export default async function LoginPage({
@@ -56,15 +59,17 @@ export default async function LoginPage({
           <p className="err" role="alert">{NO_MEMBER}</p>
         ) : (
           <form action={loginAction} className="loginform">
+            {/* 字段名仍然是 `name` 之外的 `email`：服务层按它查人（`memberByEmail`）。
+                只改凭证，不改身份——登录成功后写进会话的仍然是 `members.name`。 */}
             <label>
-              <span>姓名</span>
+              <span>邮箱</span>
               <input
-                name="name"
-                type="text"
+                name="email"
+                type="email"
                 autoComplete="username"
                 autoFocus
                 required
-                placeholder="例如：房超"
+                placeholder="例如：fangchao@123pan.com"
               />
             </label>
             <label>

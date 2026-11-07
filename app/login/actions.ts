@@ -21,15 +21,17 @@ import { login } from '../../src/core/auth/login';
  * `login()` 自己会把会话 cookie 写上去；成功后 `redirect('/')`。
  */
 export async function loginAction(formData: FormData): Promise<void> {
-  const name = typeof formData.get('name') === 'string' ? String(formData.get('name')) : '';
+  // 凭证是邮箱（P4-08）。字段名与登录页的 `name="email"` 一一对应；`login()` 反过来
+  // 解析出「这个人是谁」，失败一律 `bad`（未知邮箱与密码错同一句话）。
+  const email = typeof formData.get('email') === 'string' ? String(formData.get('email')) : '';
   const password = typeof formData.get('password') === 'string'
     ? String(formData.get('password'))
     : '';
 
-  if (name.trim() === '' || password === '') redirect('/login?e=missing');
+  if (email.trim() === '' || password === '') redirect('/login?e=missing');
 
   try {
-    await login(db, name, password);
+    await login(db, email, password);
   } catch (error) {
     if (error instanceof AppError) {
       if (error.code === 'rate_limited') redirect('/login?e=rate');
