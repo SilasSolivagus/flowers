@@ -2,7 +2,10 @@ import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 
+import { db } from '../src/db/client';
 import { currentMember, listMembers } from '../src/core/read/member';
+import { notifyView, type NotifyView } from '../src/core/read/notify';
+import { NotifyBell } from './components/NotifyBell';
 import { PageTitle } from './components/PageTitle';
 import { TopbarActions } from './components/TopbarActions';
 import { ProgressCard } from './components/ProgressCard';
@@ -46,6 +49,18 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
    */
   const jobs = await listRunningJobs();
 
+  /**
+   * 顶栏铃铛的**首帧**（P4-03）。
+   *
+   * 放在布局里：铃铛在顶栏，而顶栏只由布局渲染（标题与入口也是）。数据一次读全
+   * ——列表 + 未读数来自同一个 `notifyView`，红点与列表因此不可能各说各的。
+   * 名册里查不到这个 cookie（离职的人 / 空库）时不发查询：通知是附加物，
+   * 不该让整页 500；铃铛自己会显示空列表。
+   */
+  const notices: NotifyView = self === null
+    ? { notices: [], unread: 0 }
+    : await notifyView(db, self);
+
   return (
     <html lang="zh-CN" data-rail={rail}>
       {/*
@@ -76,6 +91,8 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
             {/* 顶栏只放当前页的标题（需求 / 版本 / 设置）。字由路径推出来，见 PageTitle。 */}
             <header className="topbar">
               <PageTitle />
+              {/* 铃铛在「新建需求」左边：先看发生过什么，再动手新建。 */}
+              <NotifyBell initial={notices} />
               <TopbarActions />
             </header>
             {children}

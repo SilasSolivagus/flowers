@@ -449,3 +449,61 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .jobcard .row span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);
                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .jobcard .row .k{font-family:var(--f-mono);color:var(--c-text-4);margin-right:6px;font-style:normal}
+
+/* ── 站内通知（P4-03） ───────────────────────────────────────────────
+   顶栏铃铛 + 锚在下拉的面板。四条尺寸的来由：
+   - 铃铛 `--h-control` 见方：与「新建需求」同高，顶栏里两件东西的基线才对得上；
+   - 面板 360px：够放一行「11-07 09:12」+ 一句带编号的中文（约 20 字换行），
+     再宽就会盖住看板两列——它是一次快读，不是第二个页面；
+   - `max-height: 420px` + 列表自己滚：面板不该长到屏幕外，也不该把顶栏顶开；
+   - `z-index: 50`：高于抽屉遮罩（40）。面板是「我刚点开的东西」，抽屉是「我点进去
+     的东西」；点一行就关面板并进抽屉，两者不会真的同屏，但遮罩不该盖住它自己的
+     入口。
+   颜色一律 var(--c-*)，没有一个字面色值；未读只用「字重 + 一个 6px 主色点」表示，
+   没有一行说明文字。 */
+.notify{position:relative;margin-left:auto;display:flex;align-items:center}
+/* margin-left:auto 归铃铛，紧跟其后的录入入口不再抢这一格（否则两个 auto 会把
+   铃铛推到顶栏中间）。铃铛不在这一页时（非需求页）这条规则不成立，入口照旧靠右。 */
+.topbar .notify + .newentry{margin-left:0}
+
+.bell{position:relative;display:grid;place-items:center;width:var(--h-control);height:var(--h-control);
+      border-radius:var(--r-xs);border:1px solid transparent;color:var(--c-text-3)}
+.bell:hover{background:var(--c-surface-2);color:var(--c-text-1)}
+.bell[aria-expanded="true"]{background:var(--c-surface-2);color:var(--c-text-1)}
+.bell:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+/* 角标：数字用等宽字体（--f-num），两位数的宽度才不会把圆点撑歪。 */
+.bell .cnt{position:absolute;top:-1px;right:-2px;min-width:16px;height:16px;padding:0 4px;
+           border-radius:var(--r-pill);background:var(--c-accent);color:var(--c-on-accent);
+           font:600 10px/16px var(--f-num);text-align:center}
+
+.npanel{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:360px;max-height:420px;
+        display:flex;flex-direction:column;background:var(--c-surface);
+        border:1px solid var(--c-line-strong);border-radius:var(--r-sm);
+        box-shadow:var(--sh-overlay);overflow:hidden}
+.nhd{display:flex;align-items:center;justify-content:space-between;gap:8px;
+     height:36px;padding:0 12px;border-bottom:1px solid var(--c-line);
+     font:500 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.nhd .nall{color:var(--c-accent);font:500 var(--t-caption) var(--f-sans)}
+.nhd .nall:hover{text-decoration:underline}
+.nhd .nall:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+
+.nlist{overflow:auto;min-height:0}
+/* 三格：时间 / 一句话 / 未读点。时间固定 74px，句子自己换行（长原因不会撑破面板）。 */
+.nrow{display:grid;grid-template-columns:74px minmax(0,1fr) 8px;align-items:start;gap:8px;
+      width:100%;padding:8px 12px;border-bottom:1px solid var(--c-line);
+      color:var(--c-text-3);text-align:left}
+.nrow:last-child{border-bottom:0}
+.nrow:hover{background:var(--c-surface-2)}
+.nrow:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
+.nrow .nt{font:400 var(--t-caption) var(--f-num);color:var(--c-text-4);padding-top:1px}
+.nrow .nl{font:400 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
+.nrow.un .nl{color:var(--c-text-1);font-weight:500}
+.nrow .nd{width:6px;height:6px;border-radius:50%;margin-top:6px;background:transparent}
+.nrow.un .nd{background:var(--c-accent)}
+
+/* 空状态一行字，没有插图（house rule：标签与值，没有解释性文案）。 */
+.nempty{padding:16px 12px;color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
+
+@media (max-width:767px){
+  .npanel{width:min(360px,calc(100vw - 24px))}
+}

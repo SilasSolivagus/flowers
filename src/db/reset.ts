@@ -44,7 +44,8 @@ export async function assertSafeToReset(): Promise<string> {
 }
 
 /**
- * 清空七张表（P3.2 起加上 `prd_snapshots`）并把自增序列复位。
+ * 清空八张表（P3.2 起加上 `prd_snapshots`，P4-03 起加上 `notification_reads`）
+ * 并把自增序列复位。
  *
  * restart identity 只重置「属于这些表的」序列：events_seq_seq / requirements_number_seq
  * 在迁移 0001 里被 `alter sequence ... owned by ...` 绑到了列上，所以编号会回到 1
@@ -54,5 +55,7 @@ export async function resetDb() {
   // 原子性用例会建这个触发器；进程被 kill 时它会留在库里，而 truncate 清不掉
   // 触发器，之后每个写事件的用例都会撞 'boom'。先 drop 再 truncate。
   await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
-  await db.execute(sql`truncate requirements, review_assignments, prd_snapshots, events, releases, members, app_settings restart identity cascade`);
+  // notification_reads（P4-03）跟着 members 一起清：它没有自己的生命周期，
+  // 主键就是 member_id，留着只会让下一次种子的同 id 成员继承别人的已读位置。
+  await db.execute(sql`truncate requirements, review_assignments, prd_snapshots, events, releases, notification_reads, members, app_settings restart identity cascade`);
 }

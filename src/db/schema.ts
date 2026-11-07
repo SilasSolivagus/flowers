@@ -242,6 +242,30 @@ export const events = pgTable('events', {
 });
 
 /**
+ * 站内通知的**已读位置**（P4-03）。
+ *
+ * 这张表里没有一条通知。通知是从 `events` 派生出来的（「这条事件该通知谁」是
+ * 需求的函数，见 `src/core/read/notify.ts`），这里只记一个**水位线**：
+ * 每个人读到事件流的哪一格。于是：
+ * - 历史是免费的——第一次打开的人会看到所有曾经点到他的事件，因为派生是在读的
+ *   那一刻做的，不是写入的那一刻；
+ * - 没有第二份副本可以漂移——规则改了，旧事件按新规则重新解释（这是刻意的取舍：
+ *   宁可让历史换一种说法，也不要让库存一份永远对不上的影子）。
+ *
+ * 主键就是 `member_id`：一个人一个水位线。`last_seq` 是 events.seq 的**闭区间右端**，
+ * 读 = `seq <= last_seq`。单调不回退（写路径用 greatest 夹住），因为「已读」在
+ * 一个水位线上只能表达「到这里为止」，表达不了洞——点一条新通知会把更早的一起
+ * 认掉，这正是水位线的语义，报告里写明了为什么接受它。
+ *
+ * `updated_at` 只用于排查（什么时候读到这里的），读路径不看它。
+ */
+export const notificationReads = pgTable('notification_reads', {
+  memberId: uuid('member_id').primaryKey().references(() => members.id),
+  lastSeq: integer('last_seq').notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * 键值设置（P2.7 起）。
  *
  * 第一件住进来的东西是生成器命令（`generator.command`）与它上一次的测试结果

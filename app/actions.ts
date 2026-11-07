@@ -29,6 +29,9 @@ import {
   createRelease, deleteRelease, updateRelease,
 } from '../src/core/releases/manage';
 import { listRunningJobs, type JobProgress } from '../src/core/read/progress';
+import {
+  currentMemberRow, latestNoticeSeq, markRead, notifyView, type NotifyView,
+} from '../src/core/read/notify';
 import { attachFromForm } from './attach-form';
 
 /**
@@ -575,4 +578,49 @@ export async function deleteReleaseAction(formData: FormData): Promise<ActionRes
  */
 export async function runningJobsAction(): Promise<JobProgress[]> {
   return listRunningJobs();
+}
+
+/**
+ * 站内通知的三个入口（P4-03）。
+ *
+ * 通知没有写路径：它由 `events` 派生（见 `src/core/read/notify.ts`）。这里只有
+ * 「读一页」与「把水位线推到哪」两件事，所以没有 `ActionResult`，也没有中文错误——
+ * 读失败就是读失败，一张通知列表不该有自己的错误话术。
+ *
+ * 轮询与首帧同源：`noticesAction` 返回的 `{ notices, unread }` 与布局首帧传给铃铛的
+ * 是同一个函数（`notifyView`），所以「30 秒后数字变了、列表没变」这种事不可能发生。
+ */
+export async function noticesAction(): Promise<NotifyView> {
+  const member = await currentMemberRow();
+  if (member === null) return { notices: [], unread: 0 };
+  return notifyView(db, member);
+}
+
+/**
+ * 点开一条通知：水位线推到**那一行的 seq**（不是最新，也不是全部）。
+ *
+ * 返回值是推完之后重新读的一页：界面上那些「未读」的样式与红点都从它来，不必在
+ * 客户端自己重算一遍（重算就会和服务端的口径分叉）。
+ * 不 `revalidatePath`：这是一次本地已读，页面其余部分不受影响；下一次轮询/刷新
+ * 会从库里重新读。省掉一次整页 RSC 往返，点击后的反馈也就没有延迟。
+ */
+export async function markReadAction(upToSeq: number): Promise<NotifyView> {
+  const member = await currentMemberRow();
+  if (member === null) return { notices: [], unread: 0 };
+  await markRead(db, member, upToSeq);
+  return notifyView(db, member);
+}
+
+/**
+ * 全部已读：水位线推到**最新一条点到我的事件**，而不是当前这一页的最后一条。
+ *
+ * feed 有上限（30 条），用页尾当水位线会让「全部已读」之后红点仍然亮着——第 31 条
+ * 只是没被渲染出来，它依然是未读的。
+ */
+export async function markAllReadAction(): Promise<NotifyView> {
+  const member = await currentMemberRow();
+  if (member === null) return { notices: [], unread: 0 };
+  const latest = await latestNoticeSeq(db, member);
+  if (latest !== null) await markRead(db, member, latest);
+  return notifyView(db, member);
 }
