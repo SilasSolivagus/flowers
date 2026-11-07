@@ -10,13 +10,16 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId } from '../validate.js';
 import {
-  head, lsTree, grep, show,
+  head, lsTree, show,
   type MirrorResult,
 } from '../codemirror/mirror.js';
 import { repoShape, type RepoShape } from '../codemirror/route.js';
 import { ensureHistory, readHistory, type HistoryRow } from '../locate/history-store.js';
 import { locateFromHistory } from '../locate/history.js';
-import { ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE } from '../locate/copy.js';
+import { injectBanner } from '../locate/banner.js';
+import {
+  ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
+} from '../locate/copy.js';
 import { recordLocate } from '../locate/ledger.js';
 import type { LocateResult } from '../locate/types.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
@@ -47,10 +50,12 @@ import {
  *
  * 两段式，刻意分开：
  *
- * - **阶段一（便宜、可复现、没有模型）**：从 PRD 里抽关键词，在两个真实仓库的 HEAD 上
- *   `git grep`，得到「候选文件集」（每仓 12 个，按命中次数排序），再读一次
- *   `repoShape` 拿页面/接口/组件的结构。同一个 PRD + 同一个 HEAD 必然得到同一份候选集，
- *   所以「为什么模型没看见那个文件」这个问题可以脱离模型回答。
+ * - **阶段一（便宜、可复现、没有模型）**：定位只走**合并历史**——拿需求标题去
+ *   `commit_history` 里做中文提交信息检索（`locateFromHistory`），再读一次 `repoShape`
+ *   拿页面/接口/组件的结构。同一个 PRD + 同一份历史必然得到同一份候选集，所以
+ *   「为什么模型没看见那个文件」这个问题可以脱离模型回答。关键词（`keywordsFrom`）
+ *   仍然要抽，但它只喂下面那段结构摘要，**不参与检索**（裁定与三组实测见
+ *   `InspectLocateInput.query` 与 `locateQuery`）。
  * - **阶段二（贵、有模型）**：把 PRD（截断到 1 万字符并写明截断）+ 候选集 + 结构表交给
  *   模型，要一份**结构化**结论（flows + findings）。然后拿 `lsTree` 逐个核 evidence
  *   里的路径——镜像存在的全部意义就是这句核对：**没有一处不可核实的断言**。
@@ -78,7 +83,15 @@ import {
  */
 export const INSPECT_REPOS = ['123pan-pc', '123pan-uni-app'] as const;
 
-/** 阶段一的关键词个数。8 个 × 2 仓 = 16 次 `git grep`，是「够用且不慢」的平衡点。 */
+/**
+ * 关键词个数上限。
+ *
+ * 它只影响**结构摘要之外的一行提示词**（「阶段一抽出的关键词」那行）与
+ * `stats.keywords`，不影响任何一次检索：走查的检索式只有需求标题（见
+ * `InspectLocateInput.query`），关键词既不进检索式、也不再拿去 `git grep`
+ * （那条路 Task 8 已删）。8 是原来「8 词 × 2 仓 = 16 趟 ssh」时代留下的数量，
+ * 现在留着的理由是**够用且稳定**：它只是让模型看见「这份 PRD 里我们认出了哪些词」。
+ */
 export const MAX_KEYWORDS = 8;
 
 /** 结论条数上限。走查材料是给人过评审用的，12 条已经比一次会议能消化的多。 */
@@ -168,16 +181,16 @@ export type RepoBaseline = {
    */
   candidates: Array<{ path: string; hits: number }>;
   /**
-   * 走查的定位结论（只来自合并历史）。**三种情况并不得**：`absent` 是「没读到代码」，
-   * `none` 才是「看到了、没有」。`candidates` 里那一栏是候选，不是结论。
+   * 这个仓的定位结论（只来自合并历史）。**四种情况并不得**：`absent` 是「没看到」
+   * （代码没读到 / 历史没读到，措辞分开），`none` 才是「看到了、没有」。
    *
-   * **只有走查会填它**（`baselineFrom`）。语料脚本等仍走旧 grep 路由的地方没有这一步，
-   * 那里就是 `undefined`——渲染层不许替它编一句话：第四种说法等于把三种搅成四种，
-   * 而材料里那一段的全部价值就在于它只有三句。宁可这一格不出现。
+   * 终审改掉了原来的可选 + `'unknown'`：走查里每一个仓都必然走过定位
+   * （`baselineFrom` 一定会填），所以那一格不会是 `undefined`，而「没走过定位」
+   * 这个取值**在走查里不可达**——留着它就得在统计里写一个永远走不到的分支
+   * （装饰性分支，终审 Minor 2）。真没走定位的调用方（`scripts/shape-corpus.ts`，
+   * 它量的是提示词形状）自己给一个值，并写明那不是一次定位结论。
    */
-  locate?: LocateResult;
-  /** 上面那条结论渲染进材料的那一段（`renderLocate`，全仓唯一的三句话）。 */
-  locateText?: string;
+  locate: LocateResult;
 };
 
 /** 这次走查的数字。作业收口、报告与用例都读这一份，不各自再算一遍。 */
@@ -191,13 +204,16 @@ export type InspectStats = {
   /** 每个仓的候选数（`absent` / `none` 都是 0）。 */
   candidates: Record<string, number>;
   /**
-   * 每个仓的定位结论（`absent` / `none` / `candidates`）——材料里那三句话的来源。
+   * 每个仓的定位结论（`absent` / `none` / `candidates`）——材料里那几句话的来源。
    *
-   * `unknown` 不是第四种结论，而是「这个仓压根没走过定位」。它必须**显式**存在：
-   * 早先这里写的是 `?? 'absent'`，于是「没有结论」被静默记成了「没读到代码」——
-   * 正是本次改造明令禁止的那种合并（失败被渲染成一个看起来正常的取值）。
+   * **没有第四种取值。** 早先这里写的是 `LocateResult['kind'] | 'unknown'`，并配一个
+   * `repo.locate === undefined ? 'unknown' : …` 的分支；但走查里每个仓都必然走过定位
+   * （`baselineFrom` 一定填 `locate`），那个分支**不可达**，终审（Minor 2）把它删了。
+   * 删它的理由不是「省一行」：一个不可达的取值会让读者以为存在「这个仓没走过定位」
+   * 这种状态，于是去给它写渲染、写统计、写兜底——那正是 `?? 'absent'` 那种「没有结论
+   * 被静默记成没读到」的老毛病换了个方向。
    */
-  locate: Record<string, LocateResult['kind'] | 'unknown'>;
+  locate: Record<string, LocateResult['kind']>;
   flows: number;
   findings: number;
   verdicts: Record<Verdict, number>;
@@ -261,7 +277,7 @@ type RequirementRow = {
  *
  * | 情况 | `LocateResult` | 材料里那一段 |
  * |---|---|---|
- * | 补齐/读库失败（镜像不通、仓没配） | `absent` + `why` | `ABSENT_LINE(why)` |
+ * | 补齐/读库失败（镜像不通、仓没配） | `absent` + `why` | `ABSENT_HISTORY_LINE(why)` |
  * | 读到、没有相似合并 | `none` | `NOT_FOUND_HEADLINE` + 与研发确认真实现状 |
  * | 读到、有相似合并 | `candidates`（一律 `low`） | `CANDIDATES_LINE(items)` |
  *
@@ -314,18 +330,24 @@ export type InspectDeps = {
   latestSnapshot: (db: Db, requirementId: string) => Promise<Snapshot | null>;
   head: (repoId: string) => Promise<MirrorResult<{ sha: string; date: string; subject: string } | null>>;
   lsTree: (repoId: string) => Promise<MirrorResult<string[]>>;
-  grep: typeof grep;
   repoShape: (repoId: string) => Promise<MirrorResult<RepoShape>>;
   /**
-   * 走查的定位读口（合并历史）。注入它**只**为了造出「镜像读不到」——真镜像造不出
-   * ssh 超时，而这条链要钉的恰恰是失败时不许假装。
+   * 走查的定位读口 + 记账口（合并历史）。注入它们**只**为了造出「镜像/库读不到」——
+   * 真镜像造不出 ssh 超时，而这条链要钉的恰恰是失败时不许假装。
    */
   locateDeps: LocateDeps;
   show: typeof show;
   attach: typeof attachArtifact;
 };
 
-/** 真实的依赖：真 HTTP、真 Python 排版器、真镜像读口、真库。 */
+/**
+ * 真实的依赖：真 HTTP、真 Python 排版器、真镜像读口、真库。
+ *
+ * 终审（Blocker 5）删掉了这里的 `grep`：Task 8 把走查的候选改成只来自合并历史之后，
+ * `InspectDeps.grep` 已经没有任何调用者，而它留在 `LIVE` 里更坏——读者会以为阶段一
+ * 还在 grep。`mirror.ts` 的 `grep` 作为读口本身还在（`scripts/` 与对比脚本用得上），
+ * 只是走查不再读它。
+ */
 const LIVE: InspectDeps = {
   complete,
   render: (mermaid) => renderFlowchart(mermaid),
@@ -335,7 +357,6 @@ const LIVE: InspectDeps = {
   latestSnapshot,
   head,
   lsTree,
-  grep,
   repoShape,
   show,
   locateDeps: LIVE_LOCATE_DEPS,
@@ -498,7 +519,8 @@ function whyOf(error: unknown): string {
 }
 
 /**
- * 一个仓的定位：补齐历史 → 读历史 → 检索，**每次调用记一条账**。
+ * 一个仓的定位：补齐历史 → 读历史 → 检索。**不记账**（记账在一轮的那一层，
+ * 见 `locateRoundForInspect`）。
  *
  * 两处「失败必须是返回值、不是异常」的取舍：
  * - `ensureHistory` 自己的失败是 `MirrorResult`（它内部已经把 `mergeHistory` 的退出码
@@ -506,8 +528,8 @@ function whyOf(error: unknown): string {
  * - 读库那一步抛（连接断了、表被人删了）也是「没读到」，翻成 `absent` 并**带上原始那句**
  *   ——PM 拿它去催人，概括成「读取失败」就没人能行动了。
  *
- * 反过来，记账那一步的失败**一路抛出去**：这一层不产生业务结论，没有可以退回去的地方；
- * 而静默少记一条在攒数阶段不可见（报告里只会显示「案例比预期少几条」）。
+ * 这里的 `absent` 一律是**「代码读到了、合并历史没读到」那一半**：代码本身读不到时
+ * `structureOf` 已经抛了，根本走不到这一层。所以渲染时传 `origin: 'history'`。
  */
 export async function locateForInspect(db: Db, input: InspectLocateInput): Promise<LocateResult> {
   const deps = input.deps ?? LIVE_LOCATE_DEPS;
@@ -516,47 +538,115 @@ export async function locateForInspect(db: Db, input: InspectLocateInput): Promi
   try {
     ensured = await deps.ensureHistory(db, input.repoId);
   } catch (error) {
-    return recordAndReturn(db, deps, input, { kind: 'absent', why: `读合并历史时抛错：${whyOf(error)}` });
+    return { kind: 'absent', why: `读合并历史时抛错：${whyOf(error)}` };
   }
   if (!ensured.ok) {
     // 不再往下读：补齐失败时库里的行是**上几轮**的，拿它检索等于用旧历史回答这一轮。
-    return recordAndReturn(db, deps, input, { kind: 'absent', why: ensured.message });
+    return { kind: 'absent', why: ensured.message };
   }
 
   let rows: HistoryRow[];
   try {
     rows = await deps.readHistory(db, input.repoId);
   } catch (error) {
-    return recordAndReturn(db, deps, input, { kind: 'absent', why: `读 commit_history 失败：${whyOf(error)}` });
+    return { kind: 'absent', why: `读 commit_history 失败：${whyOf(error)}` };
   }
 
-  return recordAndReturn(db, deps, input, locateFromHistory(rows, input.query));
-}
-
-/** 记一条账，然后把结论原样交回去（`recordLocate` 抛就抛，不在这里兜）。 */
-async function recordAndReturn(
-  db: Db,
-  deps: LocateDeps,
-  input: InspectLocateInput,
-  result: LocateResult,
-): Promise<LocateResult> {
-  await deps.recordLocate(db, {
-    requirementId: input.requirementId,
-    stage: 'inspect',
-    result,
-  });
-  return result;
+  return locateFromHistory(rows, input.query);
 }
 
 /**
- * 定位结论 → 材料里的那一段。**全仓只有这三句**（措辞在 `copy.ts`）。
+ * 一轮走查的定位：每个仓各判一次，**把两仓的结果合成一条**再记账一条。
  *
- * 走查把它原样放进结构提示词，也就是放进模型看到的那份材料里：模型据此要么去核对
- * 候选，要么老实写「没读到」。这里绝不写第四句过渡语——三种情况一旦开始互相接近，
- * 迟早并成一句，那正是本次改造要消灭的那种合并。
+ * 为什么是「合成一条」而不是每仓一条（终审 Minor 3）：`locate_runs` 是拿来算准确率的
+ * 分母，而分母的单位是**案例**——PM 每一轮走查看到的是一份材料，不是一个仓一份。
+ * 原来走查每轮写两行（每仓一行）、评审每轮写一行，于是「攒够 30 条案例」这个门槛上，
+ * 走查的案例被算了两遍：30 行里可能只有 15 轮。这里统一成「一轮一行」，两种阶段同口径。
+ *
+ * 合成的规则（`mergeLocateRound`）只有一条：**candidates > absent > none**。
+ * 选出别的顺序都有害：把 `none` 放在 `absent` 之上，等于让「一个仓没读到」被
+ * 「另一个仓读到了但没找到」盖住——那正是本次改造要消灭的那种合并。
  */
-export function renderLocate(result: LocateResult): string {
-  if (result.kind === 'absent') return ABSENT_LINE(result.why);
+export async function locateRoundForInspect(
+  db: Db,
+  inputs: readonly InspectLocateInput[],
+  deps: LocateDeps,
+): Promise<{ parts: Array<{ repo: string; result: LocateResult }>; merged: LocateResult }> {
+  const first = inputs[0];
+  if (first === undefined) throw new Error('locateRoundForInspect 至少要一个仓：空输入说明仓清单坏了');
+
+  const parts: Array<{ repo: string; result: LocateResult }> = [];
+  for (const input of inputs) {
+    parts.push({ repo: input.repoId, result: await locateForInspect(db, input) });
+  }
+  const merged = mergeLocateRound(parts);
+  // 记账那一步的失败**一路抛出去**：这一层不产生业务结论，没有可以退回去的地方；
+  // 而静默少记一条在攒数阶段不可见（报告里只会显示「案例比预期少几条」）。
+  await deps.recordLocate(db, {
+    requirementId: first.requirementId,
+    stage: 'inspect',
+    result: merged,
+  });
+  return { parts, merged };
+}
+
+/**
+ * 两仓的结论 → 一条（记账用）。规则与理由见 `locateRoundForInspect`。
+ *
+ * `absent` 的 `why` 按仓拼（`仓 id：原句`）：合成之后仍然要能看出是哪一个仓没读到，
+ * 否则 PM 拿着「（原因：读 commit_history 失败）」不知道该去查哪个仓的库。
+ */
+export function mergeLocateRound(
+  parts: readonly { repo: string; result: LocateResult }[],
+): LocateResult {
+  const first = parts[0];
+  if (first === undefined) throw new Error('mergeLocateRound 至少要一个仓');
+
+  const withCandidates = parts.filter((part) => part.result.kind === 'candidates');
+  if (withCandidates.length > 0) {
+    const items = withCandidates.flatMap((part) =>
+      part.result.kind === 'candidates' ? part.result.items : []);
+    // 一律 `low`：两仓拼起来的清单只比单仓更弱，不会更强。
+    return { kind: 'candidates', confidence: 'low', items };
+  }
+
+  const blind = parts.filter((part) => part.result.kind === 'absent');
+  if (blind.length > 0) {
+    const why = blind
+      .map((part) => `${part.repo}：${part.result.kind === 'absent' ? part.result.why : ''}`)
+      .join('；');
+    return { kind: 'absent', why };
+  }
+
+  return { kind: 'none' };
+}
+
+/**
+ * `absent` 缺的是哪一半。**由调用点给**，因为它刚调用的是哪个读口。
+ *
+ * - `code`：代码本身没读到（镜像连不上、仓没配、HEAD/树读不出来）；
+ * - `history`：代码读到了，合并历史（`commit_history` 补齐或读库）没读到。
+ *
+ * 为什么这不是 `LocateResult` 上的一个字段：类型一改，记账、统计、材料三处都要多一个
+ * 分支，任一处漏写就会把一种缺口算成另一种。缺口的位置是**调用点的事实**，不是结果
+ * 类型的身份——所以它作为参数进来，而不是塞进联合里。
+ */
+export type LocateOrigin = 'code' | 'history';
+
+/**
+ * 定位结论 → 材料里的那一段。**全仓只有这两三句**（措辞在 `copy.ts`）。
+ *
+ * 走查把它原样放进结构提示词与材料顶部的横幅；评审放进现状基线与横幅。这里绝不写
+ * 第四句过渡语——几种情况一旦开始互相接近，迟早并成一句，那正是本次改造要消灭的
+ * 那种合并。
+ *
+ * `origin` 只在 `absent` 时起作用（其余两种与缺口在哪一半无关）。默认取 `'code'`：
+ * 忘记传的后果是「说得更严重」，而不是把一次库故障说成「代码里没有」——失败方向是响亮的。
+ */
+export function renderLocate(result: LocateResult, origin: LocateOrigin = 'code'): string {
+  if (result.kind === 'absent') {
+    return origin === 'history' ? ABSENT_HISTORY_LINE(result.why) : ABSENT_LINE(result.why);
+  }
   if (result.kind === 'none') return `${NOT_FOUND_HEADLINE}${CONFIRM_WITH_DEV}`;
   return CANDIDATES_LINE(result.items);
 }
@@ -565,9 +655,13 @@ export function renderLocate(result: LocateResult): string {
  * 结构 + 定位结论 → 一个仓的基线。
  *
  * `candidates` 只在真的拿到候选时才有内容：`absent` / `none` 一律空数组。这是**同一个
- * 事实的两种字段写法**，不是两次判断——提示词里的那段文字由 `locateText` 负责，这里
- * 的数组只用来数候选。让 `absent` 也顺手带几个候选进来，材料里就会出现「没读到代码」
- * 后面跟着一份清单的自相矛盾。
+ * 事实的两种字段写法**，不是两次判断——提示词与横幅里那段文字一律由 `renderLocate`
+ * 现算（终审删掉了 `locateText` 那一格：同一个结论存两份，两份总有先后，先后就是漂移）。
+ * 让 `absent` 也顺手带几个候选进来，材料里就会出现「没读到代码」后面跟着一份清单的
+ * 自相矛盾。
+ *
+ * 这一层传 `'history'`：走查能产出 `absent` 的唯一路径是合并历史/库读不到——代码本身
+ * 读不到时 `structureOf` 早就抛了，轮不到这里。
  */
 function baselineFrom(struct: RepoStructure, locate: LocateResult): RepoBaseline {
   return {
@@ -576,7 +670,6 @@ function baselineFrom(struct: RepoStructure, locate: LocateResult): RepoBaseline
       ? locate.items.map((item) => ({ path: item.path, hits: item.score }))
       : [],
     locate,
-    locateText: renderLocate(locate),
   };
 }
 
@@ -713,17 +806,35 @@ function shapeLines(repo: RepoBaseline): string[] {
 }
 
 /**
- * 材料里的定位段：把 `renderLocate` 的三句话之一原样挂到仓名下。
+ * 材料里的定位段：把 `renderLocate` 的结论之一原样挂到仓名下。
  *
  * 缩进两格只是排版——文字**一个字都不改**：`absent` 那一句里的「这一轮不含任何现状
  * 判断」是要让模型与 PM 一起看见的，这里若为了好看改写，语义就散了。
  */
 function locateLines(repo: RepoBaseline): string[] {
-  if (repo.locateText === undefined) return [];
   return [
     `  [${repo.id}]`,
-    ...repo.locateText.split('\n').map((line) => `    ${line}`),
+    ...renderLocate(repo.locate, 'history').split('\n').map((line) => `    ${line}`),
   ];
+}
+
+/**
+ * 材料顶部横幅的文字（`injectBanner` 的输入）。
+ *
+ * 两件事的次序不能倒：
+ * 1. **结论相同就只说一遍**。两仓都判成 `none`（或都 absent 且原因相同）时，硬按仓各说
+ *    一遍，PM 会以为这是两份不同的结论；而且同一句话念两遍，正是「三句变四句」的开头。
+ * 2. 结论不同才按仓标出（`[仓]` 一行 + 正文）：那时仓名是信息，不是排版。
+ *
+ * 文字一律来自 `renderLocate`（再往下是 `copy.ts`），这里**一个字都不自己写**。
+ */
+function locateBannerText(repos: readonly RepoBaseline[]): string {
+  const rendered = repos.map((repo) => ({ repo: repo.id, text: renderLocate(repo.locate, 'history') }));
+  const first = rendered[0];
+  if (first === undefined) return '';
+  const distinct = new Set(rendered.map((item) => item.text));
+  if (distinct.size === 1) return first.text;
+  return rendered.map((item) => `[${item.repo}]\n${item.text}`).join('\n');
 }
 
 /**
@@ -1365,31 +1476,48 @@ export async function inspect(
   // 是核对证据的基础），但候选只来自历史。**不**在 `none` 时退回结构候选——那会把刚拿掉
   // 的噪音装回去，还会让「没读到」看起来像「定位过了」。
   const query = queryOfRequirement(req);
-  const repos: RepoBaseline[] = [];
-  for (const struct of structures) {
-    const result = await locateForInspect(db, {
+  // 一轮定位：每仓各判一次，结果**合成一条**记账（终审 Minor 3：分母的单位是「案例」，
+  // 一轮走查 PM 看到的是**一份**材料，不是一仓一份）。
+  const round = await locateRoundForInspect(
+    db,
+    structures.map((struct) => ({
       repoId: struct.id,
       query,
       requirementId,
       deps: full.locateDeps,
-    });
-    repos.push(baselineFrom(struct, result));
-  }
+    })),
+    full.locateDeps,
+  );
+  const locateByRepo = new Map(round.parts.map((part) => [part.repo, part.result]));
+  const repos: RepoBaseline[] = structures.map((struct) => {
+    const result = locateByRepo.get(struct.id);
+    // 不写兜底值：`parts` 与 `structures` 一一对应（同一个循环造出来的），缺了就是
+    // 装配错了——给它编一句「没读到」正是本次改造禁止的那种「失败渲染成正常取值」。
+    if (result === undefined) throw new Error(`定位结果缺了 ${struct.id}：parts 与 structures 不同源`);
+    return baselineFrom(struct, result);
+  });
+
   stats.repos = repos.map((repo) => ({ id: repo.id, sha: repo.sha, date: repo.date, files: repo.files }));
   stats.candidates = Object.fromEntries(repos.map((repo) => [repo.id, repo.candidates.length]));
-  stats.locate = Object.fromEntries(repos.map((repo) => [
-    repo.id,
-    repo.locate === undefined ? 'unknown' : repo.locate.kind,
-  ]));
+  stats.locate = Object.fromEntries(repos.map((repo) => [repo.id, repo.locate.kind]));
 
-  // 两个仓都「没读到」：这一轮没有任何现状判断可做。在**第一次模型调用之前**停下，
-  // 把材料里那句话原样当错误抛出去——跑到模型那一步只会得到一份编出来的走查。
-  const blind = repos.flatMap((repo) => (repo.locate?.kind === 'absent'
-    ? [`${repo.id}：${repo.locate.why}`]
-    : []));
-  if (blind.length === repos.length) {
-    throw new AppError('locate_absent', ABSENT_LINE(blind.join('；')));
-  }
+  // ── 两仓的历史都没读到：**照样出材料**，但材料顶部写明「这一轮不含现状判断」──
+  //
+  // 这是终审 Blocker 1 的裁决点。旧行为是抛 `locate_absent` 整份不出，理由是「拿不到
+  // 定位，模型只会编」。但这条路径上 HEAD / lsTree / repoShape **都已经读到了**：
+  // 证据核对、深读、页面片段都不依赖合并历史，能出的部分是真实的（流程主干 + PRD 侧的
+  // 问题清单）。整份丢掉，PM 拿到的只有一句错话（「代码没读到」）+ 一份消失的材料。
+  //
+  // 所以现在：**材料照出**，靠三处把「没有现状判断」钉死——
+  // 1. 材料顶部横幅（`injectBanner`，代码写死，模型不参与）第一句就是
+  //    `ABSENT_HISTORY_HEADLINE`，连同 `why`；
+  // 2. 提示词里 `absentRule` 对 `absent` 的仓下禁令：不许写 implemented / extra / differs，
+  //    不许引用它们的路径——两仓都 absent 时，等于整份结论里没有现状判断；
+  // 3. `stats.locate` 与 `recordLocate` 都记着 `absent`，不会在统计里变成一次成功定位。
+  //
+  // 已知残余（写进报告）：`absentRule` 只是提示词禁令，没有机器核对（本仓原有第 3 条
+  // 已知代价）。真要机器保证，得在 `validateStructure` 里对 absent 仓的 evidence 直接
+  // 判死——那是另一件事，不在本次修复范围。
 
   const trees: TreeIndex = new Map(repos.map((repo) => [repo.id, repo.tree]));
   const trace: Trace = makeTrace(db, request.jobId ?? null, cfg.model);
@@ -1556,14 +1684,18 @@ export async function inspect(
 
   const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, 'inspect.html');
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, built.html, 'utf8');
+  // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
+  // 于是评审/走查落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，而 `why`（唯一
+  // 能拿去催人的线索）丢了。这一段由代码写死、模型不参与——模型在正文里提没提它都一样。
+  const html = injectBanner(built.html, locateBannerText(repos));
+  await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
   const artifact = await full.attach(db, actor, {
     requirementId, stage: 'inspect', url, inputHash,
   });
 
-  stats.bytes = Buffer.byteLength(built.html, 'utf8');
+  stats.bytes = Buffer.byteLength(html, 'utf8');
   stats.ms = Date.now() - started;
 
   return { url, stats, artifactId: artifact.id };

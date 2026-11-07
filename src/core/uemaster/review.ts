@@ -17,6 +17,7 @@ import { renderFlowchart } from './flow.js';
 import { head, lsTree, show, type MirrorResult } from '../codemirror/mirror.js';
 import { type CodeIndex } from '../codemirror/code-index.js';
 import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
+import { injectBanner } from '../locate/banner.js';
 import { createExpand } from '../locate/expand.js';
 import { recordLocate } from '../locate/ledger.js';
 import { expandedKeywords, locateFromStructure, type ExpandFn } from '../locate/structure.js';
@@ -478,17 +479,20 @@ function repoOf(path: string, trees: Map<string, Set<string>>): string | null {
 }
 
 /**
- * 摸底：结构索引上定位 → 记账 → 把结论与代码片段拼成材料里那一段。
+ * 摸底：结构索引上定位 → 把结论与代码片段拼成材料里那一段。**不记账**。
  *
  * 顺序是硬的：
  * 1. 读镜像 + 索引。读不到 → `absent`（**不调模型**：没有索引可搜时猜词是纯浪费）；
  * 2. 扩展词：`expandedKeywords(expand, 标题, 描述, PRD 关键词)`。任何失败都回落，
  *    一次都不重试（见 `structure.ts` 与 `expand.ts`）；
  * 3. `locateFromStructure`：结构命中一律 `low`，不重排、不跨仓比分数；
- * 4. 有候选才 `show` 正文：那几段是模型判断「与现状冲突」时唯一能引用的东西；
- * 5. **最后**记账：三种结果都记（`recordLocate` 抛就抛——那是库坏了，与模型无关）。
- *    顺序是有意的：先写一行 `low`、后因为 `show` 抛了而没产出材料，库里就会留下一条
- *    指向从未存在过的材料的记录，而 `locate_runs` 是拿来算准确率的分母。
+ * 4. 有候选才 `show` 正文：那几段是模型判断「与现状冲突」时唯一能引用的东西。
+ *
+ * **记账不在这里**（终审 Minor 4）：这一层只产出 `baseline.locate`，行由
+ * `reviewRequirement` 在**材料真的写出来之后**再写。原来的写法是「先记账、后拼材料」，
+ * 于是材料在 `review_empty` / `review_rejected` / `walkmap_rejected` 这几处失败时，
+ * 库里仍然留着一条记录——而 `locate_runs` 是算准确率的分母，那一行指向的是一份
+ * 从来没存在过的材料。挪到最后之后，「有行必有材料」是结构上成立的，不靠注释保证。
  *
  * 返回 `Baseline` 而不是 `Baseline | null`：以前的 `null` 表示「镜像没配」，材料里那句
  * 「这次没有代码现状可参考」把「没读到」与「没配」混成了一句。现在读不到就是 `absent`，
@@ -504,12 +508,9 @@ export async function gatherBaseline(
   const inputs = await readBaselineInputs(db, deps);
 
   if (!inputs.ok) {
+    // 代码本身没读到：`renderLocate` 用默认的 `origin: 'code'`，第一句是「代码没读到」。
     const located: LocateResult = { kind: 'absent', why: inputs.why };
-    const text = renderLocate(located);
-    // 记账放在材料拼好之后（顺序见函数头第 4–5 条）：先写一行 `low`、后因为 `show` 抛了
-    // 而没产出材料，库里就会留下一条指向从未存在过的材料的记录。
-    await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
-    return { text, repos: [], trees: new Map(), locate: located };
+    return { text: renderLocate(located), repos: [], trees: new Map(), locate: located };
   }
 
   // 回落值取**全量** markdown，不是提示词里那份截断过的 `prd.text`：关键词只要词，
@@ -526,7 +527,6 @@ export async function gatherBaseline(
   // 联合里，所以一并按结论渲染：不抛（评审不该因为一个不该发生的分支失败），也不假装有候选。
   if (located.kind !== 'candidates') {
     const text = `${renderLocate(located)}\n${repoLine}`;
-    await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
     return {
       text,
       repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
@@ -558,8 +558,6 @@ export async function gatherBaseline(
       ? []
       : ['', '下面是这些位置**现在**的样子（从代码镜像只读取出，未经修改）：', '', ...chunks]),
   ].join('\n');
-  // 记账在材料**拼好之后**：这一行要描述一份真的产出过的材料。
-  await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
   return {
     text,
     repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
@@ -1247,12 +1245,22 @@ export async function reviewRequirement(
 
   const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, 'review.html');
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, built.html, 'utf8');
+  // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
+  // 于是落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，`why`（唯一能拿去催人的
+  // 线索）丢了。这一段由代码写死、模型不参与——模型正文里提没提它都一样。
+  const html = injectBanner(built.html, renderLocate(baseline.locate));
+  await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
   const artifact = await full.attach(db, actor, {
     requirementId, stage: 'review', url, inputHash,
   });
+
+  // 记账放在**材料写出来之后**（终审 Minor 4）。这一行描述的是「PM 真拿到了一份材料」，
+  // 而 `locate_runs` 是算准确率的分母：`review_empty` / `review_rejected` /
+  // `walkmap_rejected` 那几处失败都不会走到这里，所以「有行必有材料」不是靠注释，
+  // 是靠位置。`recordLocate` 失败照旧往上抛（那是库坏了，与材料无关，更不许静默少一条）。
+  await recordLocate(db, { requirementId: req.id, stage: 'review', result: baseline.locate });
 
   const counts = countByType(found.findings);
   return {

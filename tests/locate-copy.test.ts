@@ -90,13 +90,13 @@ describe('那几句话', () => {
     const items: Candidate[] = [
       { path: 'src/pages/transfer.vue', reason: '出自 11-03 那次合并', source: 'history', score: 3 },
       { path: 'src/components/Upload/index.vue', reason: '目录名与需求里的「上传」对上', source: 'structure', score: 2 },
-      { path: 'src/api/file.ts', reason: '文本命中「断点续传」', source: 'grep', score: 1 },
+      { path: 'src/api/file.ts', reason: '路由 /transfer 的页面（命中「断点续传」）', source: 'structure', score: 1 },
     ];
     const line = CANDIDATES_LINE(items);
 
     expect(line).toContain('1. `src/pages/transfer.vue` ← 出自 11-03 那次合并');
     expect(line).toContain('2. `src/components/Upload/index.vue` ← 目录名与需求里的「上传」对上');
-    expect(line).toContain('3. `src/api/file.ts` ← 文本命中「断点续传」');
+    expect(line).toContain('3. `src/api/file.ts` ← 路由 /transfer 的页面（命中「断点续传」）');
 
     // 顺序 = 传入顺序（排序是检索层的事，文案层不许再排一次）。
     const at = items.map((c) => line.indexOf(c.path));

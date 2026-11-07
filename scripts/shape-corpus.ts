@@ -701,6 +701,11 @@ async function baselineOf(repoId: string, keywords: string[]): Promise<RepoBasel
     tree: new Set(treeRes.data),
     shape: shapeRes.data,
     candidates: rankByKeywordHits(perKeyword),
+    // 语料脚本**不跑定位**（它量的是提示词形状，走的是老 grep 路由），但
+    // `RepoBaseline.locate` 是必填的（终审删掉了「没走过定位」那个不可达取值）。
+    // 给它 `none` 让提示词里那一段照常出现——形状与生产一致；**它不是一次定位结论**，
+    // 也别拿这份语料去统计定位准确率（那要用 `scripts/bench-locate.ts`）。
+    locate: { kind: 'none' },
   };
 }
 

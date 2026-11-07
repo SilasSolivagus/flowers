@@ -11,6 +11,7 @@ import { DEFAULT_SSH_HOST, head } from '../src/core/codemirror/mirror.js';
 import { hashMarkdown, saveSnapshot, type Snapshot } from '../src/core/prd/snapshots.js';
 import { CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, LIVE_LOCATE_DEPS, PRD_PROMPT_MAX, inspect, keywordsFrom, mermaidFromFlows, prdVersionOf, truncatePrd, validateStructure, type Finding, type InspectDeps, type Structure } from '../src/core/uemaster/inspect.js';
 import { normalizeVerdict } from '../src/core/uemaster/shape.js';
+import { ABSENT_HEADLINE, ABSENT_HISTORY_HEADLINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE } from '../src/core/locate/copy.js';
 import type { ProviderConfig, ProviderResult } from '../src/core/uemaster/provider.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
@@ -642,7 +643,7 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(prompt).not.toContain('`src/pages/Share/Share.tsx` ←');
   }, 30_000);
 
-  it('只有一个仓读不到：不抛、材料里写明那一仓没读到、另一仓候选照常，账记两行', async () => {
+  it('只有一个仓的历史读不到：材料里写明「代码读到了、历史没读到」，另一仓候选照常，账记一行', async () => {
     const r = await inspectable();
     fake.enqueue(STRUCTURE_OK, VERIFY_OK);
 
@@ -662,26 +663,27 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(out.url).toContain('/uemaster/PAN-');
     expect(fake.calls()).toBe(2);
 
-    // 2) 提示词里那一仓写着「没读到」（ABSENT_LINE 原文），并带着原因
+    // 2) 提示词里那一仓写的是**历史**那一句（终审 Blocker 1）：代码读到了，不许说成没读到
     const prompt = fake.prompts[0]!;
-    expect(prompt).toContain('代码没读到，这一轮不含任何现状判断。');
+    expect(prompt).toContain(ABSENT_HISTORY_HEADLINE);
+    expect(prompt).not.toContain(ABSENT_HEADLINE);
     expect(prompt).toContain('镜像 ssh 连接超时');
     expect(prompt).toContain(blindRepo);
     // 3) 另一条禁令也在：不许给读不到的仓下判断
     expect(prompt).toContain('不要给这些仓下任何现状判断');
 
-    // 4) 账记两行：读不到的那仓 absent，另一仓是该仓自己的结论（这里历史为空 → none）
-    const rows = await db.execute<{ outcome: string; stage: string }>(sql`
-      select outcome, stage from locate_runs order by created_at`);
-    expect(rows.rows.map((row) => row.outcome).sort()).toEqual(['absent', 'none']);
-    for (const row of rows.rows) expect(row.stage).toBe('inspect');
+    // 4) 账记**一行**（终审 Minor 3：一轮一行；两仓合成一条，absent 压过 none）
+    const rows = await db.execute<{ outcome: string; stage: string; candidates: number }>(sql`
+      select outcome, stage, candidates from locate_runs order by created_at`);
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]).toMatchObject({ outcome: 'absent', stage: 'inspect', candidates: 0 });
   }, 30_000);
 
-  it('两个仓的历史都读不到 → 明确失败，不假装「代码里没有」，也不花一次模型调用', async () => {
+  it('两个仓的历史都读不到 → **照样出材料**，横幅第一句是「代码读到了、合并历史没读到」，且不下任何现状判断', async () => {
     const r = await inspectable();
     fake.enqueue(STRUCTURE_OK, VERIFY_OK);
 
-    const error = await caught(inspect(db, '吕品', { requirementId: r.id }, deps({
+    const out = await inspect(db, '吕品', { requirementId: r.id }, deps({
       locateDeps: {
         ...LIVE_LOCATE_DEPS,
         ensureHistory: async () => ({
@@ -689,16 +691,107 @@ describe('inspect：PRD ⇄ 真实代码', () => {
         }),
         readHistory: async () => [],
       },
-    })));
+    }));
 
-    expect(error.code).toBe('locate_absent');
-    // 材料里那句话原样当错误抛出去：带原因、指向「去催人」，不是「代码里没有」
-    expect(error.message).toContain('代码没读到');
-    expect(error.message).toContain('镜像 ssh 连接超时');
-    expect(error.message).not.toContain('代码里没有');
-    expect(fake.calls()).toBe(0);
-    expect(await artifactCount()).toBe(0);
+    // 1) 终审 Blocker 1 的裁决：这条路径上 HEAD / lsTree / repoShape 都读到了，
+    //    能出的部分（流程主干 + PRD 侧结论）照出，不再整份消失。
+    expect(out.url).toContain('/uemaster/PAN-');
+    expect(await artifactCount()).toBe(1);
+
+    // 2) 提示词里是「历史没读到」那一句 + 原因，绝不是「代码没读到」
+    const prompt = fake.prompts[0]!;
+    expect(prompt).toContain(ABSENT_HISTORY_HEADLINE);
+    expect(prompt).toContain('镜像 ssh 连接超时');
+    expect(prompt).not.toContain(ABSENT_HEADLINE);
+    // （`代码里没有` 这四个字在提示词的 verdict 定义里本来就出现，不能拿来当判据）
+
+    // 3) 产物里也写着（横幅由代码写，见下一条用例），统计里记着 absent
+    expect(out.stats.locate).toEqual(Object.fromEntries(INSPECT_REPOS.map((id) => [id, 'absent'])));
+    expect(out.stats.candidates).toEqual(Object.fromEntries(INSPECT_REPOS.map((id) => [id, 0])));
+    const html = await readFile(siteFile(out.url), 'utf8');
+    expect(html).toContain(ABSENT_HISTORY_HEADLINE);
   }, 30_000);
+
+  /**
+   * 终审 Blocker 2：那几句话必须进**产物**，而且由代码写、模型不参与。
+   *
+   * 三种情况各出一次材料，断言横幅**逐字**带着 `copy.ts` 的输出。这组用例的价值不在
+   * 「横幅有没有出现」，而在于它是**独立于模型**的：`fake` 的回话（`STRUCTURE_OK` /
+   * `VERIFY_OK`）里一个字都不提定位结论，横幅照样在。
+   */
+  describe('材料顶部的定位横幅（由代码写，模型不参与）', () => {
+    /** 把横幅那段文字抠出来（去标签 → 一行一段）。 */
+    function bannerTextOf(html: string): string {
+      const match = /<section class="locate-banner"[\s\S]*?<\/section>/.exec(html);
+      expect(match, '产物里没有定位横幅').not.toBeNull();
+      return match![0]
+        .replace(/<[^>]+>/g, '\n')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+        .join('\n');
+    }
+
+    it('有候选：横幅按仓给出「最可能的位置（待研发确认）」+ 出处 + 收尾', async () => {
+      const r = await inspectable();
+      fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+      const out = await inspect(db, '吕品', { requirementId: r.id }, deps());
+      const html = await readFile(siteFile(out.url), 'utf8');
+      const banner = bannerTextOf(html);
+
+      // 两仓的候选不同 → 按仓标出（同样的结论才去重成一句）
+      for (const id of INSPECT_REPOS) expect(banner).toContain(`[${id}]`);
+      expect(banner).toContain('最可能的位置（待研发确认）：');
+      expect(banner).toContain('`src/pages/Share/Share.tsx` ← 出自');
+      expect(banner).toContain('以上是线索，不是结论。');
+      expect(banner).toContain(CONFIRM_WITH_DEV);
+
+      // 横幅在最前面：正文骨架（svg / 三栏）都在它之后
+      expect(html.indexOf('locate-banner')).toBeLessThan(html.indexOf('<svg id="flowsvg"'));
+      expect(html.indexOf('locate-banner')).toBeLessThan(html.indexOf('class="flow-panel"'));
+    }, 60_000);
+
+    it('读到了但没找到：横幅逐字是「没能定位到」那一句，一个字不多', async () => {
+      const r = await inspectable();
+      fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+      const out = await inspect(db, '吕品', { requirementId: r.id }, deps({
+        locateDeps: {
+          ...LIVE_LOCATE_DEPS,
+          ensureHistory: async () => ({ ok: true, data: { inserted: 0, total: 0, ms: 1 } }),
+          readHistory: async () => [],
+        },
+      }));
+      const banner = bannerTextOf(await readFile(siteFile(out.url), 'utf8'));
+
+      // 两仓结论相同 → 只说一遍（去重），且逐字等于 copy 的输出
+      expect(banner).toBe(`${NOT_FOUND_HEADLINE}${CONFIRM_WITH_DEV}`);
+      expect(banner).not.toContain(ABSENT_HEADLINE);
+    }, 60_000);
+
+    it('历史读不到：横幅逐字是「代码读到了、合并历史没读到」那一句 + 原因', async () => {
+      const r = await inspectable();
+      fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+      const why = '镜像 ssh 连接超时（mirror@example.test:22）';
+      const out = await inspect(db, '吕品', { requirementId: r.id }, deps({
+        locateDeps: {
+          ...LIVE_LOCATE_DEPS,
+          ensureHistory: async () => ({ ok: false, code: 'git_failed', message: why }),
+          readHistory: async () => [],
+        },
+      }));
+      const banner = bannerTextOf(await readFile(siteFile(out.url), 'utf8'));
+
+      expect(banner.startsWith(ABSENT_HISTORY_HEADLINE)).toBe(true);
+      // why 一个字都不许丢：那是 PM 唯一能拿去催人的线索
+      expect(banner).toContain(`（原因：${why}）`);
+      expect(banner).toContain(CONFIRM_WITH_DEV);
+      // 「代码没读到」是另一半的措辞，不许出现在这条路径上
+      expect(banner).not.toContain(ABSENT_HEADLINE);
+    }, 60_000);
+  });
 
   it('没有 PRD 快照 → 先 readPrd；有快照 → 不读', async () => {
     const r = await inspectable();

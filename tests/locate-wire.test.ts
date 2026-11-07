@@ -17,7 +17,8 @@ import {
   descriptionOf, gatherBaseline, type ReviewLocateDeps, type ReviewPrd,
 } from '../src/core/uemaster/review.js';
 import {
-  keywordsFrom, locateForInspect, locateQuery, renderLocate, type LocateDeps,
+  keywordsFrom, locateForInspect, locateQuery, locateRoundForInspect, renderLocate,
+  type LocateDeps,
 } from '../src/core/uemaster/inspect.js';
 import { resetDb } from './helpers/db.js';
 
@@ -238,52 +239,76 @@ describe('材里那句话：三种情况各说各的', () => {
   });
 });
 
-describe('记账：每次定位一条，outcome 对得上', () => {
-  it('三种情况各写一条，阶段是 inspect', async () => {
-    await locateForInspect(db, {
-      repoId: 'pc',
-      query: 'x',
-      requirementId: null,
-      deps: depsOf({ ensureHistory: async () => ({ ok: false, code: 'git_failed', message: REASON }) }),
-    });
-    await locateForInspect(db, {
-      repoId: 'pc',
-      query: '发票报销审批流',
-      requirementId: null,
-      deps: depsOf({}),
-    });
-    await locateForInspect(db, {
-      repoId: 'pc',
-      query: '分享页搜索入口',
-      requirementId: null,
-      deps: depsOf({}),
-    });
+/**
+ * 记账的单位是**一轮案例**，不是一次仓内检索（终审 Minor 3）。
+ *
+ * 走查每一轮要判两个仓，原来写两行；评审每轮写一行。`locate_runs` 是算准确率的分母，
+ * 而分母的单位是「PM 拿到的一份材料」——两仓两行会让「攒够 30 条案例」这个门槛把走查
+ * 算双份。现在两边同口径：**一轮一行**，两仓的结论由 `mergeLocateRound` 合成。
+ */
+describe('记账：一轮一条，outcome 对得上（终审统一口径）', () => {
+  it('两仓合成一条：全 none → none，阶段是 inspect', async () => {
+    await locateRoundForInspect(db, [
+      { repoId: 'pc', query: '发票报销审批流', requirementId: null, deps: depsOf({}) },
+      { repoId: 'uni', query: '发票报销审批流', requirementId: null, deps: depsOf({}) },
+    ], depsOf({}));
 
     const rows = await ledger();
-    expect(rows.map((row) => row.outcome)).toEqual(['absent', 'none', 'low']);
-    expect(rows.map((row) => row.candidates)).toEqual([0, 0, 2]);
-    for (const row of rows) expect(row.stage).toBe('inspect');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: 'inspect', outcome: 'none', candidates: 0 });
+  });
+
+  it('两仓合成一条：都有候选 → low，候选数相加', async () => {
+    await locateRoundForInspect(db, [
+      { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+      { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+    ], depsOf({}));
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    // 每条历史合并动了 2 个文件，两仓各一份 → 4 条候选，四舍五入不重要，重要的是**一条行**
+    expect(rows[0]!.outcome).toBe('low');
+    expect(rows[0]!.candidates).toBe(4);
+  });
+
+  it('一个仓没读到 + 另一个仓 none → absent：没读到的那半不许被「没找到」盖住', async () => {
+    const got = await locateRoundForInspect(db, [
+      {
+        repoId: 'pc',
+        query: 'x',
+        requirementId: null,
+        deps: depsOf({ ensureHistory: async () => ({ ok: false, code: 'git_failed', message: REASON }) }),
+      },
+      { repoId: 'uni', query: 'x', requirementId: null, deps: depsOf({}) },
+    ], depsOf({}));
+
+    expect(got.merged.kind).toBe('absent');
+    if (got.merged.kind === 'absent') {
+      // why 里按仓标出：PM 拿着这句要知道去查哪个仓
+      expect(got.merged.why).toContain('pc：');
+      expect(got.merged.why).toContain('镜像 ssh 连接超时');
+    }
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.outcome).toBe('absent');
   });
 
   it('需求 id 原样落库（null 就是 null，不编一个）', async () => {
-    await locateForInspect(db, {
-      repoId: 'pc',
-      query: '分享页搜索入口',
-      requirementId: null,
-      deps: depsOf({}),
-    });
+    await locateRoundForInspect(db, [
+      { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+      { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+    ], depsOf({}));
     const rows = await ledger();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.requirement_id).toBeNull();
   });
 
   it('记账失败往上抛，不降级成一条「记不上就算了」', async () => {
-    await expect(locateForInspect(db, {
-      repoId: 'pc',
-      query: '分享页搜索入口',
-      requirementId: null,
-      deps: depsOf({ recordLocate: async () => { throw new Error('locate_runs 写不进去'); } }),
-    })).rejects.toThrow('locate_runs 写不进去');
+    await expect(locateRoundForInspect(db, [
+      { repoId: 'pc', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+      { repoId: 'uni', query: '分享页搜索入口', requirementId: null, deps: depsOf({}) },
+    ], depsOf({ recordLocate: async () => { throw new Error('locate_runs 写不进去'); } })))
+      .rejects.toThrow('locate_runs 写不进去');
   });
 });
 
@@ -420,8 +445,10 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     expect(baseline.text.startsWith(LOW_CONFIDENCE_HEADLINE)).toBe(true);
     expect(baseline.text).toContain('现状基线：123pan-pc@');
 
-    const rows = await ledger();
-    expect(rows.map((row) => [row.stage, row.outcome])).toEqual([['review', 'low']]);
+    // `gatherBaseline` **不记账**（终审 Minor 4）：行由 `reviewRequirement` 在材料写出来
+    // 之后才写，所以这一层跑完库里必须是空的。材料侧的记账在 `tests/review.test.ts`
+    // 里钉（成功一份材料 → 一行；`review_empty` / 构建失败 → 零行）。
+    expect(await ledger()).toEqual([]);
   });
 
   it('expand 返回 null → 回落 PRD 关键词，基线照样产出，只记一条 review 行', async () => {
@@ -444,9 +471,7 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     expect(paths).not.toContain('src/pages/search/Search.tsx');
     expect(baseline.text.startsWith(LOW_CONFIDENCE_HEADLINE)).toBe(true);
 
-    const rows = await ledger();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ stage: 'review', outcome: 'low' });
+    expect(await ledger()).toEqual([]);
   });
 
   it('expand 抛错 → 与 null 同一条路：不往上抛，回落原始关键词', async () => {
@@ -462,8 +487,7 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     const paths = baseline.locate.kind === 'candidates'
       ? baseline.locate.items.map((item) => item.path) : [];
     expect(paths).toContain('src/services/download-risk.ts');
-    const rows = await ledger();
-    expect(rows.map((row) => row.stage)).toEqual(['review']);
+    expect(await ledger()).toEqual([]);
   });
 
   it('索引为空（后端仓 / 没建索引）→ none：写「没能定位到」，不写「没读到」', async () => {
@@ -482,9 +506,7 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     expect(baseline.text).not.toContain(ABSENT_HEADLINE);
     expect(baseline.text).not.toContain('代码没读到');
 
-    const rows = await ledger();
-    expect(rows.map((row) => [row.stage, row.outcome, row.candidates]))
-      .toEqual([['review', 'none', 0]]);
+    expect(await ledger()).toEqual([]);
   });
 
   it('镜像读不到 → absent（点名那个仓），且一次模型调用都不发', async () => {
@@ -503,8 +525,7 @@ describe('评审定位：模型给的词就是检索用的词', () => {
     expect(calls).toBe(0);
     expect(baseline.repos).toEqual([]); // 标题会写「未参考代码现状」
 
-    const rows = await ledger();
-    expect(rows.map((row) => [row.stage, row.outcome])).toEqual([['review', 'absent']]);
+    expect(await ledger()).toEqual([]);
   });
 
   it('建索引失败也算「没读到」：半份现状不许当成一份交给 PM', async () => {

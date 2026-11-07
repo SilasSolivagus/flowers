@@ -14,6 +14,7 @@ import {
 } from '../src/core/uemaster/review.js';
 import type { CodeIndex } from '../src/core/codemirror/code-index.js';
 import { runJob } from '../src/core/uemaster/start.js';
+import { ABSENT_HEADLINE, CONFIRM_WITH_DEV } from '../src/core/locate/copy.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
@@ -513,6 +514,82 @@ describe('reviewRequirement', () => {
     expect(error.code).toBe('provider_unconfigured');
     expect(error.message).toContain('FLOWERS_PROVIDER_BASE_URL');
   }, 30_000);
+});
+
+/**
+ * 终审 Blocker 2 + Minor 4。
+ *
+ * 这一组钉两件在「评审 absent」时最容易丢的东西：
+ * 1. 那几句话必须进**产物**（横幅由代码写，模型不参与）——尤其 `why`，`copy.ts` 说
+ *    它是「PM 唯一能拿去催人的线索」，而原来材料里只有标题一句「未参考代码现状」；
+ * 2. 记账必须在**材料写出来之后**：`review_empty` / `review_rejected` /
+ *    `walkmap_rejected` 那几处失败不许留下指向不存在材料的行——`locate_runs` 是分母。
+ */
+describe('定位横幅与记账时机（终审 Blocker 2 / Minor 4）', () => {
+  /** 把横幅那段文字抠出来（去标签 → 一行一段）。 */
+  function bannerTextOf(html: string): string {
+    const match = /<section class="locate-banner"[\s\S]*?<\/section>/.exec(html);
+    expect(match, '产物里没有定位横幅').not.toBeNull();
+    return match![0]
+      .replace(/<[^>]+>/g, '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+      .join('\n');
+  }
+
+  async function ledgerRows(): Promise<Array<{ stage: string; outcome: string }>> {
+    const res = await db.execute<{ stage: string; outcome: string }>(sql`
+      select stage, outcome from locate_runs order by created_at`);
+    return res.rows;
+  }
+
+  it('没读到代码：横幅逐字带着「代码没读到」+ 原因，且在最前面', async () => {
+    const provider = await useFake();
+    const r = await reviewable();
+    provider.enqueue(GOOD_FLOW, THREE_FINDINGS, PAGES_JSON);
+
+    const out = await reviewRequirement(db, '吕品', { requirementId: r.id });
+    const html = await readFile(siteFile(out.url), 'utf8');
+    const banner = bannerTextOf(html);
+
+    expect(banner.startsWith(ABSENT_HEADLINE)).toBe(true);
+    // why 一个字都不许丢：那是 PM 唯一能拿去催人的线索（镜像没配/连不上，指向运维）
+    expect(banner).toContain('（原因：');
+    expect(banner).toContain(CONFIRM_WITH_DEV);
+    expect(banner).not.toContain('没能在代码里定位到');
+    // 标题那一句「未参考代码现状」还在，但它不再是 PM 唯一能看到的东西
+    expect(html).toContain('未参考代码现状');
+    expect(html.indexOf('locate-banner')).toBeLessThan(html.indexOf('<svg id="flowsvg"'));
+  }, 60_000);
+
+  it('材料真的产出之后才记账：成功一份 → 恰好一行 review', async () => {
+    const provider = await useFake();
+    const r = await reviewable();
+    provider.enqueue(GOOD_FLOW, THREE_FINDINGS, PAGES_JSON);
+
+    await reviewRequirement(db, '吕品', { requirementId: r.id });
+
+    const rows = await ledgerRows();
+    expect(rows).toEqual([{ stage: 'review', outcome: 'absent' }]);
+  }, 60_000);
+
+  it('材料没出来（review_empty）→ 库里一行都不留', async () => {
+    const provider = await useFake();
+    const r = await reviewable();
+    const allFake = JSON.stringify({
+      findings: [
+        { type: 'dead_end', node: 'A', quote: QUOTE_FAKE, why: '编的' },
+        { type: 'ambiguous', node: 'C', quote: 'PRD 没写清楚失败怎么重试', why: '也是编的' },
+      ],
+    });
+    provider.enqueue(GOOD_FLOW, allFake, allFake);
+
+    await caught(reviewRequirement(db, '吕品', { requirementId: r.id }));
+
+    // 记在最前面的话，这里会留下一条指向从未存在过的材料的记录（Minor 4）
+    expect(await ledgerRows()).toEqual([]);
+  }, 60_000);
 });
 
 // ─── 管线接线 ────────────────────────────────────────────────────────────────
