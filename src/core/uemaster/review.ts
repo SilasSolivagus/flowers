@@ -357,7 +357,9 @@ function prdBlock(prd: ReviewPrd): string[] {
  *    两句文案在 `copy.ts`，全仓一份；
  * 2. **扩展词失败即回落**：模型没配、超时、回的不是 JSON——都用 PRD 抽出来的原始关键词，
  *    评审照常出材料。**评审绝不因为「猜词的那个模型」挂了而失败**；
- * 3. **记账**（`locate_runs`，`stage: 'review'`）：三种结果各记一条，攒真实案例用。
+ * 3. **记账**（`locate_runs`，`stage: 'review'`）：一轮一条，写在**材料写出来之后**
+ *    （`reviewRequirement` 末尾）。三种结果各是一个 `outcome`（`absent` / `none` / `low`），
+ *    不是各记一条——分母的单位是「PM 拿到的材料数」。
  *
  * 这一段是**尽力而为**的：它的产出是材料里的一段话（`text`），不是评审的通过条件。
  */
@@ -551,8 +553,10 @@ export async function gatherBaseline(
   }
 
   const text = [
-    // 第一行永远是那三句结论之一（`copy.ts`）：读者先看到「这是什么结论」，
-    // 再看到「对着哪一版代码」和片段。
+    // 这里的第一行永远是那三句结论之一（`copy.ts`）——**这是提示词文本**，读者是模型，
+    // 它先看到「这是什么结论」，再看到「对着哪一版代码」和片段。PM 在产物里看到的
+    // 第一行不是这段文字，而是 `injectBanner` 写死的横幅（同一个 `renderLocate`，
+    // 但由代码插入，见 `locate/banner.ts`）。
     renderLocate(located),
     repoLine,
     ...(chunks.length === 0
