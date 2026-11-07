@@ -130,17 +130,23 @@ export const locateRuns = pgTable('locate_runs', {
 
 - [ ] **Step 3: 写进 journal**
 
-`src/db/migrations/meta/_journal.json` 的 `entries` 追加（`idx` 与时间戳按前一条 +1）：
+`src/db/migrations/meta/_journal.json` 的 `entries` 追加：
 
 ```json
 {
   "idx": 16,
   "version": "7",
-  "when": 1762500000000,
+  "when": 1794043671318,
   "tag": "0016_commit_history",
   "breakpoints": true
 }
 ```
+
+**`when` 必须是「上一条的 `when` + 1」，不能随便写一个看起来合理的毫秒值。**
+实测代价：初稿写的 `1762500000000` 比 `0015` 的 `1794043671317` 还小，drizzle 的 pg dialect
+只跑 `lastDbMigration.created_at < folderMillis` 的条目——于是 `db:migrate` **退出码 0、
+一张表都没建**，而下一步的 psql 检查才炸。**绿色的迁移不等于跑过的迁移。**
+以后再加迁移，取 `select max(created_at) from drizzle.__drizzle_migrations` 再加 1。
 
 - [ ] **Step 4: 加进 truncate 列表**
 
