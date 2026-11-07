@@ -3,6 +3,15 @@ node_modules/
 .next/
 tsconfig.tsbuildinfo
 dist/
+# ⚠️ `data/` 整个目录是运行期数据，下面两行是它唯一的两块：
+#    data/uemaster/                  每条需求生成过的评估 / 评审 / 走查材料（库里只存链接）
+#    data/.flowers-session-secret    会话签名密钥（删了 = 所有人手里的会话立刻失效）
+#
+# **在这个仓库里不要跑 `git clean -fdx`，也不要跑 `git clean -fdx data`**：`-x` 专门删
+# 被忽略的文件，一次就把上面两块全删掉，而且 `git status` 之后一点痕迹都没有。
+# 要清未跟踪的东西用 `git clean -fd`（不带 -x），先 `git status --ignored` 看一眼。
+# 2026-11-08 就这么丢过一次：`uemaster_artifacts` 的行还在、文件没了，抽屉里那条链接
+# 点开是 404「产物不存在」，同一刀的另一个受害者是会话密钥。详见 README「三个坑」。
 data/uemaster/
 docs/superpowers/wecom-auth-qr.png
 # P4-04：会话签名密钥（开发机生成，不能进库——那是「所有人的会话」）

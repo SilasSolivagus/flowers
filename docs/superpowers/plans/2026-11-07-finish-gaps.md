@@ -23,6 +23,28 @@ P2  派单选人            同线多负责人时别固定第一人
 
 P0 排在最前不是洁癖：这一场我被「跑一次测试 → 演示库清空 → 手工重灌」咬了十几次，每次都让一次验证作废。**先让验证可信，再验证。**
 
+### ⚠️ 这个仓库里不要跑 `git clean -fdx`（2026-11-08 补）
+
+`data/` 是 git 忽略的运行期目录，`-x` 会把被忽略的文件一起删掉，一次带走两样东西：
+`data/uemaster/`（每条需求的评估 / 评审 / 走查材料，库里 `uemaster_artifacts` 只存链接）
+与 `data/.flowers-session-secret`（会话签名密钥）。删完 `git status` 是干净的，没有人会
+在当场发现。
+
+2026-11-08 就这样丢过一次：一次子 agent 会话里的 `git clean -fdx`。后果是三个并行症状——
+抽屉里那条 `evaluate | /uemaster/PAN-11/evaluate.html` 的链接点开是 404「产物不存在」、
+所有人手里的会话同时失效（看起来像「登录随机掉线」）、而库里每一行都还在。
+
+纪律（写在这里，是因为教训发生在这张计划里）：
+
+- **不要跑 `git clean -fdx`，也不要跑 `git clean -fdx data`。**
+- 真要清未跟踪的文件：`git clean -fd`（不带 `-x`），先跑 `git status --ignored` 看清范围。
+- 动 `data/` 之前先备份：`cp -a data /tmp/data-$(date +%s)`。
+
+这一条**只能是文档级**的：真要拦住它得去 hook git 自己（`clean.<pattern>.ignore` 只对
+`git clean` 生效且每个克隆要各配一次，wrapper 脚本绕过就没了），而那属于「每个开发者机器
+上的配置」，不是这个仓库能保证的东西。残余风险见
+`2026-11-08-artifact-consistency.md`。
+
 ---
 
 ## P0 · 测试用独立数据库（已完成，见 `2026-11-07-p0-test-db.md`）

@@ -27,7 +27,7 @@ npm run dev             # http://localhost:3000
 要跑生产构建：
 
 ```bash
-npm run build        # 必须走 webpack，见下面「两个坑」
+npm run build        # 必须走 webpack，见下面「三个坑」
 npm start            # http://localhost:3000
 ```
 
@@ -233,7 +233,7 @@ mcp/
 `components/` 是外壳、左轨、看板、甘特、抽屉与动作条；参考段那一行有「生成 / 交回材料」，
 `GeneratorPicker` 是「探测到多条时选一个」的那张表。
 
-## 两个坑（新人一定会踩）
+## 三个坑（新人一定会踩）
 
 **一、Next 必须用 `--webpack`，永远不要 `--turbopack`。**
 `src/core` 用的是 NodeNext 风格的相对导入（`import ... from './errors.js'`），这是 `tsx` / `vitest`
@@ -261,6 +261,21 @@ npm run seed -- --reset
 
 `npm run seed` 不加 `--reset` 只在空库上灌，这是刻意的：一个已经有人用的库不该被演示数据覆盖。
 
+**三、`git clean -fdx` 会删掉 `data/`，而 `data/` 里放着全部产物与会话密钥。**
+`data/` 是 git 忽略的**运行期**目录：`data/uemaster/` 是每一条需求生成过的评估 / 评审 / 走查
+材料（`uemaster_artifacts` 只存链接），`data/.flowers-session-secret` 是会话签名密钥。
+`git clean -fdx` 里的 `-x` 专门删被忽略的文件，所以在仓库根敲一次，这两样**一起消失**，
+而且不会有任何提示——`git status` 干净得像什么都没发生。
+
+2026-11-08 就这么丢过一次：一次子 agent 会话里的 `git clean -fdx` 把 `data/uemaster/` 整个删掉，
+`uemaster_artifacts` 的行还在，抽屉里那条链接点开是 404「产物不存在」；同一个 `data/.flowers-session-secret`
+被删之后，所有人手里的会话同时失效，看起来像「登录随机掉线」。
+
+所以：**这个仓库里永远不要跑 `git clean -fdx`，也不要跑 `git clean -fdx data`**。
+真要清未跟踪的文件，用 `git clean -fd`（不带 `-x`，忽略文件不受影响），而且先跑一次
+`git status --ignored` 看清它会动哪些东西——那一条命令列出来的就是 `-x` 会删的全部。
+备份优先：`cp -a data /tmp/data-$(date +%s)` 比任何一次 clean 都便宜。
+
 ## 设计是哪来的
 
 - 产品口径：`docs/superpowers/specs/2026-11-05-flower-gate-product-design.md`
@@ -279,10 +294,13 @@ npm run seed -- --reset
    `/uemaster/` 下的站内路径（传文件时自己拼名字）。「传文件」在浏览器里没有被真的按过
    一次（本机浏览器没有配置上传目录），multipart 那一段只在用例里验过。
 2. **`scripts/mcp-smoke.ts` 会留痕。** 它 attach 一条真产物（actor=`claude-code`，把需求
-   推进待设计），但收尾只删占位文件、不删 `uemaster_artifacts` 那一行——抽屉里因此会出现
-   一个 404 链接。跑完要 `npm run seed -- --reset` 复位。
-3. **死链不追溯**（R-P2-5）：`listArtifacts` 不 stat 文件。手工删掉 `data/uemaster/` 下的
-   文件之后，抽屉照样给出链接，点开是 404——读模型不依赖文件系统，这是当时的取舍。
+   推进待设计），但收尾只删占位文件、不删 `uemaster_artifacts` 那一行——抽屉里因此会留下一行
+   「文件已丢失」（2026-11-08 之前是一条 404 链接，见下面第 3 条）。跑完要
+   `npm run seed -- --reset` 复位。
+3. **`listArtifacts` 仍然不 stat 文件**（R-P2-5 的一半还在）：它只读库。2026-11-08 之后，
+   「文件在不在」由抽屉的读模型（`getRequirementDetail` 的 `filePresent`，每行一次 stat）
+   回答，界面据此画「文件已丢失，重新生成」而不是一条死链。**看板与 MCP 还没有这一格**——
+   它们要的话得各加一次 stat，那是有意的取舍：一次看板刷新是几百行。
 4. **「最新一份」同毫秒会飘**（R-P2-4）：重做产生的多行按 `created_at desc` 取第一行，
    时间戳相同时用 uuid 兜底。要真修得给表加 `seq` 列。
 5. **没有产物历史视图**：旧行留在库里，读侧只给最新一条，界面上没有任何入口能翻到上一版。
