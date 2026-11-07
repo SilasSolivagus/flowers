@@ -9,7 +9,8 @@ import {
   updateRequirementAction,
 } from '../actions';
 import type { EntryResult, SplitFillResult } from '../actions';
-import { PLATFORMS, type PlatformKey } from '../../src/core/requirements/platforms';
+import { PLATFORMS } from '../../src/core/requirements/platforms';
+import { PRIORITIES, PRIORITY_UNSET } from '../../src/core/requirements/priority';
 
 /**
  * 新建 / 编辑需求的表单（P4-02 的录入面）。
@@ -57,6 +58,8 @@ export type RequirementFormProps = {
     };
     /** 平台（P4-08）：chips 的初值。新建时没有这一格（空数组 = 未标注）。 */
     platforms?: string[];
+    /** 优先级（P4-09）：下拉初值。null / 缺省 = 未定。 */
+    priority?: string | null;
   };
 };
 
@@ -125,6 +128,13 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
    * 落库是 `'{}'`，语义是**未标注**（不是「不改」：表单永远表达当前状态）。
    */
   const [platforms, setPlatforms] = useState<string[]>(initial?.platforms ?? []);
+  /**
+   * 优先级（P4-09）：单选，本地状态。
+   *
+   * 空串 = 「未定」，提交时服务端把它归一成 null。它不参与 chips 那套多选逻辑：
+   * 优先级是一个数（P0 比 P3 急），「勾两个」没有意义。
+   */
+  const [priority, setPriority] = useState<string>(initial?.priority ?? '');
   const togglePlatform = (key: string): void => {
     setPlatforms((was) => (was.includes(key) ? was.filter((k) => k !== key) : [...was, key]));
   };
@@ -313,6 +323,23 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
             <div className="hintline">
               {platforms.length === 0 ? '未标注：这条需求现在没有说落在哪几个端上' : ' '}
             </div>
+          </div>
+
+          {/* 优先级（P4-09）：单选。第一项是「未定」——真实数据里有 3 条没填，
+              而且新建时经常还不知道（先建再定优先级是常态）。 */}
+          <div className="fld">
+            <label htmlFor="req-priority">优先级</label>
+            <select
+              id="req-priority"
+              name="priority"
+              value={priority}
+              onChange={(event) => setPriority(event.target.value)}
+            >
+              <option value="">{PRIORITY_UNSET}</option>
+              {PRIORITIES.map((item) => (
+                <option key={item.key} value={item.key}>{item.label}</option>
+              ))}
+            </select>
           </div>
 
           {/* 「从原文拆六问」（P4-08）：**只在编辑模式**——新建时的需求没有「旧描述」。

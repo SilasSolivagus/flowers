@@ -91,7 +91,9 @@ describe('requirementFingerprint', () => {
     edgeCases: '搜不到时给空态',
     outOfScope: '不做全文检索',
     prdUrl: 'https://doc.example.com/p/1',
-    platforms: ['h5', 'android'],
+    platforms: ['h5', 'mobile'],
+    // P4-09：优先级也参与指纹（第十格）。
+    priority: 'p1',
   };
 
   it('null 与空串哈希相同（库里两种「没写」是同一件事）', () => {
@@ -108,12 +110,12 @@ describe('requirementFingerprint', () => {
     expect(a).toBe(b);
   });
 
-  it('九个字段每一个都参与（P4-08 起多了 platforms）', () => {
+  it('十个字段每一个都参与（P4-08 起多了 platforms，P4-09 起多了 priority）', () => {
     const original = requirementFingerprint(base);
     for (const field of FINGERPRINT_FIELDS) {
       const changed = field === 'platforms'
         ? requirementFingerprint({ ...base, platforms: [...base.platforms, 'pc'] })
-        : requirementFingerprint({ ...base, [field]: `${base[field]}-改` });
+        : requirementFingerprint({ ...base, [field]: `${base[field as keyof typeof base]}-改` });
       expect(changed, `改 ${field} 之后指纹必须变`).not.toBe(original);
     }
   });
@@ -136,6 +138,7 @@ describe('requirementFingerprint', () => {
       surfaces: base.surfaces,
       outcome: base.outcome,
       platforms: base.platforms,
+      priority: base.priority,
       problem: base.problem,
       context: base.context,
       title: base.title,
@@ -154,6 +157,7 @@ describe('requirementFingerprint', () => {
       out_of_scope: base.outOfScope,
       prd_url: base.prdUrl,
       platforms: base.platforms,
+      priority: base.priority,
     })).toBe(requirementFingerprint(base));
   });
 

@@ -96,6 +96,11 @@ export const SHORT_LABEL: Record<string, string> = {
    * 所以它必须在这里——否则时间轴上那一行会写成 `platforms` 而不是「平台」。
    */
   platforms: '平台',
+  /**
+   * 优先级（P4-09）。与 `platforms` 同一条理由：它是一个单值（`p0|p1|p2|p3|green`），
+   * 不是六问里的文本，但它会出现在「更新描述」那条事件的一行里，所以短名必须在这张表。
+   */
+  priority: '优先级',
   ...Object.fromEntries(DESCRIPTIVE_FIELDS.map((f) => [f.key, f.short])),
 };
 

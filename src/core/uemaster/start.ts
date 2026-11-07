@@ -304,11 +304,12 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     context: string | null; problem: string | null; outcome: string | null;
     surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;
     platforms: string[] | null;
+    priority: string | null;
   }>(sql`
     select j.id, j.stage, j.status,
            r.id as requirement_id, r.number, r.title, r.type, r.requester, r.prd_url,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
-           r.platforms
+           r.platforms, r.priority
       from uemaster_jobs j
       join requirements r on r.id = j.requirement_id
      where j.id = ${jobId}`);

@@ -419,6 +419,11 @@ async function showTool(identity: Identity, raw: unknown): Promise<string[]> {
     requester: detail.info.requester,
     owner: detail.info.owner,
     prdUrl: detail.info.prdUrl,
+    // P4-09：平台与优先级都是「这条需求是什么」的一部分，agent 决定下一步要用它们
+    // （例如 P0 的需求不该被排进下下个版本）。两个都给**键**，标签另给一格。
+    platforms: detail.info.platforms,
+    priority: detail.info.priority,
+    priorityLabel: detail.info.priorityLabel,
     skipReason: detail.info.skipReason,
     actions: detail.actions,
     artifacts: artifacts.map((a) => ({ stage: a.stage, url: a.url, at: a.at.toISOString() })),

@@ -15,7 +15,8 @@
     "start": "next start -p 3000",
     "mcp": "node dist/mcp/server.js",
     "mcp:build": "tsc -p tsconfig.mcp.json",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "migrate:flower": "tsx scripts/migrate-flower.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

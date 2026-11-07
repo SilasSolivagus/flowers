@@ -195,8 +195,9 @@ export const requirements = pgTable('requirements', {
   /**
    * 平台（P4-08）：这条需求要落在哪几个端上。
    *
-   * **为什么是 `text[]` 而不是 jsonb**：值来自一份**固定词表**（`pc` / `web` / `h5` /
-   * `ios` / `android` / `api` / `admin` / `mini`，见 `requirements/platforms.ts`），
+   * **为什么是 `text[]` 而不是 jsonb**：值来自一份**固定词表**（`web` / `mobile` /
+   * `pc` / `mini` / `backend` / `admin` / `manager` / `frontend` / `h5` / `open` /
+   * `harmony` / `tv`，见 `requirements/platforms.ts`），
    * 是一组**无序、去重、可判等**的标签——正是数组的形状。jsonb 在这里没有好处：
    * 词表固定，不需要嵌套结构；而 jsonb 会把「两个值相等吗」变成一次 JSON 归一，
    * 数组的 `=` 与 `@>` 是原生语义。代价是它不参与 `text` 的排序/比较习惯，但那两件
@@ -211,6 +212,22 @@ export const requirements = pgTable('requirements', {
    * 一次迁移。写入端（`manage.ts` / `create.ts`）按词表过滤，读侧认不出的值原样跳过。
    */
   platforms: text('platforms').array().notNull().default(sql`'{}'::text[]`),
+
+  /**
+   * 优先级（P4-09）：`p0` / `p1` / `p2` / `p3` / `green`（界面标签 P0 / P1 / P2 /
+   * P3 / 绿色通道）。词表在 `src/core/requirements/priority.ts`。
+   *
+   * **可空**，而且空值是常见的：生产库 803 条里有 3 条没有优先级，另外 178 条连
+   * 描述都没写。加一列并回填一个假值（'' 或 'p2'）等于替 3 条需求编一个优先级，
+   * 那是数据造假；null 才是「还没定」。指纹把 null 与 '' 哈希成同一个值
+   * （见 `fingerprint.ts`），所以「打开表单、什么都不改、保存」不会把产物打成
+   * 「需求已更新」。
+   *
+   * 与 `platforms` 一样，**库里没有 CHECK**：词表是服务层的一份常量，改词表不该是
+   * 一次迁移。写入端（`create.ts` / `manage.ts`）按词表校验（认不出的值**报错**，
+   * 不是静默丢掉——单选被丢掉等于把一次表态变成没表态）。
+   */
+  priority: text('priority'),
 
   /**
    * 软删除（P4-02）。

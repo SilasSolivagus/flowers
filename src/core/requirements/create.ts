@@ -8,6 +8,7 @@ import { assertCan, requireActor } from '../auth/guard.js';
 import { memberByName } from '../auth/members.js';
 import { can, type Member } from '../auth/roles.js';
 import { normalizePlatforms } from './platforms.js';
+import { PRIORITIES } from './priority.js';
 
 // required_error / invalid_type_error 显式给中文：缺字段时 zod 默认抛 'Required'，
 // 而对外错误只暴露 issues[0].message，前端会看到英文。
@@ -46,6 +47,17 @@ export const DescriptiveInput = z.object({
  */
 const PlatformsInput = z.array(z.string()).nullish();
 
+/**
+ * 优先级（P4-09）：单值、可空。
+ *
+ * 枚举写在这里（不是 `z.string()`）是刻意的：这一列是单选，写错一个键（`p4` / `高`）
+ * 不该落成「未定」——那会把一次明确的表态变成没表态。中文消息给出全部五个合法值。
+ */
+const PRIORITY_KEYS = PRIORITIES.map((item) => item.key) as [string, ...string[]];
+const PriorityInput = z.enum(PRIORITY_KEYS, {
+  message: '优先级只能是 P0 / P1 / P2 / P3 / 绿色通道',
+}).nullish();
+
 export type DescriptiveInput = z.infer<typeof DescriptiveInput>;
 
 export const CreateInput = z.object({
@@ -54,6 +66,7 @@ export const CreateInput = z.object({
   requester: z.string(NOT_BLANK('提出人不能为空')).trim().min(1, '提出人不能为空'),
   ownerMemberId: z.string(NOT_BLANK(BAD_OWNER)).uuid(BAD_OWNER).nullish(),
   platforms: PlatformsInput,
+  priority: PriorityInput,
 }).merge(DescriptiveInput);
 
 export type CreateInput = z.infer<typeof CreateInput>;
@@ -151,12 +164,13 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
     const inserted = await tx.execute<{ id: string; number: number; state: string }>(sql`
       insert into requirements
         (title, type, state, requester, owner_member_id,
-         context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms)
+         context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms, priority)
       values (
         ${input.title}, ${input.type}, 'inbox', ${input.requester}, ${ownerMemberId},
         ${blankToNull(input.context)}, ${blankToNull(input.problem)}, ${blankToNull(input.outcome)},
         ${blankToNull(input.surfaces)}, ${blankToNull(input.edgeCases)}, ${blankToNull(input.outOfScope)},
-        ${sql.param(normalizePlatforms(input.platforms))}::text[]
+        ${sql.param(normalizePlatforms(input.platforms))}::text[],
+        ${input.priority ?? null}
       )
       returning id, number, state`);
     const row = inserted.rows[0]!;

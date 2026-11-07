@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { normalizePlatforms } from './platforms.js';
+import { normalizePriority } from './priority.js';
 
 /**
  * 描述内容的指纹：**这一份产物是照着哪一版需求生成的**。
@@ -12,7 +13,8 @@ import { normalizePlatforms } from './platforms.js';
  * ## 序列化规则（对外，改它就是改契约）
  *
  * 1. 字段与顺序固定为 `FINGERPRINT_FIELDS`：title、context、problem、outcome、
- *    surfaces、edgeCases、outOfScope、prdUrl、platforms（P4-08 加的第九格）。用**数组**
+ *    surfaces、edgeCases、outOfScope、prdUrl、platforms（P4-08 加的第九格）、
+ *    priority（P4-09 加的第十格）。用**数组**
  *    而不是对象：JSON 对象的键序
  *    取决于调用方怎么拼这个对象，而数组的顺序只由这一行决定——「key 顺序无关」因此
  *    是这条实现的性质，不是巧合。
@@ -49,10 +51,10 @@ import { normalizePlatforms } from './platforms.js';
  */
 export const FINGERPRINT_FIELDS = [
   'title', 'context', 'problem', 'outcome', 'surfaces', 'edgeCases', 'outOfScope', 'prdUrl',
-  'platforms',
+  'platforms', 'priority',
 ] as const;
 
-/** 参与指纹的九个值（界面上是标题 + 六问 + PRD 链接 + 平台）。 */
+/** 参与指纹的十个值（界面上是标题 + 六问 + PRD 链接 + 平台 + 优先级）。 */
 export type FingerprintInput = {
   title: string;
   context?: string | null;
@@ -64,6 +66,14 @@ export type FingerprintInput = {
   prdUrl?: string | null;
   /** 平台（P4-08）。`null` / `[]` / `undefined` 三者同值。 */
   platforms?: readonly string[] | null;
+  /**
+   * 优先级（P4-09）。`null` / `''` / 认不出的值三者同值（= 未定）。
+   *
+   * 它参与指纹的理由与平台相同：优先级会改变材料的写法（P0 的异常处理要写全、P3 可以
+   * 留缺口），所以它是「这份材料是照着什么生成的」的一部分。加这一格让所有历史产物
+   * 变旧——**这是对的，不是 bug**（见下面 P4-08 那段，P4-09 是同一条理由）。
+   */
+  priority?: string | null;
 };
 
 /** 归一一个字段：null 与 '' 同值，去首尾空白，CRLF 折成 LF。见文件头第 2 条。 */
@@ -80,7 +90,10 @@ function normalize(value: string | null | undefined): string {
 export function requirementFingerprint(input: FingerprintInput): string {
   const parts = FINGERPRINT_FIELDS.map((field) => (field === 'platforms'
     ? normalizePlatforms(input.platforms).join(',')
-    : normalize(input[field])));
+    : field === 'priority'
+      // 优先级是单值：先折成词表键（认不出 = 未定），再当文本参与序列化。
+      ? (normalizePriority(input.priority) ?? '')
+      : normalize(input[field])));
   return createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
 }
 
@@ -103,6 +116,8 @@ export type FingerprintRow = {
   prd_url: string | null;
   /** `text[]`：pg 驱动给的是字符串数组；null 只在理论上出现（列是 not null default '{}'）。 */
   platforms: readonly string[] | null;
+  /** `text` 可空（P4-09）：`p0|p1|p2|p3|green`；null = 未定。 */
+  priority: string | null;
 };
 
 export function fingerprintOfRow(row: FingerprintRow): string {
@@ -116,6 +131,7 @@ export function fingerprintOfRow(row: FingerprintRow): string {
     outOfScope: row.out_of_scope,
     prdUrl: row.prd_url,
     platforms: row.platforms,
+    priority: row.priority,
   });
 }
 
@@ -127,7 +143,7 @@ export function fingerprintOfRow(row: FingerprintRow): string {
  * ——改它不会把产物标成旧的，而这种漏读在代码里看不出来、在界面上只表现为「明明改了
  * 却没提示」。所以列清单只写一遍，谁要算指纹就把它拼进 select。
  */
-export const FINGERPRINT_COLUMNS = 'title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url, platforms';
+export const FINGERPRINT_COLUMNS = 'title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url, platforms, priority';
 
 /**
  * 产物的新鲜度，三态。

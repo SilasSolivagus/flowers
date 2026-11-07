@@ -518,6 +518,9 @@ export async function createRequirementAction(formData: FormData): Promise<Entry
     // 平台是**多值**（P4-08）：同名 checkbox 提交上来是几行，`getAll` 取全部。
     // 一个都没勾就是空数组 = 未标注（不是「没传」：表单永远会提交这一格的存在性）。
     platforms: formData.getAll('platforms').filter((v): v is string => typeof v === 'string'),
+    // 优先级（P4-09）是单选：下拉里那个「未定」选项的值是空串，服务层把它当 null
+    // （而不是一个认不出的键——见 create.ts 的枚举）。
+    priority: field(formData, 'priority') === '' ? null : field(formData, 'priority'),
     context: field(formData, 'context'),
     problem: field(formData, 'problem'),
     outcome: field(formData, 'outcome'),
@@ -540,6 +543,8 @@ export async function updateRequirementAction(formData: FormData): Promise<Entry
     title: field(formData, 'title'),
     // 多选 chips：一个都没勾 → `[]` → 「未标注」。这与「不改」不同，后者是字段缺席。
     platforms: formData.getAll('platforms').filter((v): v is string => typeof v === 'string'),
+    // 优先级：`''` = 未定（清空）。与「不改」不同，后者是字段缺席。
+    priority: field(formData, 'priority') === '' ? null : field(formData, 'priority'),
     context: field(formData, 'context'),
     problem: field(formData, 'problem'),
     outcome: field(formData, 'outcome'),

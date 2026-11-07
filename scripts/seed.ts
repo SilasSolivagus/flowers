@@ -275,7 +275,7 @@ async function main() {
   await toQueue(queueA, '吕正豪');
   log(`${padTo(`#${queueA.number}`, 5)}${padTo('权益套餐产品结构改造', 26)}… → reviewPass（吕正豪）`);
 
-  const queueB = await create('分享页搜索补齐 H5 / APP', 'feature', '王妍', '吕品');
+  const queueB = await create('分享页搜索补齐 H5 / 移动端', 'feature', '王妍', '吕品');
   await toQueue(queueB, '吕正豪');
   /**
    * 平台（P4-08）：这条需求就是 owner 嘴里那个例子——「PAN-6 是 H5 + APP」。
@@ -284,10 +284,16 @@ async function main() {
    * 「更新描述 · 平台」的事件，于是时间轴上看得见「谁在这条需求上补了平台」。
    * 顺序放在 reviewPass 之后，因为「评估 / 评审」是在还没有平台这一格时做的——那
    * 也正是「补了平台，老材料就变旧」这条语义在种子里的样子。
+   *
+   * P4-09 换了词表：APP 那一半现在是 `mobile`（移动端）——真实数据里没有
+   * iOS / Android 之分，223 条线上需求只写「移动端」。同一句 `['h5','ios','android']`
+   * 在旧词表下是两个键、在新词表下是 `['h5','mobile']` 两个键（去重后的结果）。
    */
-  await updateRequirement(db, PM, { requirementId: queueB.id, platforms: ['h5', 'android'] });
-  log(`${padTo(`#${queueB.number}`, 5)}${padTo('分享页搜索补齐 H5 / APP', 26)}… → reviewPass（吕正豪）`
-    + ' · 平台 H5 / Android');
+  await updateRequirement(db, PM, {
+    requirementId: queueB.id, platforms: ['h5', 'mobile'], priority: 'p1',
+  });
+  log(`${padTo(`#${queueB.number}`, 5)}${padTo('分享页搜索补齐 H5 / 移动端', 26)}… → reviewPass（吕正豪）`
+    + ' · 平台 H5 / 移动端 · P1');
 
   // 7 待开发：排进下月版本，开工日还没到（等开工日 day(+7)）。时钟不会碰它。
   const ready = await create('PC 端支持打开分享页', 'feature', '房超', '房超');

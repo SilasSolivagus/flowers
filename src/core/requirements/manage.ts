@@ -6,6 +6,7 @@ import { parseRequirementId, requirePlainObject } from '../validate.js';
 import { assertCan, requirementFacts } from '../auth/guard.js';
 import { DESCRIPTIVE_FIELDS, SHORT_LABEL } from './fields.js';
 import { normalizePlatforms, platformsLabel, type PlatformKey } from './platforms.js';
+import { normalizePriority, priorityLabel, type PriorityKey } from './priority.js';
 
 /**
  * 需要的写路径只有两件事：改描述、软删除（P4-02）。
@@ -28,6 +29,7 @@ export const EDITABLE_FIELDS = [
   ...DESCRIPTIVE_FIELDS.map((field) => field.key),
   'prdUrl',
   'platforms',
+  'priority',
 ] as const;
 
 export type EditableField = (typeof EDITABLE_FIELDS)[number];
@@ -51,8 +53,12 @@ const NOT_FOUND = '需求不存在';
 /** 事件 payload 里每个值最多这么长：它是时间轴上的一行，不是一个存档。 */
 const VALUE_MAX = 80;
 
-/** 一个值在事件里的写法：超长截断、null 就是 null（不改写成空串）、平台写成一行中文。 */
-function brief(value: Value): string | null {
+/**
+ * 一个值在事件里的写法：超长截断、null 就是 null（不改写成空串）、平台写成一行中文、
+ * 优先级写成 P0 / 绿色通道（不是 `p0` / `green`：时间轴是给人读的）。
+ */
+function brief(field: EditableField, value: Value): string | null {
+  if (field === 'priority') return value === null ? null : priorityLabel(value as string);
   if (Array.isArray(value)) return platformsLabel(value);
   if (value === null) return null;
   return value.length <= VALUE_MAX ? value : `${value.slice(0, VALUE_MAX)}…`;
@@ -99,10 +105,12 @@ type CurrentRow = {
   out_of_scope: string | null;
   prd_url: string | null;
   platforms: string[] | null;
+  /** `text` 可空（P4-09）：`p0|p1|p2|p3|green`；null = 未定。 */
+  priority: string | null;
 };
 
-/** 一次改动的「旧值 / 新值」：文本字段是字符串，平台是字符串数组。 */
-type Value = string | PlatformKey[] | null;
+/** 一次改动的「旧值 / 新值」：文本字段是字符串，平台是字符串数组，优先级是键。 */
+type Value = string | PlatformKey[] | PriorityKey | null;
 
 /** camelCase 的字段名 → 这一行上的当前值。只有一处映射，读与写都用它。 */
 function storedOf(row: CurrentRow, field: EditableField): Value {
@@ -117,6 +125,8 @@ function storedOf(row: CurrentRow, field: EditableField): Value {
     case 'prdUrl': return row.prd_url;
     // 平台：库里是 `text[]`（空数组 = 未标注），读到就是数组。
     case 'platforms': return normalizePlatforms(row.platforms);
+    // 优先级：库里是 text（null = 未定）。认不出的历史值按未定处理——与指纹同口径。
+    case 'priority': return normalizePriority(row.priority);
   }
 }
 
@@ -140,6 +150,8 @@ function columnOf(field: EditableField): string {
     // 平台是 `text[]`：列名与字段名同名，但它**不在** `DESCRIPTIVE_FIELDS` 里
     // （六问是文本，平台是一组键），所以这里必须显式给。
     case 'platforms': return 'platforms';
+    // 优先级（P4-09）同为「非六问」的单值列。
+    case 'priority': return 'priority';
     default: return DESCRIPTIVE_FIELDS.find((f) => f.key === field)!.column;
   }
 }
@@ -196,6 +208,21 @@ export async function updateRequirement(
       if (value !== null) wanted[field] = value;
       continue;
     }
+    if (field === 'priority') {
+      // 优先级：`null` / `''` = 清空（未定）；认不出的值**报错**（单选不该被静默忽略）。
+      const raw = input[field];
+      if (raw === null || raw === undefined) {
+        wanted[field] = null;
+        continue;
+      }
+      if (typeof raw !== 'string') throw new AppError('invalid', '优先级必须是文本');
+      const key = normalizePriority(raw);
+      if (key === null && raw.trim() !== '') {
+        throw new AppError('invalid', '优先级只能是 P0 / P1 / P2 / P3 / 绿色通道');
+      }
+      wanted[field] = key;
+      continue;
+    }
     const label = SHORT_LABEL[field] ?? field;
     const value = toStored(input[field], label);
     if (field === 'title' && value === null) throw new AppError('invalid', '标题不能为空');
@@ -205,7 +232,7 @@ export async function updateRequirement(
   return db.transaction(async (tx) => {
     const found = await tx.execute<CurrentRow>(sql`
       select id, title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url,
-             platforms
+             platforms, priority
         from requirements
        where id = ${id} and deleted_at is null
        for update`);
@@ -253,8 +280,8 @@ export async function updateRequirement(
         fields: changes.map((change) => ({
           field: change.field,
           label: SHORT_LABEL[change.field] ?? change.field,
-          from: brief(change.from),
-          to: brief(change.to),
+          from: brief(change.field, change.from),
+          to: brief(change.field, change.to),
         })),
       },
     });

@@ -192,6 +192,10 @@ export function Drawer({
                   （标题 / 等谁），一个九列的板再塞一行标签就把「一眼看出这段在等什么」
                   挤掉了；而平台是「这条需求是什么」的分类，打开抽屉才需要它。 */}
               <dt>平台</dt><dd>{info.platformsLabel}</dd>
+              {/* 优先级（P4-09）：与平台同一层（分类属性），同一段。null 显示「未定」
+                  而不是「—」：这一列的空值是一个真实的业务状态（还没定级），
+                  而「—」在这个抽屉里表示「这条需求没有这一格」。 */}
+              <dt>优先级</dt><dd>{info.priorityLabel}</dd>
               <dt>进入本状态</dt><dd>{formatMonthDay(info.stateEnteredAt) ?? '—'}</dd>
               {info.prdUrl !== null && (
                 <>

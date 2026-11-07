@@ -125,6 +125,8 @@ export default async function BoardPage({
             description: detail.description,
             // 平台（P4-08）：编辑表单的 chips 初值。新建时是空数组（未标注）。
             platforms: detail.info.platforms,
+            // 优先级（P4-09）：单选初值。null = 未定（新建时也是 null）。
+            priority: detail.info.priority,
           }}
         />
       )}

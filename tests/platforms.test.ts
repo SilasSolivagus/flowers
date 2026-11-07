@@ -53,28 +53,38 @@ async function stored(id: string): Promise<string[]> {
 }
 
 describe('平台词表与归一', () => {
-  it('词表就是那八个端，顺序固定（写入顺序 = 指纹顺序）', () => {
-    expect(PLATFORMS.map((p) => p.key)).toEqual(
-      ['pc', 'web', 'h5', 'ios', 'android', 'api', 'admin', 'mini'],
-    );
+  it('词表就是生产数据里那十二个端，顺序固定（写入顺序 = 指纹顺序）', () => {
+    expect(PLATFORMS.map((p) => p.key)).toEqual([
+      'web', 'mobile', 'pc', 'mini', 'backend', 'admin',
+      'manager', 'frontend', 'h5', 'open', 'harmony', 'tv',
+    ]);
     expect(platformLabel('h5')).toBe('H5');
-    expect(platformLabel('admin')).toBe('运营后台');
+    expect(platformLabel('admin')).toBe('管理后台');
+    expect(platformLabel('mobile')).toBe('移动端');
     // 认不出的键原样返回：读侧不丢东西。
-    expect(platformLabel('tv')).toBe('tv');
+    expect(platformLabel('wat')).toBe('wat');
   });
 
   it('空数组的界面写法是「未标注」', () => {
     expect(platformsLabel([])).toBe(PLATFORM_UNSET);
-    expect(platformsLabel(['h5', 'android'])).toBe('H5 · Android');
+    expect(platformsLabel(['h5', 'mobile'])).toBe('H5 · 移动端');
   });
 
-  it('归一：折小写、去重、丢词表外、按词表排序', () => {
+  it('归一：折小写、旧键折新键、去重、丢词表外、按词表排序', () => {
     expect(normalizePlatforms(['android', 'H5', 'h5', 'APP', '  pc ']))
-      .toEqual(['pc', 'h5', 'android']);
+      .toEqual(['mobile', 'pc', 'h5']);
     // 非数组一律当空：「一个平台」在库里也是长度 1 的数组。
     expect(normalizePlatforms(null)).toEqual([]);
     expect(normalizePlatforms('h5')).toEqual([]);
     expect(normalizePlatforms([1, null, 'h5'])).toEqual(['h5']);
+  });
+
+  it('旧词表：ios + android 折成同一个 mobile（映射之后去重）', () => {
+    expect(normalizePlatforms(['ios', 'android'])).toEqual(['mobile']);
+    expect(normalizePlatforms(['api'])).toEqual(['backend']);
+    // 迁移与写入端共用同一张映射表：`pc / web / h5 / admin / mini` 原地不动。
+    expect(normalizePlatforms(['pc', 'web', 'h5', 'admin', 'mini']))
+      .toEqual(['web', 'pc', 'mini', 'admin', 'h5']);
   });
 });
 
@@ -84,7 +94,7 @@ describe('写入与读取（往返）', () => {
       title: 'PAN-6 分享页搜索', type: 'feature', requester: '王妍',
       platforms: ['android', 'h5'],
     });
-    expect(await stored(created.id)).toEqual(['h5', 'android']);
+    expect(await stored(created.id)).toEqual(['mobile', 'h5']);
   });
 
   it('新建时不带平台：落库是空数组（未标注），不是 null', async () => {
@@ -101,7 +111,7 @@ describe('写入与读取（往返）', () => {
       requirementId: id, platforms: ['h5', 'android'],
     });
     expect(result.changed).toEqual(['platforms']);
-    expect(await stored(id)).toEqual(['h5', 'android']);
+    expect(await stored(id)).toEqual(['mobile', 'h5']);
 
     const event = await db.execute<{ payload: string }>(sql`
       select payload from events where requirement_id = ${id} and type = 'requirement.updated'
@@ -110,7 +120,7 @@ describe('写入与读取（往返）', () => {
       fields: { field: string; label: string; from: string | null; to: string | null }[];
     };
     expect(payload.fields).toEqual([
-      { field: 'platforms', label: '平台', from: '未标注', to: 'H5 · Android' },
+      { field: 'platforms', label: '平台', from: '未标注', to: '移动端 · H5' },
     ]);
   });
 
@@ -125,7 +135,8 @@ describe('写入与读取（往返）', () => {
 
   it('词表外的键被丢掉，不会让这一格变成一个认不出的值', async () => {
     const id = await make();
-    await updateRequirement(db, '吕品', { requirementId: id, platforms: ['h5', 'app', 'TV'] });
+    // `app` / `机顶盒` 不在词表里（`TV` 现在**在**词表里，键是 tv）。
+    await updateRequirement(db, '吕品', { requirementId: id, platforms: ['h5', 'app', '机顶盒'] });
     expect(await stored(id)).toEqual(['h5']);
   });
 
@@ -160,8 +171,8 @@ describe('读模型：抽屉里有一行，看板卡上没有', () => {
     const id = await make();
     await updateRequirement(db, '吕品', { requirementId: id, platforms: ['h5', 'android'] });
     const detail = await getRequirementDetail(id);
-    expect(detail!.info.platforms).toEqual(['h5', 'android']);
-    expect(detail!.info.platformsLabel).toBe('H5 · Android');
+    expect(detail!.info.platforms).toEqual(['mobile', 'h5']);
+    expect(detail!.info.platformsLabel).toBe('移动端 · H5');
   });
 
   it('未标注就是空数组 + 「未标注」', async () => {
@@ -173,7 +184,7 @@ describe('读模型：抽屉里有一行，看板卡上没有', () => {
 
   it('看板卡**没有**平台这一格（两行放不下第三个标签，九列的板更放不下）', async () => {
     const id = await make('PAN-6 分享页搜索');
-    await updateRequirement(db, '吕品', { requirementId: id, platforms: ['h5', 'android'] });
+    await updateRequirement(db, '吕品', { requirementId: id, platforms: ['h5', 'mobile'] });
     const board = await getBoard('吕品');
     const card = board.flatMap((column) => column.cards).find((item) => item.id === id)!;
     expect(card).toBeDefined();

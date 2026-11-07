@@ -72,6 +72,11 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
   'requirement.updated': 'change',          // 描述更新
   'requirement.deleted': 'change',          // 删除
   'requirement.restored': 'change',         // 恢复
+  /**
+   * 从 Flower 迁入（P4-09）。归 `change`：这是一条历史记录，不是「现在需要谁动手」；
+   * 放在 `action` 会让迁移一落地就给所有人推 803 条通知。
+   */
+  'requirement.migrated': 'change',
   'uemaster.attached': 'change',            // 交了材料
   'prd.fetched': 'change',                  // 拉了 PRD 快照
   'release.created': 'change',              // 发版窗口新建

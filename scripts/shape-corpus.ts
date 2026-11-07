@@ -626,12 +626,14 @@ type RequirementRow = {
   out_of_scope: string | null;
   /** 平台（P4-08）：与 `compose.ts` 同一条理由——形状对齐，它参与指纹。 */
   platforms: string[] | null;
+  /** 优先级（P4-09）：同上，形状对齐（提示词与指纹都读它）。 */
+  priority: string | null;
 };
 
 async function loadRequirements(numbers: number[]): Promise<RequirementRow[]> {
   const res = await db.execute<RequirementRow>(sql`
     select id, number, title, type, requester, prd_url,
-           context, problem, outcome, surfaces, edge_cases, out_of_scope
+           context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms, priority
       from requirements
      where number = any(${sql.raw(`array[${numbers.join(',')}]`)})
      order by number`);

@@ -7,6 +7,7 @@ import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
 import { normalizePlatforms, platformsLabel } from '../requirements/platforms.js';
+import { normalizePriority, priorityLabel } from '../requirements/priority.js';
 import {
   daysSinceShanghai, formatMonthDay, percentBetween, shanghaiToday,
 } from './board.js';
@@ -160,8 +161,17 @@ export type Detail = {
      * **看板卡上没有它**——那张卡只有两行，一个九列的板放不下第三个标签。
      */
     platforms: string[];
-    /** 上面那组键的一行中文（`H5 · Android`），空数组时是「未标注」。 */
+    /** 上面那组键的一行中文（`H5 · 移动端`），空数组时是「未标注」。 */
     platformsLabel: string;
+    /**
+     * 优先级（P4-09）：`p0|p1|p2|p3|green`，null = 未定。
+     *
+     * 放在 `info` 的理由与平台相同：它是「这条需求是什么」的分类属性，
+     * 不是六个结构化问题之一。看板卡上也没有它（两行放不下第三个标签）。
+     */
+    priority: string | null;
+    /** 上面那个键的中文（`P0` / `绿色通道`），null 时是「未定」。 */
+    priorityLabel: string;
     skipReason: string | null;
     stateLabel: string;
     stateEnteredAt: string;
@@ -383,6 +393,15 @@ function describe(type: string, payload: Payload): { label: string; note: string
       return { label: '搁置', note: text(payload, 'reason') };
     case 'requirement.restored':
       return { label: '恢复，回到收集', note: null };
+    case 'requirement.migrated': {
+      // 从 Flower 搬进来的行（P4-09）。时间轴上要说清「这是迁入的」，并给出原编号——
+      // 想回旧系统对账时，PAN 编号对不上，原编号是唯一的锚。
+      const number = payload.sourceNumber;
+      return {
+        label: '从 Flower 迁入',
+        note: typeof number === 'number' ? `Flower #${number}` : null,
+      };
+    }
     case 'uemaster.attached': {
       // 时间轴上不能出现 `uemaster.attached` 这种库里的串（见上面这条函数的用意）。
       // 三种 stage 各有各的中文名；认不出的 stage 退回「提交材料」，仍然不显示原始类型。
@@ -489,6 +508,8 @@ type Row = {
   out_of_scope: string | null;
   /** `text[]`（P4-08）：pg 驱动给的是字符串数组；空数组 = 未标注。 */
   platforms: string[] | null;
+  /** `text` 可空（P4-09）：`p0|p1|p2|p3|green`；null = 未定。 */
+  priority: string | null;
 };
 
 type ReviewRow = {
@@ -524,7 +545,7 @@ export async function getRequirementDetail(
     select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
-           r.platforms,
+           r.platforms, r.priority,
            r.owner_member_id, m.name as owner, m.line as owner_line,
            rel.id as release_id, rel.name as release_name,
            rel.window_start, rel.release_date
@@ -632,6 +653,8 @@ export async function getRequirementDetail(
       prdUrl: row.prd_url,
       platforms: normalizePlatforms(row.platforms),
       platformsLabel: platformsLabel(normalizePlatforms(row.platforms)),
+      priority: normalizePriority(row.priority),
+      priorityLabel: priorityLabel(normalizePriority(row.priority)),
       skipReason: row.skip_reason,
       stateLabel: STATE_LABEL[row.state],
       stateEnteredAt: row.state_entered_at,
