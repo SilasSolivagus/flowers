@@ -44,6 +44,7 @@ import { listRunningJobs, type JobProgress } from '../src/core/read/progress';
 import {
   currentMemberRow, latestNoticeSeq, markRead, notifyView, type NotifyView,
 } from '../src/core/read/notify';
+import { exportQueue } from '../src/core/export/queue';
 import { attachFromForm } from './attach-form';
 import { changePassword } from './password-change';
 import { transferOwnedRequirements } from './member-transfer';
@@ -949,4 +950,32 @@ export async function lookupWecomAction(): Promise<
     return { ok: true, name: result.name, cached: result.cached };
   }
   return { ok: false, message: result.message };
+}
+
+/**
+ * 导出：看板「待排期」列头那个入口（P1b）。
+ *
+ * **权限：登录即可。** 这里没有 `can(...)`，不是漏了——导出的是这个人打开看板就能
+ * 看到的同一批行（待排期那一列），没有任何一条比看板更细的数据。真正的门是
+ * `currentMember()`：它会抛 `no_member` / 会话过期，也就是「这个人现在根本没登录」。
+ * 造一个 `export` 能力只会多一条永远为真的判断，还会让人以为这里挡着什么。
+ *
+ * 返回**比 `ActionResult` 多两个字段**：成功时要把链接与行数带回去（界面要显示
+ * 「已生成」+ 那个链接），失败时要把 `code` 带回去（`no_rows` 与「企微未授权」
+ * 在界面上的处理不一样）。所以不用 `run()` 那个只回 `{ok:true}` 的外壳。
+ *
+ * 不 revalidate：导出不改任何一条需求，看板不需要重画。失败照旧不吞——
+ * `exportQueue` 的 message 是中文且带原始原因，原样交给按钮。
+ */
+export type ExportQueueResult =
+  | { ok: true; url: string; rows: number; docid: string }
+  | { ok: false; code: string; message: string };
+
+export async function exportQueueAction(): Promise<ExportQueueResult> {
+  // 这一句就是权限：没有会话 / 没有任何成员时它会抛 AppError，页面因此不会导出
+  // 一份「没人认领」的表。
+  await currentMember();
+  const outcome = await exportQueue({ database: db });
+  if (!outcome.ok) return { ok: false, code: outcome.code, message: outcome.message };
+  return { ok: true, url: outcome.url, rows: outcome.rows, docid: outcome.docid };
 }

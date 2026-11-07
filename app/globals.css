@@ -137,6 +137,22 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
               border-radius:99px;background:color-mix(in srgb, var(--c-text-1) 6%, transparent);
               color:var(--c-text-3);font:600 11px/1 var(--f-num);font-variant-numeric:tabular-nums}
 .colbody{display:flex;flex-direction:column;gap:8px;padding:8px 8px 8px;overflow-y:auto;flex:1;min-height:0}
+/* 新增：待排期列头的「导出」（P1b）。它出现在 `.colhd` 里、计数 pill 之前，
+   所以列宽（220px）就是它的全部预算：按钮做成文字链接大小，成功之后同一个位置
+   变成「已生成 · N 行」的链接——不新增一行，列头的高度因此不变。
+   失败原因必须完整可见（它是排查的唯一线索），所以那一行 `flex:1 1 100%` 换行，
+   并且允许长串乱码折行：`.colhd` 的 `flex-wrap` 只在这一格上起作用，
+   没有导出按钮的列仍是原来的一行。 */
+.colhd .hdexport{display:flex;flex-wrap:wrap;align-items:center;gap:4px;min-width:0}
+.colhd .hdexport button{padding:0;border:0;background:none;cursor:pointer;
+                        color:var(--c-accent);font:500 var(--t-caption) var(--f-sans)}
+.colhd .hdexport button:hover{text-decoration:underline}
+.colhd .hdexport button:disabled{color:var(--c-text-3);cursor:default;text-decoration:none}
+.colhd .hdexport .hdlink{color:var(--c-accent);font:500 var(--t-caption) var(--f-sans);
+                         text-decoration:none;white-space:nowrap}
+.colhd .hdexport a.hdlink:hover{text-decoration:underline}
+.colhd .hdexport .hdfail{flex:1 1 100%;color:var(--c-danger);font:400 var(--t-caption) var(--f-sans);
+                         overflow-wrap:anywhere}
 
 .card{display:flex;flex-direction:column;gap:6px;padding:10px;border:0.5px solid var(--c-line-strong);
       border-radius:10px;background:var(--c-surface);cursor:pointer;
