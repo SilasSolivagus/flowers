@@ -14,10 +14,6 @@ import {
   type MirrorResult,
 } from '../codemirror/mirror.js';
 import { repoShape, type RepoShape } from '../codemirror/route.js';
-import {
-  type CodeIndex, type LocateChoice, type Probe,
-} from '../codemirror/code-index.js';
-import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
 import { ensureHistory, readHistory, type HistoryRow } from '../locate/history-store.js';
 import { locateFromHistory } from '../locate/history.js';
 import { ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE } from '../locate/copy.js';
@@ -85,9 +81,6 @@ export const INSPECT_REPOS = ['123pan-pc', '123pan-uni-app'] as const;
 /** 阶段一的关键词个数。8 个 × 2 仓 = 16 次 `git grep`，是「够用且不慢」的平衡点。 */
 export const MAX_KEYWORDS = 8;
 
-/** 每个仓的候选文件上限。12 个文件足够让模型看清结构，又不至于把提示词撑爆。 */
-export const CANDIDATE_CAP = 12;
-
 /** 结论条数上限。走查材料是给人过评审用的，12 条已经比一次会议能消化的多。 */
 export const FINDING_CAP = 12;
 
@@ -127,9 +120,6 @@ const STRUCTURE_MAX_TOKENS = 32_000;   // 推理模型先花思考：2200 时代
 
 /** 深读那一段：结论复核 + 每个节点一屏 `wt-*` HTML（实测 8 个节点约 7.8k 字符）。 */
 const VERIFY_MAX_TOKENS = 64_000;      // 实测这一格思考 50,554 字：预算要给答案留出同等空间
-
-/** 阶段一 grep 每次最多回多少条命中：只用来排序，命中 200 条和 2000 条没有区别。 */
-const GREP_MAX = 60;
 
 /** 送进提示词的形状表上限（`repoShape` 自己的上限更大，这里再收一次是为了提示词体积）。 */
 const SHAPE_PROMPT_CAPS = { pages: 80, api: 40, components: 40 } as const;
@@ -172,15 +162,11 @@ export type RepoBaseline = {
   files: number;
   tree: Set<string>;
   shape: RepoShape;
-  candidates: Array<{ path: string; hits: number }>;
   /**
-   * 候选是怎么来的：`history` = 合并历史（走查唯一的路，`hits` 是聚合权重），
-   * `index` = 静态索引（`hits` 是评分），`grep` = 旧的关键词命中（`hits` 是命中的
-   * 关键词个数）。提示词里那句话要说清是哪一种。
+   * 候选（`hits` 是聚合权重）。**只由合并历史给出**：旧 grep/索引路由那两套
+   * 「`source` / `probes`」随 Task 8 一起删了，需要时从 git 历史取。
    */
-  source?: 'history' | 'index' | 'grep';
-  /** 索引给出的候选（带 `why` / `route`）。下一步的 next probes 提示词读它。 */
-  probes?: Probe[];
+  candidates: Array<{ path: string; hits: number }>;
   /**
    * 走查的定位结论（只来自合并历史）。**三种情况并不得**：`absent` 是「没读到代码」，
    * `none` 才是「看到了、没有」。`candidates` 里那一栏是候选，不是结论。
@@ -204,8 +190,14 @@ export type InspectStats = {
   keywords: string[];
   /** 每个仓的候选数（`absent` / `none` 都是 0）。 */
   candidates: Record<string, number>;
-  /** 每个仓的定位结论（`absent` / `none` / `candidates`）——材料里那三句话的来源。 */
-  locate: Record<string, LocateResult['kind']>;
+  /**
+   * 每个仓的定位结论（`absent` / `none` / `candidates`）——材料里那三句话的来源。
+   *
+   * `unknown` 不是第四种结论，而是「这个仓压根没走过定位」。它必须**显式**存在：
+   * 早先这里写的是 `?? 'absent'`，于是「没有结论」被静默记成了「没读到代码」——
+   * 正是本次改造明令禁止的那种合并（失败被渲染成一个看起来正常的取值）。
+   */
+  locate: Record<string, LocateResult['kind'] | 'unknown'>;
   flows: number;
   findings: number;
   verdicts: Record<Verdict, number>;
@@ -273,8 +265,10 @@ type RequirementRow = {
  * | 读到、没有相似合并 | `none` | `NOT_FOUND_HEADLINE` + 与研发确认真实现状 |
  * | 读到、有相似合并 | `candidates`（一律 `low`） | `CANDIDATES_LINE(items)` |
  *
- * 旧的 grep / 索引路径（`grepCandidates` / `baselineOf` / `locateAcross`）**保留**：
- * 评审那条路（`review.ts`）还在用它，回归时也要能一键切回来。保留的是代码，不是兜底。
+ * 旧的 grep / 索引候选路径（`grepCandidates` / `baselineOf` / `rankCandidates` /
+ * `candidateLines`）**已删**（Task 8 修一轮）：它们已无调用者，而留着它们最大的害处
+ * 是让「走查还有一条备用路」这句话看起来成立。需要旧实现时从 git 历史取（`6d1206c`
+ * 及之前）。评审那条路（`review.ts`）走的是自己的 `locateAcross` + 索引，不经过这四个。
  */
 export type LocateDeps = {
   ensureHistory: (db: Db, repo: string) => Promise<MirrorResult<{ inserted: number; total: number; ms: number }>>;
@@ -306,8 +300,6 @@ export type InspectDeps = {
   lsTree: (repoId: string) => Promise<MirrorResult<string[]>>;
   grep: typeof grep;
   repoShape: (repoId: string) => Promise<MirrorResult<RepoShape>>;
-  /** 静态索引（P4-10）：有就按路由/名字/导入/符号定位，没有就退回 grep。 */
-  repoIndex: (db: Db, repo: string, sha: string) => Promise<MirrorResult<BuiltIndex>>;
   /**
    * 走查的定位读口（合并历史）。注入它**只**为了造出「镜像读不到」——真镜像造不出
    * ssh 超时，而这条链要钉的恰恰是失败时不许假装。
@@ -330,7 +322,6 @@ const LIVE: InspectDeps = {
   grep,
   repoShape,
   show,
-  repoIndex: (db, repo, sha) => repoIndex(db, repo, sha),
   locateDeps: LIVE_LOCATE_DEPS,
   attach: attachArtifact,
 };
@@ -442,47 +433,13 @@ export function keywordsFrom(markdown: string, title: string, max = MAX_KEYWORDS
   return picked;
 }
 
-// ─── 阶段一：候选文件集 ──────────────────────────────────────────────────────
-
 /**
- * 文档类文件：在一个「这是哪一屏、哪个组件」的问题上，它们不是答案。
+ * 一个仓库的结构基线：HEAD、树、形状（**不含候选、不含索引**）。
  *
- * 镜像的噪音过滤（`mirror.ts` 的 `isNoisePath`）只剔打包产物与二进制——`.md` 是源码级
- * 文本，剔不得。但一份 575 文件的 React 仓里，`AGENTS.md`、`docs/plans/*.md`、
- * `.cursor/rules/*.mdc` 会因为「返回」「文件」这种通用词命中四五个关键词，然后凭命中
- * 数把 `search-entrance.vue` 挤出候选集。所以**降权而不是剔除**：真有一份 PRD 只改文档
- * 时，它们仍然排得进来。
+ * 索引曾经也在这里（旧 grep/索引路由要用），Task 8 之后走查不读它了，于是连同
+ * `repoIndex` 这一格一起删掉：留着它每遇到一个新 sha 就白建一次索引（0.5–1 s），
+ * 而没人读。评审那条路（`review.ts`）有自己的读口，不受影响。
  */
-const DOC_EXT = /\.(?:md|mdc|mdx|txt|rst)$/i;
-
-/** 一个关键词命中多少个文件：越少见的关键词，命中它越能说明问题。 */
-export function rankCandidates(
-  perKeyword: Array<{ word: string; files: Set<string> }>,
-  cap = CANDIDATE_CAP,
-): Array<{ path: string; hits: number }> {
-  const hits = new Map<string, number>();
-  const score = new Map<string, number>();
-  for (const { files } of perKeyword) {
-    // 文档频率：这个词在这一个仓里命中了几个文件。`当前`（41 个文件）与
-    // `上一级`（2 个文件）对「哪个文件讲的就是这件事」的说服力完全不同。
-    const df = Math.max(files.size, 1);
-    for (const path of files) {
-      hits.set(path, (hits.get(path) ?? 0) + 1);
-      score.set(path, (score.get(path) ?? 0) + 1 / df + 0.05);
-    }
-  }
-  return [...hits.keys()]
-    .map((path) => ({
-      path,
-      hits: hits.get(path) ?? 0,
-      score: (score.get(path) ?? 0) * (DOC_EXT.test(path) ? 0.25 : 1),
-    }))
-    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.path.localeCompare(b.path))
-    .slice(0, cap)
-    .map(({ path, hits: n }) => ({ path, hits: n }));
-}
-
-/** 一个仓库的结构基线：HEAD、树、形状、索引（**不含候选**）。 */
 type RepoStructure = {
   id: string;
   sha: string;
@@ -491,12 +448,10 @@ type RepoStructure = {
   files: number;
   tree: Set<string>;
   shape: RepoShape;
-  /** 静态索引；读不到就是 `null`（那一仓退回 grep）。 */
-  index: CodeIndex | null;
 };
 
-/** 一个仓库的结构：HEAD、树、形状、索引。失败一律是那句中文。 */
-async function structureOf(repoId: string, deps: InspectDeps, db: Db): Promise<RepoStructure> {
+/** 一个仓库的结构：HEAD、树、形状。失败一律是那句中文。 */
+async function structureOf(repoId: string, deps: InspectDeps): Promise<RepoStructure> {
   const [headRes, treeRes, shapeRes] = await Promise.all([
     deps.head(repoId),
     deps.lsTree(repoId),
@@ -510,7 +465,6 @@ async function structureOf(repoId: string, deps: InspectDeps, db: Db): Promise<R
   if (!treeRes.ok) throw mirrorFailure(treeRes.code, repoId, treeRes.message);
   if (!shapeRes.ok) throw mirrorFailure(shapeRes.code, repoId, shapeRes.message);
 
-  const indexed = await deps.repoIndex(db, repoId, headRes.data.sha);
   return {
     id: repoId,
     sha: headRes.data.sha,
@@ -519,68 +473,7 @@ async function structureOf(repoId: string, deps: InspectDeps, db: Db): Promise<R
     files: treeRes.data.length,
     tree: new Set(treeRes.data),
     shape: shapeRes.data,
-    index: indexed.ok ? indexed.data.index : null,
   };
-}
-
-/**
- * 旧的 grep 候选集（§3.5 的降级路径，**原样保留**）。
- *
- * 关键词逐个 grep；同一仓的几次搜索并发发出去（互不依赖），失败**不吞**：
- * 一次 grep 失败说明镜像读不通，那时给部分结果只会让人以为「代码里没有」。
- */
-async function grepCandidates(
-  struct: RepoStructure,
-  keywords: string[],
-  deps: InspectDeps,
-): Promise<Array<{ path: string; hits: number }>> {
-  const results = await Promise.all(
-    keywords.map((word) => deps.grep(struct.id, word, { max: GREP_MAX })),
-  );
-  const perKeyword: Array<{ word: string; files: Set<string> }> = [];
-  const tree = [...struct.tree];
-  for (let i = 0; i < results.length; i += 1) {
-    const result = results[i]!;
-    if (!result.ok) throw mirrorFailure(result.code, struct.id, result.message);
-    const files = new Set<string>();
-    for (const hit of result.data) {
-      if (!tree.includes(hit.path)) continue; // 双保险：grep 与 ls-tree 必须同一份 HEAD
-      files.add(hit.path);
-    }
-    perKeyword.push({ word: keywords[i] ?? '', files });
-  }
-  return rankCandidates(perKeyword);
-}
-
-/**
- * 一个仓的基线：结构 + 候选（**旧的 grep/索引路由，走查已不再调用**）。
- *
- * 候选来自哪条路由由**调用方**决定（`locateAcross` 的结果）：`index` → 直接用
- * `Probe[]`；`grep` → 跑上面那段旧算法。判断放不到这里的原因见 `locateAcross` 的
- * 注释——「这份 PRD 有没有具体线索」是整个需求的事，不是单个仓的事。
- *
- * 保留的理由与边界见 `LocateDeps` 的注释：这段代码留给评审那条路（`review.ts`）与
- * 回归，**不是**走查的兜底。返回值刻意不带 `locate` / `locateText`——那两个字段只能
- * 由合并历史给出，从这里填就等于让旧路径冒充一次定位。
- */
-async function baselineOf(
-  struct: RepoStructure,
-  choice: LocateChoice,
-  keywords: string[],
-  deps: InspectDeps,
-): Promise<Omit<RepoBaseline, 'locate' | 'locateText'>> {
-  // `index` 不进 `RepoBaseline`：它是「怎么定位的」，不是「定位到了什么」。
-  const { index: _index, ...base } = struct;
-  if (choice.source === 'index') {
-    return {
-      ...base,
-      candidates: choice.probes.map((probe) => ({ path: probe.path, hits: probe.score })),
-      source: 'index',
-      probes: choice.probes,
-    };
-  }
-  const candidates = await grepCandidates(struct, keywords, deps);
-  return { ...base, candidates, source: 'grep', probes: [] };
 }
 
 /** 异常 → 一句话。`why` 会被原样渲染进材料，所以不能给出 `[object Object]`。 */
@@ -661,23 +554,63 @@ export function renderLocate(result: LocateResult): string {
  * 后面跟着一份清单的自相矛盾。
  */
 function baselineFrom(struct: RepoStructure, locate: LocateResult): RepoBaseline {
-  // `index` 不进 `RepoBaseline`：它是「怎么定位的」，不是「定位到了什么」。
-  const { index: _index, ...base } = struct;
   return {
-    ...base,
+    ...struct,
     candidates: locate.kind === 'candidates'
       ? locate.items.map((item) => ({ path: item.path, hits: item.score }))
       : [],
-    source: 'history',
-    probes: [],
     locate,
     locateText: renderLocate(locate),
   };
 }
 
-/** 检索式：标题 + 关键词。中文原样进去，不翻成英文标识符（理由见 `history.ts`）。 */
-function locateQuery(title: string, keywords: readonly string[]): string {
-  return [title, ...keywords].join(' ').trim();
+/**
+ * 走查的检索式：**需求标题 + 描述原文**，一个字都不改写。
+ *
+ * 为什么不用 `keywordsFrom` 抽出来的关键词（Task 8 修一轮时改的）：那套词是为
+ * 「把中文桥到英文路径」设计的（`搜索` → `search`），而历史检索是**中文对中文**比
+ * 字面重合——桥用不上，多出来的词反而在给宽合并加分。实测（`scripts/bench-locate.ts`
+ * 的口径）：拿关键词拼检索式时，`上传下载按量限速风控` 的前六名全是
+ * `app/browser-window/*`（同一次宽合并），真答案 `src/services/download-risk-modal.ts`
+ * 一个都进不来；换成标题 + 描述原文，词少了，宽合并那点「沾边」的权重也掉下去了。
+ *
+ * 「描述」取需求自己的那段原文（`descriptionOf`：迁移过来的老需求整段自由文本就在
+ * `context` 里，新需求的六问合起来就是它的描述）。没有描述就只传标题——**不要**拿
+ * 关键词补位，那正好退回到这条注释要挡掉的那种拼法。
+ */
+export function locateQuery(title: string, description: string | null): string {
+  const text = description?.trim() ?? '';
+  return text === '' ? title.trim() : `${title.trim()}\n\n${text}`;
+}
+
+/**
+ * 需求自己的那段描述原文：六问按顺序拼起来，空的跳过。
+ *
+ * 为什么从这里取（而不是 `requirements.description`——那一列不存在）：
+ * `scripts/migrate-flower.ts` 把 Flower 那段自由文本落进 **`context`**（「谁在什么
+ * 情况下用」），所以迁移过来的 803 条里「整条需求就一句话」的那句话就在这一格；新
+ * 需求的描述则是六问合起来。两代数据的区别不该由检索层关心，所以这里一次拼好。
+ *
+ * 拼接顺序固定、不加任何标题前缀：`locateFromHistory` 是按字面重合打分的，加「描述：」
+ * 这种标签只会给每个词都添一条噪音。
+ */
+export function descriptionOf(row: {
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
+}): string {
+  return [row.context, row.problem, row.outcome, row.surfaces, row.edge_cases, row.out_of_scope]
+    .map((part) => part?.trim() ?? '')
+    .filter((part) => part !== '')
+    .join('\n');
+}
+
+/** 一次走查的检索式（从需求行取，两处拼法只此一份）。 */
+function queryOfRequirement(req: RequirementRow): string {
+  return locateQuery(req.title, descriptionOf(req));
 }
 
 /**
@@ -774,25 +707,6 @@ function shapeLines(repo: RepoBaseline): string[] {
     ...cut(shape.pages, SHAPE_PROMPT_CAPS.pages).map((p) => `      ${p}`),
     '    接口：',
     ...cut(shape.api, SHAPE_PROMPT_CAPS.api).map((p) => `      ${p}`),
-  ];
-}
-
-/**
- * 旧候选清单的渲染（**走查已不再用**）：`hits` 的口径跟着来源走。
- *
- * 保留是因为 `baselineOf` 那条路由留着（见 `LocateDeps` 的注释）。走查材料里的那一段
- * 现在由 `locateLines` 渲染——它是三种结论，不是一份候选清单。
- */
-function candidateLines(repo: Omit<RepoBaseline, 'locate' | 'locateText'>): string[] {
-  if (repo.candidates.length === 0) return [`  [${repo.id}] 关键词一个都没命中（这份 PRD 的用词与代码里的标识符对不上）`];
-  // 两种来源的 `hits` 不是同一个量：索引给的是评分，grep 给的是命中关键词个数。
-  // 标签必须跟着来源走——把评分写成「关键词命中」是一句假话，模型会照它推理。
-  const note = (hits: number): string => (repo.source === 'index'
-    ? `评分 ${hits}`
-    : `${hits} 个关键词命中`);
-  return [
-    `  [${repo.id}]`,
-    ...repo.candidates.map((c) => `    ${c.path}  （${note(c.hits)}）`),
   ];
 }
 
@@ -1440,15 +1354,15 @@ export async function inspect(
   // ── 阶段一：关键词 → 两个仓的候选集 ──
   const keywords = keywordsFrom(prd.markdown, req.title);
   stats.keywords = keywords;
-  // 结构先全部拿到手，**再**一起定位：`locateAcross` 要看到所有仓才判得了「这份 PRD
-  // 到底有没有具体线索」（见 code-index.ts 的注释：每仓各判各的会把 pc 的噪音排到
-  // search.vue 前面）。
+  // 结构先全部拿到手，**再**一起定位：两个仓的 HEAD / 树要一对一对地进同一次走查
+  // （标题里那两个 sha 就是它俩），而证据核对按仓索引（`TreeIndex`）——某一步失败时
+  // 能一眼看出是哪一个仓没读到，比在模型调用之后才发现少了一个仓好。
   const structures: RepoStructure[] = [];
-  for (const repoId of INSPECT_REPOS) structures.push(await structureOf(repoId, full, db));
+  for (const repoId of INSPECT_REPOS) structures.push(await structureOf(repoId, full));
   // 定位只走合并历史（裁决见 `LocateDeps` 的注释）：上面的结构表还在（HEAD / 树 / 形状
   // 是核对证据的基础），但候选只来自历史。**不**在 `none` 时退回结构候选——那会把刚拿掉
   // 的噪音装回去，还会让「没读到」看起来像「定位过了」。
-  const query = locateQuery(req.title, keywords);
+  const query = queryOfRequirement(req);
   const repos: RepoBaseline[] = [];
   for (const struct of structures) {
     const result = await locateForInspect(db, {
@@ -1461,7 +1375,10 @@ export async function inspect(
   }
   stats.repos = repos.map((repo) => ({ id: repo.id, sha: repo.sha, date: repo.date, files: repo.files }));
   stats.candidates = Object.fromEntries(repos.map((repo) => [repo.id, repo.candidates.length]));
-  stats.locate = Object.fromEntries(repos.map((repo) => [repo.id, repo.locate?.kind ?? 'absent']));
+  stats.locate = Object.fromEntries(repos.map((repo) => [
+    repo.id,
+    repo.locate === undefined ? 'unknown' : repo.locate.kind,
+  ]));
 
   // 两个仓都「没读到」：这一轮没有任何现状判断可做。在**第一次模型调用之前**停下，
   // 把材料里那句话原样当错误抛出去——跑到模型那一步只会得到一份编出来的走查。

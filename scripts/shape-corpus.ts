@@ -51,7 +51,7 @@ import {
 } from '../src/core/uemaster/compose.js';
 import {
   DEEP_READ_BUDGET, DEEP_READ_FILE_MAX, FLOW_CAP, FLOW_MIN, INSPECT_REPOS,
-  StructureSchema, VerifySchema, citationsOf, keywordsFrom, prdVersionOf, rankCandidates,
+  StructureSchema, VerifySchema, citationsOf, keywordsFrom, prdVersionOf,
   readStructure, readVerify, structurePrompt, validateStructure, verifyPrompt,
   type Finding, type PrdBaseline, type RepoBaseline, type Structure, type TreeIndex,
 } from '../src/core/uemaster/inspect.js';
@@ -641,6 +641,37 @@ async function loadRequirements(numbers: number[]): Promise<RequirementRow[]> {
 }
 
 /**
+ * 关键词命中 → 候选排序（**本脚本自带的一份**）。
+ *
+ * `inspect.ts` 里那份（`rankCandidates`）随旧的 grep 路由一起删了（Task 8）：走查的
+ * 候选只来自合并历史，而这份语料脚本仍在造「按关键词 grep 出来的候选」——那是它自己
+ * 的夹具，不该再借应用里的函数。口径照旧：命中次数 + 文档频率补位，文档类降权。
+ */
+function rankByKeywordHits(
+  perKeyword: Array<{ word: string; files: Set<string> }>,
+  cap = 12,
+): Array<{ path: string; hits: number }> {
+  const hits = new Map<string, number>();
+  const score = new Map<string, number>();
+  for (const { files } of perKeyword) {
+    const df = Math.max(files.size, 1);
+    for (const path of files) {
+      hits.set(path, (hits.get(path) ?? 0) + 1);
+      score.set(path, (score.get(path) ?? 0) + 1 / df + 0.05);
+    }
+  }
+  return [...hits.keys()]
+    .map((path) => ({
+      path,
+      hits: hits.get(path) ?? 0,
+      score: (score.get(path) ?? 0) * (/\.(?:md|mdc|mdx|txt|rst)$/i.test(path) ? 0.25 : 1),
+    }))
+    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.path.localeCompare(b.path))
+    .slice(0, cap)
+    .map(({ path, hits: n }) => ({ path, hits: n }));
+}
+
+/**
  * 一个仓库的基线（与 `inspect.ts` 的 `baselineOf` 同一套读口与同一套排序）。
  *
  * 复制而不是导出：`baselineOf` 是私有的、且它 throw `AppError`；这里要的是
@@ -669,7 +700,7 @@ async function baselineOf(repoId: string, keywords: string[]): Promise<RepoBasel
     files: treeRes.data.length,
     tree: new Set(treeRes.data),
     shape: shapeRes.data,
-    candidates: rankCandidates(perKeyword),
+    candidates: rankByKeywordHits(perKeyword),
   };
 }
 

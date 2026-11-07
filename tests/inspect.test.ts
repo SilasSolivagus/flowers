@@ -104,6 +104,7 @@ const UNI_FILES: Record<string, string> = {
     '</template>',
   ].join('\n'),
   'pages/share/search.vue': '<template><view>全链接搜索 最近搜索</view></template>\n',
+  'pages/invoice/apply.vue': '<template><view>发票报销申请</view></template>\n',
 };
 
 type Fixture = { root: string; repos: Record<string, string>; shas: Record<string, string> };
@@ -116,17 +117,26 @@ type Fixture = { root: string; repos: Record<string, string>; shas: Record<strin
  * 那时定位只能给出 `none`，走查的候选段就永远测不到了。合并消息与改动文件都照真实
  * 场景写：消息是第一段（`出自 11-07「…」` 就取它），改动落在功能路径上。
  */
-const MERGES: Record<string, { message: string; file: string; add: string }> = {
-  '123pan-pc': {
+const MERGES: Record<string, Array<{ message: string; file: string; add: string }>> = {
+  '123pan-pc': [{
     message: 'feat: 分享页搜索补齐 / 工具栏搜索入口改成输入框',
     file: 'src/pages/Share/Share.tsx',
     add: '  // 合并带进来的改动：工具栏的搜索入口（走查要能追到这次合并）',
-  },
-  '123pan-uni-app': {
-    message: 'feat: 分享页搜索补齐 / 全链接搜索默认范围',
-    file: 'pages/share/index.vue',
-    add: '  <!-- 合并带进来的改动：分享页搜索入口 -->',
-  },
+  }],
+  '123pan-uni-app': [
+    {
+      message: 'feat: 分享页搜索补齐 / 全链接搜索默认范围',
+      file: 'pages/share/index.vue',
+      add: '  <!-- 合并带进来的改动：分享页搜索入口 -->',
+    },
+    {
+      // 第二条合并在标题上**完全不重合**：它只跟需求描述（六问里的 `context`）对得上，
+      // 用来钉「传进历史检索的是描述原文」——把描述换回关键词表，这条用例就红。
+      message: 'feat: 发票报销审批流对接 / 开票信息校验',
+      file: 'pages/invoice/apply.vue',
+      add: '  <!-- 合并带进来的改动：报销申请页 -->',
+    },
+  ],
 };
 
 async function buildFixture(): Promise<Fixture> {
@@ -151,15 +161,19 @@ async function buildFixture(): Promise<Fixture> {
     await gitCmd(work, ['add', '-A']);
     await gitCmd(work, ['commit', '-q', '-m', `fixture: ${id}`]);
 
-    // 一次真的功能合并（`--no-ff`：走查读的是 `rev-list --merges`）——定位的输入就是它。
-    const merge = MERGES[id]!;
-    await gitCmd(work, ['checkout', '-q', '-b', `feat-${id}-search`]);
-    const changed = path.join(work, merge.file);
-    await writeFile(changed, `${await readFile(changed, 'utf8')}${merge.add}\n`, 'utf8');
-    await gitCmd(work, ['add', '-A']);
-    await gitCmd(work, ['commit', '-q', '-m', merge.message]);
-    await gitCmd(work, ['checkout', '-q', '-']);
-    await gitCmd(work, ['merge', '-q', '--no-ff', '-m', merge.message, `feat-${id}-search`]);
+    // 真的功能合并（`--no-ff`：走查读的是 `rev-list --merges`）——定位的输入就是它。
+    const merges = MERGES[id] ?? [];
+    for (let i = 0; i < merges.length; i += 1) {
+      const merge = merges[i]!;
+      const branch = `feat-${id}-${i}`;
+      await gitCmd(work, ['checkout', '-q', '-b', branch]);
+      const changed = path.join(work, merge.file);
+      await writeFile(changed, `${await readFile(changed, 'utf8')}${merge.add}\n`, 'utf8');
+      await gitCmd(work, ['add', '-A']);
+      await gitCmd(work, ['commit', '-q', '-m', merge.message]);
+      await gitCmd(work, ['checkout', '-q', '-']);
+      await gitCmd(work, ['merge', '-q', '--no-ff', '-m', merge.message, branch]);
+    }
 
     await gitCmd(root, ['init', '--bare', '-q', bare]);
     await gitCmd(bare, ['symbolic-ref', 'HEAD', 'refs/heads/master']);
@@ -338,11 +352,15 @@ async function snapshotOf(requirementId: string, markdown = PRD_TEXT): Promise<S
 }
 
 /** 一条带 PRD 的需求（走查要有 prd_url：`runJob` 的前置判断）。 */
-async function inspectable(markdown = PRD_TEXT) {
+async function inspectable(
+  markdown = PRD_TEXT,
+  extra: { title?: string; context?: string } = {},
+) {
   const created = await createRequirement(db, '吕品', {
-    title: '分享页搜索补齐 H5 / APP',
+    title: extra.title ?? '分享页搜索补齐 H5 / APP',
     type: 'feature',
     requester: '孙建宏',
+    ...(extra.context === undefined ? {} : { context: extra.context }),
   });
   await db.execute(sql`
     update requirements
@@ -604,6 +622,56 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(out.url).toContain('/uemaster/PAN-');
     expect(await artifactCount()).toBe(1);
   }, 60_000);
+
+  it('检索式是「标题 + 描述原文」：标题对不上、描述对得上时，候选靠描述找到', async () => {
+    // 标题与两条合并都不重合；只有描述（六问里的 `context`）提到发票报销审批流。
+    const r = await inspectable(PRD_TEXT, { title: '老系统的一个小需求', context: '发票报销审批流要能对接' });
+    fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+    await inspect(db, '吕品', { requirementId: r.id }, deps());
+
+    // 描述原文进了检索式 → 那条只在描述里出现的合并被找到
+    expect(fake.prompts[0]).toContain('`pages/invoice/apply.vue` ← 出自');
+    // 这条标题与「分享页搜索」那两次合并一个字都不重合：它们这次不该进候选，
+    // 进来的路径只能是描述找到的——反过来说明「找到的靠描述，不是靠标题或关键词表」。
+    expect(fake.prompts[0]).not.toContain('`src/pages/Share/Share.tsx` ←');
+    expect(fake.prompts[0]).not.toContain('`pages/share/index.vue` ←');
+  }, 30_000);
+
+  it('只有一个仓读不到：不抛、材料里写明那一仓没读到、另一仓候选照常，账记两行', async () => {
+    const r = await inspectable();
+    fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+    const blindRepo = '123pan-uni-app';
+    const out = await inspect(db, '吕品', { requirementId: r.id }, deps({
+      locateDeps: {
+        ...LIVE_LOCATE_DEPS,
+        // 按仓决定成败：这才是真实运维里最常见的样子（一个镜像挂了、另一个还好）
+        ensureHistory: async (_db, repo) => (repo === blindRepo
+          ? { ok: false, code: 'git_failed', message: '读合并历史失败：镜像 ssh 连接超时' }
+          : { ok: true, data: { inserted: 0, total: 1, ms: 1 } }),
+        readHistory: async (_db, repo) => (repo === blindRepo ? [] : []),
+      },
+    }));
+
+    // 1) 不抛：还有一个仓能判，材料照出
+    expect(out.url).toContain('/uemaster/PAN-');
+    expect(fake.calls()).toBe(2);
+
+    // 2) 提示词里那一仓写着「没读到」（ABSENT_LINE 原文），并带着原因
+    const prompt = fake.prompts[0]!;
+    expect(prompt).toContain('代码没读到，这一轮不含任何现状判断。');
+    expect(prompt).toContain('镜像 ssh 连接超时');
+    expect(prompt).toContain(blindRepo);
+    // 3) 另一条禁令也在：不许给读不到的仓下判断
+    expect(prompt).toContain('不要给这些仓下任何现状判断');
+
+    // 4) 账记两行：读不到的那仓 absent，另一仓是该仓自己的结论（这里历史为空 → none）
+    const rows = await db.execute<{ outcome: string; stage: string }>(sql`
+      select outcome, stage from locate_runs order by created_at`);
+    expect(rows.rows.map((row) => row.outcome).sort()).toEqual(['absent', 'none']);
+    for (const row of rows.rows) expect(row.stage).toBe('inspect');
+  }, 30_000);
 
   it('两个仓的历史都读不到 → 明确失败，不假装「代码里没有」，也不花一次模型调用', async () => {
     const r = await inspectable();
