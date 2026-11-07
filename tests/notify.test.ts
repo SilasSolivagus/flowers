@@ -39,10 +39,21 @@ afterAll(async () => {
   await pool.end();
 });
 
-function member(name: string): { id: string; name: string; role: string; line: string | null } {
+/**
+ * 内存里那一行 + **摊平的档位**。
+ *
+ * P4-07 起 `notify_prefs` 默认是 `key`（只收「要动手 + 有结果」），而这一组用例钉的
+ * 是「谁该收到」——观众谓词，不是档位。所以显式写 `site: all`：类过滤不参与，
+ * 每条断言的差异只可能来自观众规则。档位本身的九格在 tests/notify-channels.test.ts。
+ */
+const ALL_LEVELS = '{"site":"all","wecom":"off"}';
+
+function member(name: string): {
+  id: string; name: string; role: string; line: string | null; notifyPrefs: string;
+} {
   const found = people.find((p) => p.name === name);
   if (!found) throw new Error(`种子里没有成员 ${name}`);
-  return found;
+  return { ...found, notifyPrefs: ALL_LEVELS };
 }
 
 const PM = '吕品';

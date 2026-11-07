@@ -34,11 +34,13 @@ export const requirementsNumberSeq = pgSequence('requirements_number_seq');
  *   一律按「登录失败」处理，绝不当成「空密码可以登」。格式见
  *   `src/core/auth/password.ts`（scrypt + 每人一个盐，参数写进串里，改参数不炸老行）。
  * - `password_updated_at`：改口令的时刻。它只有一个用途——审计（谁什么时候重置过）。
- * - `notify_prefs`：JSON 文本。null 与 `{"inherit":true}` 同义 = 按角色默认。显式
- *   写 `{"inherit":false,"changed":false}` 才是「我不要这类通知」。为什么是文本而不是
- *   几张布尔列：口味是会长的（这一轮只有「全部变动 / 拒绝搁置」两类），而每加一格
- *   就改一次表结构；解释权在 `src/core/read/notify.ts`，改口径不用改表（与
- *   `app_settings.value` 同一条理由）。
+ * - `notify_prefs`：JSON 文本，P4-07 起是**两个频道 × 三档**：
+ *   `{"site":"key","wecom":"key"}`（站点铃铛 / 企微推送 × 全部 / 只关键 / 关）。
+ *   null 与缺字段都等于 `key`（只收「需要我动手」与「有结果」两类），这是产品定的
+ *   默认档：默认给 `all` 会把超管按 48 条的量淹掉。为什么是文本而不是几张枚举列：
+ *   口味会长（P4-03 只有两个布尔，这一轮是三档 × 两频道），每加一格就改一次表结构；
+ *   解释权在 `src/core/notify/prefs.ts`，改口径不用改表（与 `app_settings.value`
+ *   同一条理由）。校验在写入端（服务层），读侧对认不出的值一律回落 `key`。
  * - `deactivated_at`：**停用，不硬删**。`requirements.owner_member_id`、
  *   `review_assignments.reviewer_member_id`、`mcp_tokens.member_id` 三处外键都指着
  *   这一行，硬删要么被拦住，要么把「谁在哪天承诺了什么」一起删掉——那正是这个系统
@@ -54,8 +56,30 @@ export const members = pgTable('members', {
   line: text('line'),
   passwordHash: text('password_hash'),
   passwordUpdatedAt: timestamp('password_updated_at', { withTimezone: true }),
-  /** JSON 文本，见文件头。null = 默认。 */
+  /**
+   * JSON 文本，P4-07 起是**两个频道 × 三档**：`{"site":"key","wecom":"key"}`。
+   *
+   * 解释权在 `src/core/notify/prefs.ts`：读不懂 / 缺字段 / 老形状一律回落到 `key`，
+   * 不抛——一个读不懂的设置不该让通知静默消失。
+   */
   notifyPrefs: text('notify_prefs'),
+  /**
+   * 企微通讯录里的 userid（P4-07）。null = 还没对上账号。
+   *
+   * 为什么要缓存：`wecom-cli contact users search` 是一次网络往返，而推送每次都要
+   * 知道「发给谁」。名字→userid 只解析一次，之后只读这一列。
+   * 企微的显示名带部门前缀（`产品经理-吕品`），所以匹配规则在
+   * `src/core/notify/wecom.ts` 里，不在这一列上。
+   */
+  wecomUserId: text('wecom_userid'),
+  /**
+   * 上一次尝试解析 userid 的时刻（成功留档，失败也留档）。
+   *
+   * 失败也要写：它是「别再在这一个人身上反复问」的唯一依据，也是排查时说得出
+   * 「上次试是什么时候」的那一格。失败原因不进这一列（它会过期），进
+   * `notify_deliveries.error`。
+   */
+  wecomLookupAt: timestamp('wecom_lookup_at', { withTimezone: true }),
   deactivatedAt: timestamp('deactivated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -313,6 +337,52 @@ export const notificationReads = pgTable('notification_reads', {
   lastSeq: integer('last_seq').notNull().default(0),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * 一次推送的痕迹（P4-07）。
+ *
+ * 为什么必须有这张表：企微的发送接口**不幂等**——我们这边没有一个「这条已经发过」的
+ * 记号，一次重启、一次 tick 重叠、一次网络超时后重跑，都会让人收到第二条一模一样的
+ * 推送。唯一索引 `(member_id, event_seq, channel)` 就是那个记号：同一格事件对同一个人
+ * 在同一个频道上只可能有一行，于是「发过没有」永远只有一个答案。
+ *
+ * 三个状态各有分工：
+ * - `sent`：CLI 回了 `success: true`。**只有它可以阻止下一次发送**——`sent_at` 是
+ *   事后审计（什么时候发出去的），判定只看 `status`。
+ * - `failed`：试过了，没成（CLI 报错 / 超时 / 没装 / 没授权）。`error` 是原文（已脱敏），
+ *   下一次 tick 会**就地重试**（更新这一行，不是插第二行）。
+ * - `skipped`：**没有尝试发送**，因为这一步缺前置（企微账号还没对上）。它与 `failed`
+ *   分开，是为了让「我们没试」与「试了没成」在报告里不是一个数字。
+ *
+ * `event_seq` 不建外键：事件流是账本，投递是账本上的批注；批注不该反过来约束账本
+ * （也免得 events 的 truncate/归档把审计行一起带走）。`member_id` 有外键，因为一行
+ * 投递离开人就不可解释。
+ */
+export const notifyDeliveries = pgTable('notify_deliveries', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  memberId: uuid('member_id').notNull().references(() => members.id),
+  /** `events.seq`：投递的对象是**一条事件**，不是「这条需求」。 */
+  eventSeq: integer('event_seq').notNull(),
+  channel: text('channel').notNull(),        // site | wecom
+  status: text('status').notNull(),          // sent | failed | skipped
+  /** 失败 / 跳过的那句话（已脱敏）。sent 时为 null。 */
+  error: text('error'),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  channelCheck: check(
+    'notify_deliveries_channel_check',
+    sql`${t.channel} in ('site', 'wecom')`,
+  ),
+  statusCheck: check(
+    'notify_deliveries_status_check',
+    sql`${t.status} in ('sent', 'failed', 'skipped')`,
+  ),
+  /** 不重复发送的唯一保证。名字就是它的职责，报错里会带着它出现。 */
+  onceUnique: uniqueIndex('notify_deliveries_once_unique')
+    .on(t.memberId, t.eventSeq, t.channel),
+  byMember: index('notify_deliveries_member').on(t.memberId, t.status),
+}));
 
 /**
  * 键值设置（P2.7 起）。

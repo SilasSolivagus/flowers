@@ -26,7 +26,8 @@ import { createRequirement } from '../src/core/requirements/create';
 import { reassignOwner } from '../src/core/requirements/assign';
 import { claimRequirement } from '../src/core/requirements/claim';
 import {
-  createMember, deactivateMember, resetPassword, saveNotifyPrefs, updateMember,
+  createMember, deactivateMember, lookupWecomAccount, resetPassword,
+  saveNotifyChannels, updateMember,
 } from '../src/core/members/manage';
 import { logout } from '../src/core/auth/login';
 import {
@@ -793,17 +794,19 @@ export async function transferOwnedAction(formData: FormData): Promise<
   }
 }
 
-/** 通知口味（设置 · 我）。自己改自己；超管可以替别人改。 */
-export async function saveNotifyPrefsAction(formData: FormData): Promise<ActionResult> {
+/**
+ * 通知频道档位（设置 · 我）。自己改自己；超管可以替别人改。
+ *
+ * 一次提交一格（`channel` + `level`）：设置页是两个独立的行，一行一个分段控件。
+ * 校验在 `saveNotifyChannels` 里（三档之外的值在那里被拒），这一层只搬字段。
+ */
+export async function saveNotifyChannelAction(formData: FormData): Promise<ActionResult> {
   const actor = await currentMember();
+  const channel = field(formData, 'channel');
   try {
-    await saveNotifyPrefs(db, actor, {
+    await saveNotifyChannels(db, actor, {
       memberId: field(formData, 'memberId') === '' ? null : field(formData, 'memberId'),
-      prefs: {
-        inherit: field(formData, 'inherit') !== 'false',
-        changed: field(formData, 'changed') !== 'false',
-        rejected: field(formData, 'rejected') !== 'false',
-      },
+      [channel]: field(formData, 'level'),
     });
     revalidatePath('/settings');
     return { ok: true };
@@ -811,4 +814,26 @@ export async function saveNotifyPrefsAction(formData: FormData): Promise<ActionR
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
   }
+}
+
+/**
+ * 「查一下」：把这个人的名字对到企微通讯录（设置 · 我那一行）。
+ *
+ * 返回的是**匹配到的那个显示名**或失败原因：用户点这个按钮要的答案是「到底对上了
+ * 谁」——只回一个「成功」等于什么都没说。企微那边名字带部门前缀
+ * （`产品经理-吕品`），所以显示名里出现前缀是正常的，不是错误。
+ *
+ * 失败不 revalidate：库里没有任何变化（只有 `wecom_lookup_at` 落了时刻），
+ * 失败原因由这一句返回给按钮显示。
+ */
+export async function lookupWecomAction(): Promise<
+  { ok: true; name: string; cached: boolean } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  const result = await lookupWecomAccount(db, actor, {});
+  if (result.ok) {
+    revalidatePath('/settings');
+    return { ok: true, name: result.name, cached: result.cached };
+  }
+  return { ok: false, message: result.message };
 }

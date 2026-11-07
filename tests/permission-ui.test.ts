@@ -16,7 +16,7 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import {
-  createMember, deactivateMember, saveNotifyPrefs,
+  createMember, deactivateMember, saveNotifyChannels,
 } from '../src/core/members/manage.js';
 import { changePassword } from '../app/password-change.js';
 import { transferOwnedRequirements } from '../app/member-transfer.js';
@@ -58,10 +58,13 @@ const PM = '吕品';
 const PM_OTHER = '李嘉';
 const PM_BUSINESS = '王妍';
 
+/** 观众谓词用 `site: all` 摊平（P4-07 的档位在 notify-channels.test.ts 里单独测）。 */
+const ALL_LEVELS = '{"site":"all","wecom":"off"}';
+
 function memberOf(name: string): Member {
   const found = people.find((person) => person.name === name);
   if (found === undefined) throw new Error(`名册里没有 ${name}`);
-  return { ...found, deactivatedAt: null };
+  return { ...found, deactivatedAt: null, notifyPrefs: ALL_LEVELS };
 }
 
 function idOf(name: string): string {
@@ -315,17 +318,30 @@ describe('通知偏好：关掉 = 扇出停，关系不动', () => {
       'requirement.review_requested',
     ]);
 
-    await saveNotifyPrefs(db, FEATURE_LEAD, {
-      prefs: { inherit: false, changed: false, rejected: false },
-    });
+    await saveNotifyChannels(db, FEATURE_LEAD, { site: 'off' });
 
+    // P4-07：`off` 是**真的空**——连派单给他的那一条也不出现（铃铛整个藏起来）。
+    // 旧的「关掉扇出、保留派单」是 P4-03 的两开关模型；三档模型里没有这一格：
+    // 「我不看」就是不看，替人挑一条留下来是另一种不听话。
     // 读侧重新取一行（`memberOf` 是内存里那份，notify_prefs 是库里的）。
     const stored = await db.execute<{ notify_prefs: string | null }>(sql`
       select notify_prefs from members where id = ${lead.id}`);
     const after = await notificationsFor(db, {
       ...lead, notifyPrefs: stored.rows[0]?.notify_prefs ?? null,
     });
-    expect(after.map((notice) => notice.type)).toEqual(['requirement.review_requested']);
+    expect(after).toEqual([]);
+
+    // 切到 key：要动手的（review_requested）与有结果的都在，一般变动（created）不在。
+    await saveNotifyChannels(db, FEATURE_LEAD, { site: 'key' });
+    const keyed = await db.execute<{ notify_prefs: string | null }>(sql`
+      select notify_prefs from members where id = ${lead.id}`);
+    const relaxed = await notificationsFor(db, {
+      ...lead, notifyPrefs: keyed.rows[0]?.notify_prefs ?? null,
+    });
+    expect(relaxed.map((notice) => notice.type).sort()).toEqual([
+      'requirement.evaluated',
+      'requirement.review_requested',
+    ]);
   });
 });
 

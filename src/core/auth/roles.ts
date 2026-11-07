@@ -110,8 +110,15 @@ export type Member = {
   role: string;
   line?: string | null;
   deactivatedAt?: Date | null;
-  /** 通知口味的原始 JSON 文本（`{"inherit":true}` 或显式布尔）。null = 默认。 */
+  /** 通知口味的原始 JSON 文本（`{"site":"key","wecom":"key"}`）。null = 默认。 */
   notifyPrefs?: string | null;
+  /**
+   * 企微通讯录里的 userid（P4-07）。null / 缺省 = 还没对上账号。
+   *
+   * 可选的理由与上面两列相同：权限结论不该依赖调用方多填了一个字段。只有推送与
+   * 设置页的「查一下」会读它。
+   */
+  wecomUserId?: string | null;
 };
 
 /**

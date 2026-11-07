@@ -57,5 +57,7 @@ export async function resetDb() {
   await db.execute(sql`drop trigger if exists flowers_test_boom on events`);
   // notification_reads（P4-03）跟着 members 一起清：它没有自己的生命周期，
   // 主键就是 member_id，留着只会让下一次种子的同 id 成员继承别人的已读位置。
-  await db.execute(sql`truncate requirements, review_assignments, prd_snapshots, events, releases, notification_reads, members, app_settings restart identity cascade`);
+  // notify_deliveries（P4-07）同理：它是「发给某个人的某条事件」的记号，人与事件
+  // 都重置了，记号必须一起清——否则下一轮的用例会看到上一轮留下的「已发送」。
+  await db.execute(sql`truncate requirements, review_assignments, prd_snapshots, events, releases, notification_reads, notify_deliveries, members, app_settings restart identity cascade`);
 }

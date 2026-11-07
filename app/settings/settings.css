@@ -107,3 +107,15 @@
 .pw-once{display:flex;align-items:center;gap:12px;min-width:0}
 .pw-once b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-3);flex:0 0 auto}
 .pw-once code{font:400 var(--t-body-s) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:4px 8px;border-radius:var(--r-xs);user-select:all;overflow-wrap:anywhere}
+
+/* 通知频道那两行的三档分段控件（P4-07）。
+   三格连成一条，不是三个独立开关：它是一个「选哪个」的问题，选中态靠
+   `[aria-pressed="true"]`（组件里只有这一个状态，没有 class 切换）。
+   数值全走 tokens——颜色、圆角、字号各只在这里出现一次。 */
+.seg{display:inline-flex;border:1px solid var(--c-line-strong);border-radius:var(--r-sm);overflow:hidden;background:var(--c-surface-2)}
+.seg-b{height:26px;padding:0 10px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);border-right:1px solid var(--c-line)}
+.seg-b:last-child{border-right:0}
+.seg-b:hover{color:var(--c-text-1)}
+.seg-b[aria-pressed="true"]{background:var(--c-accent);color:var(--c-on-accent);font-weight:600}
+.seg-b:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
+.seg-b[disabled]{opacity:.45;cursor:not-allowed}

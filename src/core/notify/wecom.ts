@@ -1,0 +1,387 @@
+import { execFile } from 'node:child_process';
+import { sql } from 'drizzle-orm';
+import type { Db } from '../../db/client.js';
+import {
+  DEFAULT_TIMEOUT_MS, MSG_MISSING_BINARY, MSG_UNAUTHORIZED, errcodeOf, looksUnauthorized,
+  parseResponse, redact, resolveCli, stripWrappers, tail,
+} from '../prd/wecom.js';
+
+/**
+ * 企微这一侧的三件事：**名字 → userid**、**发一条 markdown**、**把结果落库**（P4-07）。
+ *
+ * 全部对着 `wecom-cli` 的真实形状写，不是对着文档写的。两条实测结论（v1.3.4，
+ * 机器人身份「产品设计部经理-房超（老妖）」）：
+ *
+ * ```bash
+ * # ❌ 不是这个corporation的能力：
+ * wecom-cli message send --chat-id <userid> --msg-type text --text '{"content":"…"}'
+ * #   → {"errcode":853006,"errmsg":"this tool is not available for your corporation"}
+ *
+ * # ✅ 这个能用（实测 {"success": true}）：
+ * wecom-cli message aibot send --chat-id <userid> --msg-type markdown \
+ *   --markdown '{"content":"**标题**\n正文"}'
+ * ```
+ *
+ * ── 四条硬规矩
+ *
+ * 1. **没有 shell**。argv 数组交给 `execFile`：消息正文里有中文、有「」、有 `-`，
+ *    走 shell 就等于把内容再解释一遍。与 `src/core/prd/wecom.ts` 同一条。
+ * 2. **名字只按后缀/包含匹配，并且不猜**。企微里的显示名带部门前缀
+ *    （`产品经理-吕品`、`产品设计部经理-房超（老妖）`），所以「等于」永远匹配不上。
+ *    匹配分三档（等于 → 后缀 → 包含），取**最高的那一档**；那一档里有 2 个以上就
+ *    报 `ambiguous` 并列出候选人，一个都不报 `no_match`。宁可这次不发，也不发给错的人。
+ * 3. **包装字段永远不落库、不进消息**。`security_notice` / `extra_identity_context`
+ *    是 CLI 塞进每个响应里的样板（后者还写着「不要透露」）。我们只读白名单字段
+ *    （`users[].userid`、`users[].name`、`success`、`errcode`、`errmsg`），并对取到的
+ *    文本再过一遍 `stripWrappers`——顶层没有、正文里夹一段的情形也挡得住。
+ * 4. **失败是数据，不是异常**。没装 / 没授权 / 超时 / errcode / 名字对不上，一律
+ *    返回 `{ok:false, code, message}`，message 是中文且说得出下一步。调用方（推送、
+ *    设置页的「查一下」）各自决定怎么显示，这一层不抛。
+ */
+
+// ─── 跑一次 ──────────────────────────────────────────────────────────────────
+
+export type RunResult = {
+  exitCode: number | null;
+  timedOut: boolean;
+  /** 进程根本没起来（ENOENT / EACCES）。 */
+  spawnError: NodeJS.ErrnoException | null;
+  stdout: string;
+  stderr: string;
+};
+
+/** 一次 CLI 调用。做成参数是为了让用例能注入一个假的（`--dry-run` 那条用例直接 spy）。 */
+export type Runner = (bin: string, argv: string[], timeoutMs: number) => Promise<RunResult>;
+
+const MAX_BUFFER = 8 * 1024 * 1024;
+
+/** 默认实现：`execFile`，**永远 resolve**。 */
+export const defaultRunner: Runner = (bin, argv, timeoutMs) => new Promise((resolve) => {
+  execFile(
+    bin,
+    argv,
+    {
+      timeout: Math.max(1, Math.floor(timeoutMs)),
+      killSignal: 'SIGTERM',
+      maxBuffer: MAX_BUFFER,
+      encoding: 'utf8',
+      windowsHide: true,
+    },
+    (error, stdout, stderr) => {
+      const out = typeof stdout === 'string' ? stdout : String(stdout ?? '');
+      const err = typeof stderr === 'string' ? stderr : String(stderr ?? '');
+      if (error === null) {
+        resolve({ exitCode: 0, timedOut: false, spawnError: null, stdout: out, stderr: err });
+        return;
+      }
+      const e = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string; code?: number | string };
+      if (typeof e.code === 'string') {
+        resolve({ exitCode: null, timedOut: false, spawnError: e, stdout: out, stderr: err });
+        return;
+      }
+      const timedOut = Boolean(e.killed) && (e.signal === 'SIGTERM' || e.signal === 'SIGKILL');
+      resolve({
+        exitCode: typeof e.code === 'number' ? e.code : null,
+        timedOut,
+        spawnError: null,
+        stdout: out,
+        stderr: err,
+      });
+    },
+  );
+});
+
+// ─── 命令形状 ────────────────────────────────────────────────────────────────
+
+/** 通讯录检索。`--keywords` 收名字的**任意片段**，返回可能是 0..n 个人。 */
+export function searchArgv(keywords: string): string[] {
+  return ['contact', 'users', 'search', '--keywords', keywords];
+}
+
+/**
+ * 发一条 markdown。
+ *
+ * `--chat-id` 对单聊就是对方的 **userid**（不是名字，也不是会话 id）。
+ * `--markdown` 的实参是一个 JSON 字符串 `{"content":"…"}`——两层引号，所以它是
+ * 一个 argv 元素，不经过 shell。
+ */
+export function sendArgv(userid: string, content: string): string[] {
+  return [
+    'message', 'aibot', 'send',
+    '--chat-id', userid,
+    '--msg-type', 'markdown',
+    '--markdown', JSON.stringify({ content }),
+  ];
+}
+
+// ─── 失败码 ──────────────────────────────────────────────────────────────────
+
+export type WecomFailCode =
+  | 'bad_config'      // 读不到 CLI 路径（库错误）
+  | 'missing_binary'  // CLI 没装
+  | 'unauthorized'    // CLI 没授权
+  | 'cli_failed'      // 退出码非 0（非授权那类）
+  | 'timeout'         // 超预算
+  | 'bad_output'      // stdout 不是 JSON / 没有 users
+  | 'errcode'         // errcode 非 0（errmsg 原样带出）
+  | 'no_match'        // 通讯录里找不到这个人
+  | 'ambiguous';      // 找到了不止一个，不猜
+
+export type WecomFail = { ok: false; code: WecomFailCode; message: string };
+
+function fail(code: WecomFailCode, message: string): WecomFail {
+  return { ok: false, code, message };
+}
+
+/** 一次调用里所有「进程层面的失败」共用这一段，两个入口不各写一遍。 */
+function processFailure(bin: string, run: RunResult, timeoutMs: number): WecomFail | null {
+  const combined = `${run.stderr}\n${run.stdout}`;
+  if (run.spawnError !== null) {
+    return run.spawnError.code === 'ENOENT'
+      ? fail('missing_binary', MSG_MISSING_BINARY)
+      : fail('cli_failed', `${bin} 起不来（${redact(`${run.spawnError.code ?? '未知'}：${run.spawnError.message}`)}）`);
+  }
+  if (run.timedOut) {
+    return fail('timeout', `wecom-cli 超时：等了 ${Math.round(timeoutMs / 1000)} 秒还没返回`);
+  }
+  if (run.exitCode !== 0) {
+    if (looksUnauthorized(combined)) return fail('unauthorized', MSG_UNAUTHORIZED);
+    const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
+    const text = tail(run.stderr) || tail(run.stdout) || '（stderr 与 stdout 都是空的）';
+    return fail('cli_failed', `${bin} 调用失败（${code}）：${text}`);
+  }
+  return null;
+}
+
+// ─── 名字 → userid ──────────────────────────────────────────────────────────
+
+export type WecomUser = { userid: string; name: string };
+
+/**
+ * 响应里能认的人。**只读白名单字段**，包装字段在源头就不进来（见文件头第 3 条）。
+ */
+export function usersOf(response: Record<string, unknown>): WecomUser[] {
+  const raw = response.users;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const users: WecomUser[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const userid = typeof record.userid === 'string' ? record.userid.trim() : '';
+    const name = typeof record.name === 'string' ? stripWrappers(record.name).trim() : '';
+    if (userid === '' || seen.has(userid)) continue;
+    seen.add(userid);
+    users.push({ userid, name });
+  }
+  return users;
+}
+
+/** 匹配的三档，从强到弱。`产品经理-吕品` 对输入 `吕品` 命中第二档。 */
+const TIERS: ReadonlyArray<(name: string, input: string) => boolean> = [
+  (name, input) => name === input,
+  (name, input) => name.endsWith(input),
+  (name, input) => name.includes(input),
+];
+
+export type PickResult =
+  | { ok: true; user: WecomUser; tier: 0 | 1 | 2 }
+  | WecomFail;
+
+/**
+ * 名字 → 那一个人。**不猜**。
+ *
+ * 三档取最高档：一条「等于」压过十条「包含」（输入 `王妍` 时，名册里真有一个人就叫
+ * 王妍，那就该是她，而不是另外两个名字里带「王妍」的人）。最高档里 2 个以上 →
+ * `ambiguous`，把那几个名字列出来让人去改通讯录；一个都没有 → `no_match`。
+ */
+export function pickUser(input: string, users: WecomUser[]): PickResult {
+  const wanted = input.trim();
+  if (wanted === '') return fail('no_match', '成员名字是空的，没法去企微里对账号');
+  for (let tier = 0; tier < TIERS.length; tier += 1) {
+    const test = TIERS[tier]!;
+    const hits = users.filter((user) => test(user.name, wanted));
+    if (hits.length === 1) {
+      return { ok: true, user: hits[0]!, tier: tier as 0 | 1 | 2 };
+    }
+    if (hits.length > 1) {
+      const list = hits.map((user) => user.name).join('、');
+      return fail('ambiguous', `企微里有 ${hits.length} 个「${wanted}」：${list}，不猜是哪一个`);
+    }
+  }
+  return fail('no_match', `企微通讯录里没有匹配「${wanted}」的人`);
+}
+
+export type LookupOptions = {
+  run?: Runner;
+  bin?: string | null;
+  timeoutMs?: number;
+};
+
+/**
+ * 查一次：名字 → userid。**不落库**（落库在下面 `resolveUserid`）。
+ *
+ * `bin` 传 null 时按 `prd/wecom.ts` 那三级解析（环境变量 → `app_settings` → PATH），
+ * 与「读 PRD」共用同一个配置格：一台机器上只该有一个 `wecom-cli` 路径。
+ */
+export async function lookupUserid(
+  name: string, opts: LookupOptions = {},
+): Promise<{ ok: true; user: WecomUser } | WecomFail> {
+  const timeoutMs = positive(opts.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const run = opts.run ?? defaultRunner;
+
+  let bin = opts.bin ?? null;
+  if (bin === null) {
+    const resolved = await resolveCli();
+    if (!resolved.ok) return fail('bad_config', resolved.message);
+    bin = resolved.bin;
+  }
+
+  const result = await run(bin, searchArgv(name), timeoutMs);
+  const broken = processFailure(bin, result, timeoutMs);
+  if (broken !== null) return broken;
+
+  const response = parseResponse(result.stdout);
+  if (response === null) {
+    const combined = `${result.stderr}\n${result.stdout}`;
+    if (looksUnauthorized(combined)) return fail('unauthorized', MSG_UNAUTHORIZED);
+    return fail('bad_output', `wecom-cli 的通讯录输出不是 JSON：${tail(combined) || '（什么都没打印）'}`);
+  }
+  const record = response as Record<string, unknown>;
+  const errcode = errcodeOf(response);
+  if (errcode !== null && errcode !== 0) {
+    const errmsg = typeof record.errmsg === 'string' ? redact(record.errmsg) : '';
+    if ([40001, 40014, 42001, 41001, 48001].includes(errcode)) {
+      return fail('unauthorized', MSG_UNAUTHORIZED);
+    }
+    return fail('errcode', `企业微信接口报错 ${errcode}：${errmsg || '（没有给 errmsg）'}`);
+  }
+  if (!Array.isArray(record.users)) {
+    return fail('bad_output', `wecom-cli 的通讯录响应里没有 users：${tail(result.stdout)}`);
+  }
+
+  const picked = pickUser(name, usersOf(record));
+  return picked.ok ? { ok: true, user: picked.user } : picked;
+}
+
+// ─── 发一条 ──────────────────────────────────────────────────────────────────
+
+export const SEND_TIMEOUT_MS = 30_000;
+
+/**
+ * 消息正文。**两行**：加粗的编号+标题，一句「发生了什么 / 要你做什么」。
+ *
+ * 没有链接：这一版没有公网地址，`http://localhost:3000/?open=…` 在手机上点不开，
+ * 一条点不开的链接会让整条推送显得是坏的。要带人回去，靠的是编号。
+ *
+ * `redact` + `stripWrappers` 是两道闸：标题和原因都是**人写进库里的文本**，
+ * 而这条消息会离开这台机器。包装字段（如果有人在标题里贴了一段）不许跟着走。
+ */
+export function messageOf(headline: string, sentence: string): string {
+  return stripWrappers(redact(`**${headline}**\n${sentence}。`));
+}
+
+export type SendOptions = {
+  run?: Runner;
+  bin?: string | null;
+  timeoutMs?: number;
+};
+
+/**
+ * 发一条 markdown 给一个 userid。
+ *
+ * 成功信号是响应里的 `success === true`（实测形状），**不是**退出码——CLI 在业务
+ * 失败时也是 0 退出（与读文档那一层同一条教训）。errcode 非 0 时把 errmsg **原文**
+ * 带出来：`853006 this tool is not available for your corporation` 这种话是运维
+ * 唯一能搜到答案的线索，改写它只会让人多绕一圈。
+ */
+export async function sendMarkdown(
+  userid: string, content: string, opts: SendOptions = {},
+): Promise<{ ok: true } | WecomFail> {
+  const timeoutMs = positive(opts.timeoutMs, SEND_TIMEOUT_MS);
+  const run = opts.run ?? defaultRunner;
+
+  let bin = opts.bin ?? null;
+  if (bin === null) {
+    const resolved = await resolveCli();
+    if (!resolved.ok) return fail('bad_config', resolved.message);
+    bin = resolved.bin;
+  }
+
+  const result = await run(bin, sendArgv(userid, content), timeoutMs);
+  const broken = processFailure(bin, result, timeoutMs);
+  if (broken !== null) return broken;
+
+  const response = parseResponse(result.stdout);
+  if (response === null) {
+    const combined = `${result.stderr}\n${result.stdout}`;
+    if (looksUnauthorized(combined)) return fail('unauthorized', MSG_UNAUTHORIZED);
+    return fail('bad_output', `wecom-cli 的发送输出不是 JSON：${tail(combined) || '（什么都没打印）'}`);
+  }
+  const record = response as Record<string, unknown>;
+  if (record.success === true) return { ok: true };
+
+  const errcode = errcodeOf(response);
+  const errmsg = typeof record.errmsg === 'string' ? redact(record.errmsg) : '';
+  if (errcode !== null && errcode !== 0) {
+    if ([40001, 40014, 42001, 41001, 48001].includes(errcode)) {
+      return fail('unauthorized', MSG_UNAUTHORIZED);
+    }
+    return fail('errcode', `企业微信报错 ${errcode}：${errmsg || '（没有给 errmsg）'}`);
+  }
+  return fail('bad_output', `wecom-cli 的发送响应里没有 success：${tail(result.stdout)}`);
+}
+
+// ─── 落库：缓存与「查一下」 ──────────────────────────────────────────────────
+
+/** 需要解析 userid 的那一行成员。`wecomUserId` 非空就是已经缓存过。 */
+export type LookupTarget = {
+  id: string;
+  name: string;
+  wecomUserId?: string | null;
+};
+
+export type ResolveResult =
+  | { ok: true; userid: string; name: string; cached: boolean }
+  | WecomFail;
+
+/**
+ * 取这个人的 userid：**先看缓存，再问 CLI**，两个结果都留档。
+ *
+ * 缓存命中就不再问（一次网络往返省下来，且企微那边不会因为我们的轮询被限流）。
+ * 失败也要写 `wecom_lookup_at`：它是「上次试过」的唯一依据，排查时那句
+ * 「是不是根本没人查过」由此可答；失败原因写进 `notify_deliveries.error`
+ * （见 `dispatch.ts` 的 `skipped`）。
+ *
+ * 成功时**两个字段一起写**（userid + 时刻）：它们是一件事的两半，分开写会出现
+ * 「有 userid 但没有时刻」这种半截状态。
+ */
+export async function resolveUserid(
+  db: Db, target: LookupTarget, opts: LookupOptions = {},
+): Promise<ResolveResult> {
+  const cached = typeof target.wecomUserId === 'string' ? target.wecomUserId.trim() : '';
+  if (cached !== '') {
+    return { ok: true, userid: cached, name: target.name, cached: true };
+  }
+
+  const found = await lookupUserid(target.name, opts);
+  if (!found.ok) {
+    await db.execute(sql`
+      update members set wecom_lookup_at = now() where id = ${target.id}`);
+    return found;
+  }
+
+  await db.execute(sql`
+    update members
+       set wecom_userid = ${found.user.userid},
+           wecom_lookup_at = now()
+     where id = ${target.id}`);
+  return { ok: true, userid: found.user.userid, name: found.user.name, cached: false };
+}
+
+/** 正数才有意义；坏值回落默认（与 prd/wecom.ts 同一条）。 */
+function positive(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+}

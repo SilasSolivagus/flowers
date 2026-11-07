@@ -6,7 +6,9 @@ import { AppError } from '../../src/core/errors';
 import {
   currentMember, listMembers, NO_MEMBER, hasActiveSession,
 } from '../../src/core/read/member';
-import { notifyView, currentMemberRowOrNull, type NotifyView } from '../../src/core/read/notify';
+import {
+  notifyView, currentMemberRowOrNull, prefsOf, type NotifyView,
+} from '../../src/core/read/notify';
 import { NotifyBell } from './NotifyBell';
 import { PageTitle } from './PageTitle';
 import { TopbarActions } from './TopbarActions';
@@ -96,6 +98,11 @@ export async function Shell({ children }: { children: ReactNode }) {
    * 因此不可能各说各的。
    */
   const notices: NotifyView = await notifyView(db, me);
+  /**
+   * 站内档位（P4-07）。只有一件事要它：`off` 时铃铛整个不渲染。列表与红点的口径
+   * 仍然全在 `notifyView` 里（档位在同一处判），这里不重复过滤。
+   */
+  const siteLevel = prefsOf(me.notifyPrefs).site;
 
   return (
     <div className="shell" data-rail={rail}>
@@ -117,8 +124,10 @@ export async function Shell({ children }: { children: ReactNode }) {
         {/* 顶栏只放当前页的标题（需求 / 版本 / 设置）。字由路径推出来，见 PageTitle。 */}
         <header className="topbar">
           <PageTitle />
-          {/* 铃铛在「新建需求」左边：先看发生过什么，再动手新建。 */}
-          <NotifyBell initial={notices} />
+          {/* 铃铛在「新建需求」左边：先看发生过什么，再动手新建。
+              P4-07：站内档位是 `off` 时整个不渲染——「关」的语义是「我不看」，
+              留一个永远 0 的铃铛在顶栏上，等于每天提醒他一次「你关掉了通知」。 */}
+          {siteLevel === 'off' ? null : <NotifyBell initial={notices} />}
           <TopbarActions />
         </header>
         {children}

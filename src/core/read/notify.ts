@@ -3,6 +3,8 @@ import { db } from '../../db/client.js';
 import type { Db } from '../../db/client.js';
 import { currentMemberRow, type Member } from './member.js';
 import { leadLineOf } from '../auth/roles.js';
+import { levelFilter, classOf, type EventClass } from '../notify/classes.js';
+import { prefsOf, type Channel } from '../notify/prefs.js';
 
 /**
  * 站内通知（「找过我的」）读模型。
@@ -47,8 +49,12 @@ import { leadLineOf } from '../auth/roles.js';
  * 2. **PM 不在扇出里**。PM 的观众身份仍然是「提出人 / 负责人 / 被派单的评审人」
  *    （上面那张老表），条线不给他任何额外的可见性。条线是人的归属，它授予权限的
  *    方式只有一条：它让**那条线的负责人**成为「能改这条需求的人」，扇出跟着那句话走。
- * 3. **关掉就是关掉**（`notify_prefs`）。一个关了通知的超管**什么都收不到**，而不是
- *    「只收重要的」：这条规则的唯一用途是「我不看」，替人判断哪条重要是另一种不听话。
+ * 3. **关掉就是关掉，但它现在是三档之一**（P4-07，`notify_prefs` = 两个频道 × 三档）。
+ *    一个把站内设成 `off` 的超管**什么都收不到**（feed 空、铃铛隐藏），而不是
+ *    「只收重要的」：`off` 的唯一用途是「我不看」，替人判断哪条重要是另一种不听话。
+ *    而 `key` 才是「只收重要的」——它由**产品**定义（`action` + `outcome` 两类，
+ *    见 `src/core/notify/classes.ts`），不是由读侧在每个 `if` 里临时判断。站内与企微
+ *    两个频道各读各的档位：一个人可以只看铃铛、不被打扰。
  *
  * 两条容易走错的细节，写在这里免得下一个人再推一遍：
  *
@@ -113,88 +119,83 @@ function clip(text: string, max = 30): string {
 }
 
 /**
- * 事件 → 那一行中文。
+ * 事件 → 那一行中文的「句子部分」（不含编号与标题）。
  *
- * 形状固定为「编号『标题』做了什么，要你做什么」。`default` 只是兜底：观众谓词里
- * 列出的类型全都有分支，一个新事件类型不会自己溜进 feed——但万一有人只改了谓词，
- * 这里也不会让页面炸掉或漏出一句英文。
+ * 拆成两半是因为企微推送要的是另一种排版：
+ *
+ * ```
+ * **PAN-12「导出任务队列」**
+ * 进入待评审，等你签字。
+ * ```
+ *
+ * 而铃铛要的是一行 `PAN-12「导出任务队列」进入待评审，等你签字`。两处**必须**说
+ * 同一句话——否则「铃铛里写的是 A、企微推送写的是 B」会让同一条事件变成两条新闻。
+ * 所以句子只有这一份，两个调用点各自加自己的排版。
+ *
+ * `default` 只是兜底：观众谓词里列出的类型全都有分支，一个新事件类型不会自己溜进
+ * feed——但万一有人只改了谓词，这里也不会让页面炸掉或漏出一句英文。
  */
-function lineOf(type: string, payload: Payload, number: number, title: string): string {
-  const key = `PAN-${number}「${title}」`;
+export function sentenceOf(type: string, payload: Payload): string {
   switch (type) {
     case 'requirement.created':
-      return `${key}进入收集，等提出人补必填`;
+      return '进入收集，等提出人补必填';
     case 'requirement.evaluated':
-      return `${key}进入待设计，等负责人出正式 PRD`;
+      return '进入待设计，等负责人出正式 PRD';
     case 'requirement.review_requested':
-      return `${key}进入待评审，等你签字`;
+      return '进入待评审，等你签字';
     case 'requirement.review_rejected': {
       const reason = text(payload, 'reason');
-      return reason
-        ? `${key}评审打回：${clip(reason)}，改完再提交`
-        : `${key}评审打回，改完再提交`;
+      return reason ? `评审打回：${clip(reason)}，改完再提交` : '评审打回，改完再提交';
     }
     case 'requirement.auto_test':
-      return `${key}进入测试中，跟测试进度`;
+      return '进入测试中，跟测试进度';
     case 'requirement.bounced': {
       const due = text(payload, 'newCommitDueAt');
-      return due ? `${key}被打回开发中，新承诺 ${due}` : `${key}被打回开发中`;
+      return due ? `被打回开发中，新承诺 ${due}` : '被打回开发中';
     }
     case 'requirement.rejected': {
       const reason = text(payload, 'reason');
-      return reason ? `${key}被拒绝：${clip(reason)}` : `${key}被拒绝`;
+      return reason ? `被拒绝：${clip(reason)}` : '被拒绝';
     }
     case 'requirement.shelved': {
       const reason = text(payload, 'reason');
-      return reason ? `${key}被搁置：${clip(reason)}` : `${key}被搁置`;
+      return reason ? `被搁置：${clip(reason)}` : '被搁置';
     }
     case 'requirement.owner_assigned': {
       const to = text(payload, 'to');
-      return to ? `${key}负责人改成 ${to}` : `${key}换了负责人`;
+      return to ? `负责人改成 ${to}` : '换了负责人';
     }
     default:
-      return `${key}有新的流转`;
+      return '有新的流转';
   }
 }
 
+/** 那一行开头的身份：`PAN-12「导出任务队列」`。企微消息的第一行加粗就是它。 */
+export function keyOf(number: number, title: string): string {
+  return `PAN-${number}「${title}」`;
+}
+
+/** 铃铛里的一整行：编号 + 标题 + 句子。 */
+function lineOf(type: string, payload: Payload, number: number, title: string): string {
+  return `${keyOf(number, title)}${sentenceOf(type, payload)}`;
+}
+
 /**
- * 通知口味。null / 坏 JSON / 缺字段一律「按默认」（全开）——一个读不懂的设置不该
- * 让通知静默消失；反过来，显式写 `false` 才是真的关。
+ * 口味：**两个频道 × 三档**，解释权在 `src/core/notify/prefs.ts`（P4-07 起）。
  *
- * 两个开关：
- * - `changed`：这一类里的「全部变动」（进入收集/待设计/待评审、打回、换负责人……）；
- * - `rejected`：拒绝 / 搁置。单独一个开关，因为规则 3 里它是一件**另外**的事
- *   （「被叫停」比「又动了一步」更值得看一眼）。
+ * 这个文件从 P4-03 起自己实现过一版（`inherit` / `changed` / `rejected` 三个布尔），
+ * 现在整块搬走了——站内与企微**必须**读同一份解析，否则「铃铛收、推送不发」这类
+ * 分叉会在两个文件的默认值上悄悄发生。这里只 re-export，保持既有 import 路径可用
+ * （设置页、用例、`src/core/members/manage.ts` 都在用它）。
  */
-export type NotifyPrefs = { inherit: boolean; changed: boolean; rejected: boolean };
+export {
+  DEFAULT_LEVEL, DEFAULT_PREFS, LEVELS, LEVEL_LABEL, CHANNEL_LABEL, prefsOf, prefsJson,
+  levelOf, isLevel, withLevel, type Channel, type Level, type NotifyPrefs,
+} from '../notify/prefs.js';
 
-export const DEFAULT_PREFS: NotifyPrefs = { inherit: true, changed: true, rejected: true };
-
-export function prefsOf(raw: string | null | undefined): NotifyPrefs {
-  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_PREFS;
-  try {
-    const value: unknown = JSON.parse(raw);
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return DEFAULT_PREFS;
-    const record = value as Record<string, unknown>;
-    // `inherit: true` 就是「按角色默认」，显式写在里面也不该覆盖具体开关——
-    // 它表达的是「别管我」，而不是「全开」。所以只有 inherit === false 时才读具体项。
-    if (record.inherit !== false) return DEFAULT_PREFS;
-    return {
-      inherit: false,
-      changed: record.changed !== false,
-      rejected: record.rejected !== false,
-    };
-  } catch {
-    return DEFAULT_PREFS;
-  }
-}
-
-/** 拒绝 / 搁置这两类。扇出用它们把 `rejected` 开关单独拎出来。 */
-const REJECTED_TYPES = sql`('requirement.rejected', 'requirement.shelved')`;
-
-/**
- * 「这条事件点到这位成员」的谓词。通知列表与未读数**必须**共用它：两处各写一份，
- * 迟早出现「红点 3 条、点开只有 2 条」。
+/** 「这条事件点到这位成员」的谓词。
+ *
+ * 通知列表与未读数**必须**共用它：两处各写一份，迟早出现「红点 3 条、点开只有 2 条」。
  *
  * 用成员 id 而不是姓名做键；提出人那一项才按姓名比（那是自由文本字段）。PM 判断也
  * 在这里做（`me.role = 'pm'`），所以调用方不需要另传角色。
@@ -203,9 +204,17 @@ const REJECTED_TYPES = sql`('requirement.rejected', 'requirement.shelved')`;
  * 已经是一个具体的行，管理员就是管理员，功能线负责人就是功能线——把它们写成
  * `... and me.role = 'product_owner'` 这样的谓词只会让同一条规则在库里再判一次，
  * 而库里的 role 与调用方手里的 role 是同一行。
+ *
+ * P4-07 起多一个 `channel` 参数：同一个人在两个频道上可能有**不同**的档位。档位那一层
+ * 只做一件事——把事件类型按类筛掉（`levelFilter`），它包在整条谓词外面，所以
+ * 「谁该收到」与「他要不要这一类」是两个独立的、各写一次的问题。
  */
-function addressed(member: Member): SQL {
-  const prefs = prefsOf(member.notifyPrefs);
+function addressed(member: Member, channel: Channel = 'site'): SQL {
+  const level = prefsOf(member.notifyPrefs)[channel];
+  // `off` 的过滤条件是 `false`：feed 真的空、铃铛隐藏。写成「不加过滤」会把
+  // 「关」读成「全开」——这一轮最不能犯的错。
+  if (level === 'off') return sql`false`;
+
   const admin = member.role === 'product_owner';
   // 「我是哪条线的负责人」用 roles.ts 的那一个定义（role 与 line 同时成立），
   // 不在这里再写一遍角色名——那份映射长过腿，正是这一轮要拆掉的东西。
@@ -221,14 +230,6 @@ function addressed(member: Member): SQL {
                          from members owner
                         where owner.id = r.owner_member_id
                           and owner.line = ${leadLine})`;
-
-  const fanout: SQL[] = [];
-  if (fancied && prefs.changed) {
-    fanout.push(sql`(e.type not in ${REJECTED_TYPES} and e.actor <> ${member.name}${inMyLine})`);
-  }
-  if (fancied && prefs.rejected) {
-    fanout.push(sql`(e.type in ${REJECTED_TYPES} and e.actor <> ${member.name}${inMyLine})`);
-  }
 
   const base = sql`(
       (e.type = 'requirement.review_requested'
@@ -248,8 +249,14 @@ function addressed(member: Member): SQL {
                          and (me.name = r.requester or me.role = 'pm')))
     )`;
 
-  if (fanout.length === 0) return base;
-  return sql`(${base} or ${sql.join(fanout, sql` or `)})`;
+  // 扇出：超管收每一条变更，条线负责人收本线每一条变更，都排除自己做的事。
+  // P4-03 那版在这里按 `changed` / `rejected` 拆成两档；现在拆档由上面的
+  // `levelFilter` 统一做（类的划分是产品口径，不该在三个地方各写一遍）。
+  const body = fancied
+    ? sql`(${base} or (e.actor <> ${member.name}${inMyLine}))`
+    : base;
+
+  return sql`(${body} and ${levelFilter(level)})`;
 }
 
 type NoticeRow = {
@@ -307,6 +314,76 @@ export async function notificationsFor(
     line: lineOf(row.type, parsePayload(row.payload), Number(row.number), row.title),
     unread: Number(row.seq) > Number(row.last_seq),
   }));
+}
+
+/**
+ * 点到这位成员、在某个频道上**还没有发送成功**的事件（P4-07 的推送用）。
+ *
+ * 与 `notificationsFor` 共用同一个 `addressed` 谓词——这一点是刻意的：企微推什么，
+ * 必须**恰好**是铃铛里会出现的那一批（同一档位、同一批观众），否则会出现「铃铛有、
+ * 手机没响」这种只能靠人对时间线才发现的 bug。
+ *
+ * 三条与 feed 不同的地方：
+ *
+ * 1. **升序**（`order by e.seq asc`）。feed 看最新的，推送补最旧的：停机一天之后
+ *    先补的是最早那几条，否则每人每轮只发 N 条、永远追不上。
+ * 2. **带投递状态**。`sent` 那一行排除掉（那是唯一索引的同一条规则在查询侧的另一半），
+ *    `failed` / `skipped` 仍然算候选——一次网络抖动不该让一条通知永久消失。
+ * 3. **不读已读水位线**。铃铛里的「读过」是站内的事；企微那边有没有发过，只看
+ *    `notify_deliveries`。混用两个记号会让「我点掉了铃铛」变成「手机也不会响」。
+ */
+export type DeliveryCandidate = {
+  eventSeq: number;
+  at: string;
+  type: string;
+  /** 事件类（action / outcome / change）。报告与消息里都用它）。 */
+  cls: EventClass;
+  requirementId: string;
+  number: number;
+  title: string;
+  /** 企微消息的第一行（加粗）：`PAN-12「导出任务队列」`。 */
+  headline: string;
+  /** 第二行：一句话说清发生了什么、要他做什么。 */
+  sentence: string;
+};
+
+export async function pendingDeliveries(
+  db: Db,
+  member: Member,
+  opts: { channel: Channel; limit?: number },
+): Promise<DeliveryCandidate[]> {
+  const limit = limitOf(opts.limit);
+  const res = await db.execute<NoticeRow>(sql`
+    select e.seq, e.at, e.type, e.requirement_id, e.payload,
+           r.number, r.title,
+           0 as last_seq
+      from events e
+      join requirements r on r.id = e.requirement_id
+      left join notify_deliveries d
+        on d.member_id = ${member.id}
+       and d.event_seq = e.seq
+       and d.channel = ${opts.channel}
+     where r.deleted_at is null
+       and ${addressed(member, opts.channel)}
+       and (d.id is null or d.status <> 'sent')
+     order by e.seq asc
+     limit ${limit}`);
+
+  return res.rows.map((row) => {
+    const payload = parsePayload(row.payload);
+    const number = Number(row.number);
+    return {
+      eventSeq: Number(row.seq),
+      at: asIso(row.at),
+      type: row.type,
+      cls: classOf(row.type),
+      requirementId: row.requirement_id,
+      number,
+      title: row.title,
+      headline: keyOf(number, row.title),
+      sentence: sentenceOf(row.type, payload),
+    };
+  });
 }
 
 /**

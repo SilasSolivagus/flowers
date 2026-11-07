@@ -1,13 +1,18 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
-import { activeMemberByName, memberByName, type Exec } from '../auth/members.js';
+import { activeMemberByName, memberById, memberByName, type Exec } from '../auth/members.js';
 import { assertCan, requireActor } from '../auth/guard.js';
 import {
   isLine, isRole, NO_REQUIREMENT, ROLE_LABEL, type Line, type Member, type Role,
 } from '../auth/roles.js';
 import { assertPassword, generatePassword, hashPassword, setPassword } from '../auth/password.js';
 import { requirePlainObject, asText, parseId } from '../validate.js';
+import {
+  CHANNELS, CHANNEL_LABEL, isLevel, prefsJson, prefsOf,
+  type Level, type NotifyPrefs,
+} from '../notify/prefs.js';
+import { resolveUserid } from '../notify/wecom.js';
 
 /**
  * 成员管理（P4-04）：建人 / 改人 / 停用 / 重置口令。**只有超管**。
@@ -254,17 +259,20 @@ export async function resetPassword(
 }
 
 /**
- * 一个成员改自己的通知口味（设置页用；超管也可以替别人改）。
+ * 一个成员改自己的通知频道档位（设置页用；超管也可以替别人改）。
  *
- * 为什么这条不走 `manageMembers`：通知口味是**个人偏好**，不是组织权限——任何人
- * 都该能关掉自己的通知。传了别人的 id 就要求 `manageMembers`。
+ * 为什么这条不走 `manageMembers`：通知口味是**个人偏好**，不是组织权限——任何人都
+ * 该能关掉自己的铃铛和推送。传了别人的 id 才要求 `manageMembers`。
  *
- * 存的是 JSON 文本（`{"inherit":true}` 或显式布尔）。这里只校验「是个对象」，字段的
- * 含义归 `src/core/read/notify.ts`。
+ * 这一层是**唯一**校验档位的地方（读侧对认不出的值一律回落 `key`，见
+ * `src/core/notify/prefs.ts`）：用户点出来的值只可能是三档之一，手改的请求在这里
+ * 被拒，而不是存进去以后让读侧猜。
+ *
+ * 一次只改传进来的那几格：设置页的两个分段控件各自提交一格，互不覆盖。
  */
-export async function saveNotifyPrefs(
+export async function saveNotifyChannels(
   db: Db, actor: string, raw: unknown,
-): Promise<{ memberId: string; prefs: string | null }> {
+): Promise<{ memberId: string; prefs: NotifyPrefs }> {
   const input = requirePlainObject(raw);
   const me = await requireActor(db, actor);
   const wantedId = input.memberId === undefined || input.memberId === null
@@ -274,29 +282,61 @@ export async function saveNotifyPrefs(
     await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
   }
 
-  const prefsInput = input.prefs;
-  let prefs: string | null;
-  if (prefsInput === null || prefsInput === undefined) {
-    prefs = null;
-  } else if (typeof prefsInput === 'string') {
-    prefs = prefsInput === '' ? null : prefsInput;
-  } else {
-    prefs = JSON.stringify(prefsInput);
-  }
-  if (prefs !== null) {
-    try {
-      const parsed: unknown = JSON.parse(prefs);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('not an object');
-      }
-    } catch {
-      throw new AppError('invalid', '通知设置必须是 JSON 对象');
+  const target = await memberById(db, wantedId);
+  if (target === null) throw new AppError('not_found', MEMBER_NOT_FOUND);
+
+  const current = prefsOf(target.notifyPrefs);
+  const next: NotifyPrefs = { ...current };
+  let touched = false;
+  for (const channel of CHANNELS) {
+    const value = input[channel];
+    if (value === undefined) continue;
+    if (!isLevel(value)) {
+      // 不是三档之一：说清是哪一格、合法值是什么，别让人对着「保存失败」重试。
+      throw new AppError(
+        'invalid',
+        `「${CHANNEL_LABEL[channel]}」的档位只能是 全部 / 只关键 / 关 之一（收到的是「${String(value)}」）`,
+      );
     }
+    next[channel] = value;
+    touched = true;
   }
+  if (!touched) throw new AppError('invalid', '没有要改的通知频道');
 
   await db.execute(sql`
-    update members set notify_prefs = ${prefs} where id = ${wantedId}`);
-  return { memberId: wantedId, prefs };
+    update members set notify_prefs = ${prefsJson(next)} where id = ${wantedId}`);
+  return { memberId: wantedId, prefs: next };
+}
+
+/**
+ * 「查一下」：把这个成员的名字对到企微通讯录里的 userid（设置页那一行按钮）。
+ *
+ * 语义与推送里的那一步是**同一个函数**（`resolveUserid`）：缓存优先、成功落
+ * `wecom_userid` + `wecom_lookup_at`、失败也落时刻。区别只在这里把结果翻成一句
+ * 人话给按钮用——匹配到谁、为什么没对上，用户要能当场读到。
+ *
+ * 不抛（除了权限那两格）：查不到不是错误，是「还没有」。
+ */
+export async function lookupWecomAccount(
+  db: Db, actor: string, raw: unknown = {},
+): Promise<{ ok: true; name: string; userid: string; cached: boolean }
+  | { ok: false; code: string; message: string }> {
+  const input = requirePlainObject(raw);
+  const me = await requireActor(db, actor);
+  const wantedId = input.memberId === undefined || input.memberId === null
+    ? me.id
+    : parseId(String(input.memberId), MEMBER_NOT_FOUND);
+  if (wantedId !== me.id) {
+    await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
+  }
+
+  const target = await memberById(db, wantedId);
+  if (target === null) throw new AppError('not_found', MEMBER_NOT_FOUND);
+
+  const resolved = await resolveUserid(db, target);
+  return resolved.ok
+    ? { ok: true, name: resolved.name, userid: resolved.userid, cached: resolved.cached }
+    : { ok: false, code: resolved.code, message: resolved.message };
 }
 
 /** 设置页给「成员」那一栏用：角色中文名 + 条线中文名。 */

@@ -7,7 +7,7 @@ import { listTokens } from '../../mcp/tokens';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { can, NO_REQUIREMENT } from '../../src/core/auth/roles';
-import { prefsOf } from '../../src/core/read/notify';
+import { DEFAULT_PREFS, prefsOf } from '../../src/core/read/notify';
 import { memberAdminView } from '../../src/core/read/member-admin';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
 import type { GeneratorView, MemberKeyView } from '../../src/core/uemaster/candidates';
@@ -20,7 +20,7 @@ import { GeneratorRow } from './GeneratorRow';
 import { McpRow, type McpTokenRow } from './McpRow';
 import { MemberKeyRow } from './MemberKeyRow';
 import { MemberAdmin } from './MemberAdmin';
-import { NotifyRow, PasswordRow } from './MeSecurity';
+import { NotifyChannels, PasswordRow } from './MeSecurity';
 import { endpointFromHeaders } from './mcp-endpoint';
 import { LINE_LEAD, memberNamesOfRole, roleLabel } from './roles';
 import './settings.css';
@@ -196,9 +196,11 @@ export default async function SettingsPage({
  *
  * 角色是本页唯一能给出、且真的来自数据库的第二条事实（`members.role`）。
  *
- * P4-05 起多两格：**收变动通知**（`notify_prefs`）与**自改口令**。两者都是「我对我
- * 自己」的写，入口只在这一栏；通知的默认值与扇出规则仍然在读侧
- * （`src/core/read/notify.ts`），这一页只把它翻成一个开关。
+ * P4-05 起多两格：**通知**（`notify_prefs`）与**自改口令**。两者都是「我对我自己」
+ * 的写，入口只在这一栏。P4-07 把那个开关换成了**两个频道 × 三档**：站内、企微各
+ * 一行，各一个分段控件（全部 / 只关键 / 关）。这一页只把库里那一格解析成两个档位
+ * （`prefsOf`）交给客户端组件显示——默认值、校验、谁该收到哪一类，全在
+ * `src/core/notify/` 里，这一层不复制任何一条。
  */
 function MePanel({
   actor, self, members, memberKey, endpoint, tokens,
@@ -213,12 +215,11 @@ function MePanel({
   // 名册里找不到这个人（cookie 里是个离职的人、或者库里还没 seed）：角色行如实说
   // 「未在名册」，不猜、也不给他安一个默认角色。
   const mine = self ?? members.find((member) => member.name === actor) ?? null;
-  // 「开」= 至少还收着一类扇出。`prefsOf` 把 null / inherit:true 都翻成全开，
-  // 所以这里不需要再判默认值——默认值的唯一一份在读侧。
-  const notifyOn = mine === null ? false : (() => {
-    const prefs = prefsOf(mine.notifyPrefs);
-    return prefs.changed || prefs.rejected;
-  })();
+  // 两个频道的档位。`prefsOf` 对 null / 老形状 / 认不出的值一律回落 `key`
+  // （见 src/core/notify/prefs.ts），所以这里不需要再判默认值——默认值的唯一一份在那里。
+  const notifyPrefs = mine === null ? DEFAULT_PREFS : prefsOf(mine.notifyPrefs);
+  // 「还没对上企微账号」那一行的判据就是这一格。
+  const wecomUserId = mine?.wecomUserId ?? null;
 
   return (
     <>
@@ -248,9 +249,9 @@ function MePanel({
       </section>
 
       {mine !== null && (
-        <section className="sg">
+        <section className="sg" id="notify">
           <div className="h">通知</div>
-          <NotifyRow on={notifyOn} />
+          <NotifyChannels prefs={notifyPrefs} wecomUserId={wecomUserId} />
         </section>
       )}
     </>

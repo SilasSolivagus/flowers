@@ -30,9 +30,9 @@ import { deleteRequirement, updateRequirement } from '../src/core/requirements/m
 import { reassignOwner } from '../src/core/requirements/assign.js';
 import { claimRequirement } from '../src/core/requirements/claim.js';
 import {
-  createMember, deactivateMember, resetPassword, saveNotifyPrefs, updateMember,
+  createMember, deactivateMember, resetPassword, saveNotifyChannels, updateMember,
 } from '../src/core/members/manage.js';
-import { notificationsFor, prefsOf } from '../src/core/read/notify.js';
+import { notificationsFor } from '../src/core/read/notify.js';
 import { runTool, toolByName } from '../mcp/tools.js';
 import type { Identity } from '../mcp/tokens.js';
 import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
@@ -78,10 +78,17 @@ function idOf(name: string): string {
   return found.id;
 }
 
+/**
+ * 内存里那一行（不带 `notify_prefs`）。P4-07 起默认档是 `key`，而这一组用例钉的是
+ * **「谁该收到」**（观众谓词），不是「档位筛掉哪一类」——所以显式给 `site: all`，
+ * 把类的过滤 neutralize 掉。档位本身的九格在 tests/notify-channels.test.ts 里。
+ */
+const ALL_LEVELS = '{"site":"all","wecom":"off"}';
+
 function memberOf(name: string): Member {
   const found = people.find((person) => person.name === name);
   if (found === undefined) throw new Error(`名册里没有 ${name}`);
-  return { ...found, deactivatedAt: null };
+  return { ...found, deactivatedAt: null, notifyPrefs: ALL_LEVELS };
 }
 
 /** 捕获 AppError（拿 code + message）。非 AppError 原样抛，免得把 bug 当成「拒绝」。 */
@@ -965,19 +972,25 @@ describe('成员管理', () => {
       .toMatchObject({ code: 'bad_credentials' });
   });
 
-  it('通知口味：自己能改自己的，改别人的要超管', async () => {
-    const saved = await saveNotifyPrefs(db, PM, {
-      prefs: { inherit: false, changed: false, rejected: true },
-    });
+  it('通知频道：自己能改自己的，改别人的要超管，档位之外的值被拒', async () => {
+    const saved = await saveNotifyChannels(db, PM, { site: 'all', wecom: 'off' });
     expect(saved.memberId).toBe(idOf(PM));
-    expect(prefsOf(saved.prefs)).toEqual({ inherit: false, changed: false, rejected: true });
+    expect(saved.prefs).toEqual({ site: 'all', wecom: 'off' });
 
-    expect(await caught(saveNotifyPrefs(db, PM, {
-      memberId: idOf(PM_OTHER), prefs: { inherit: false },
+    // 一次只改一格：另一格保持库里的值（不会被「没传」写成默认）
+    const partial = await saveNotifyChannels(db, PM, { site: 'key' });
+    expect(partial.prefs).toEqual({ site: 'key', wecom: 'off' });
+
+    // 档位只认 全部 / 只关键 / 关
+    expect(await caught(saveNotifyChannels(db, PM, { site: 'sometimes' })))
+      .toMatchObject({ code: 'invalid' });
+
+    expect(await caught(saveNotifyChannels(db, PM, {
+      memberId: idOf(PM_OTHER), site: 'off',
     }))).toMatchObject({ code: 'forbidden' });
 
-    const asAdmin = await saveNotifyPrefs(db, ADMIN, {
-      memberId: idOf(PM_OTHER), prefs: { inherit: false },
+    const asAdmin = await saveNotifyChannels(db, ADMIN, {
+      memberId: idOf(PM_OTHER), site: 'off',
     });
     expect(asAdmin.memberId).toBe(idOf(PM_OTHER));
   });
@@ -1082,29 +1095,27 @@ describe('通知扇出：条线 / 超管 / 偏好', () => {
     expect(forLead.some((n) => n.type === 'requirement.shelved')).toBe(false);
   });
 
-  it('关掉通知的超管什么都收不到；只关 rejected 的还收得到其余变更', async () => {
-    await saveNotifyPrefs(db, ADMIN, {
-      prefs: { inherit: false, changed: false, rejected: false },
-    });
+  it('站内档位：off 一条都收不到，key 只收「要动手 + 有结果」', async () => {
+    await saveNotifyChannels(db, ADMIN, { site: 'off' });
     const created = await createRequirement(db, PM, {
       title: '静音', type: 'feature', requester: '孙建宏',
     });
     const id = created.id;
     await evaluate(db, PM, { requirementId: id });
     // 注意：这里必须用**从库里读出来的那一行**（它带 notify_prefs）——手搭的
-    // `memberOf()` 没有这一列，扇出会按默认全开来算。
+    // `memberOf()` 没有这一列，扇出会按默认档来算。
     const admin = (await activeMemberByName(db, ADMIN))!;
     expect(await notificationsFor(db, admin)).toEqual([]);
 
-    // 只关 rejected
-    await saveNotifyPrefs(db, ADMIN, {
-      prefs: { inherit: false, changed: true, rejected: false },
-    });
+    // 切到 key：created 是「一般变动」→ 仍然不进 feed；evaluated 是「要你动手」→ 进。
+    await saveNotifyChannels(db, ADMIN, { site: 'key' });
     await shelveRequirement(db, PM, { requirementId: id, reason: '停' });
-    // 重新读一次：口味是行上的列，上一行读出来的还是「全关」
+    // 重新读一次：口味是行上的列，上一行读出来的还是「关闭」
     const relaxed = (await activeMemberByName(db, ADMIN))!;
     const types = (await notificationsFor(db, relaxed)).map((n) => n.type);
     expect(types).toContain('requirement.evaluated');
-    expect(types).not.toContain('requirement.shelved');
+    expect(types).not.toContain('requirement.created');
+    // 搁置 / 拒绝属于「有结果」，key 档要收
+    expect(types).toContain('requirement.shelved');
   });
 });
