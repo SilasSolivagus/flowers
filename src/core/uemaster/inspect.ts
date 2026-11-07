@@ -565,52 +565,38 @@ function baselineFrom(struct: RepoStructure, locate: LocateResult): RepoBaseline
 }
 
 /**
- * 走查的检索式：**需求标题 + 描述原文**，一个字都不改写。
+ * 走查的检索式：**只传需求标题**（trim + 压空白），描述、六问、关键词一律不进。
  *
- * 为什么不用 `keywordsFrom` 抽出来的关键词（Task 8 修一轮时改的）：那套词是为
- * 「把中文桥到英文路径」设计的（`搜索` → `search`），而历史检索是**中文对中文**比
- * 字面重合——桥用不上，多出来的词反而在给宽合并加分。实测（`scripts/bench-locate.ts`
- * 的口径）：拿关键词拼检索式时，`上传下载按量限速风控` 的前六名全是
- * `app/browser-window/*`（同一次宽合并），真答案 `src/services/download-risk-modal.ts`
- * 一个都进不来；换成标题 + 描述原文，词少了，宽合并那点「沾边」的权重也掉下去了。
+ * 这条裁定是拿三组实测定的（uni-app 124 行，真答案 `src/services/download-risk-modal.ts`）：
  *
- * 「描述」取需求自己的那段原文（`descriptionOf`：迁移过来的老需求整段自由文本就在
- * `context` 里，新需求的六问合起来就是它的描述）。没有描述就只传标题——**不要**拿
- * 关键词补位，那正好退回到这条注释要挡掉的那种拼法。
+ * | 检索式 | 真答案名次 | 权重 |
+ * |---|---|---|
+ * | A 只有标题 | 第 5 | 0.260 |
+ * | B 标题 + 一句短描述 | 第 5 | 0.185 |
+ * | C 标题 + 60 字整段描述 | **掉出前 6** | —（第一名变成「fix:修改版本号和描述」那批 utils） |
+ *
+ * B 相对 A **零收益**（名次没动），C **明确有害**，所以描述不该进 query。机制上也不是
+ * 本仓特产：提交信息平均 20–40 字，query 越长，命中「修改 / 版本 / 描述」这类高频词的
+ * 空泛合并越占便宜——**查询长度与文档长度量级不一致，本身就是检索的经典病**。
+ *
+ * 那为什么连 `keywordsFrom` 也不用（第一版用过，同样被实测否掉）：那套词是为「把中文
+ * 桥到英文路径」设计的（`搜索` → `search`），而历史检索是**中文对中文**比字面重合，桥
+ * 用不上；多出来的词反而给宽合并加分（关键词拼检索式时，`上传下载按量限速风控` 的前六
+ * 名全是 `app/browser-window/*`，真答案一个都进不来）。
+ *
+ * **别再「顺手把描述加回去，因为信息更多」。** 信息更多在这条链上是负收益：这一层比的是
+ * 「这条需求标题像哪次合并的提交信息」，而提交信息本身就是一句话；把 PRD 式的长描述塞进来
+ * 只是让每个空泛合并都多一点「沾边」的分数。真答案没到第 1 名也不是这里的问题——它和
+ * 同一次合并里另外四个文件**权重完全相同**，卡住它的是同合并并列（`compareFiles` 组内按
+ * 路径升序），不是打分。调参已裁定关闭。
  */
-export function locateQuery(title: string, description: string | null): string {
-  const text = description?.trim() ?? '';
-  return text === '' ? title.trim() : `${title.trim()}\n\n${text}`;
-}
-
-/**
- * 需求自己的那段描述原文：六问按顺序拼起来，空的跳过。
- *
- * 为什么从这里取（而不是 `requirements.description`——那一列不存在）：
- * `scripts/migrate-flower.ts` 把 Flower 那段自由文本落进 **`context`**（「谁在什么
- * 情况下用」），所以迁移过来的 803 条里「整条需求就一句话」的那句话就在这一格；新
- * 需求的描述则是六问合起来。两代数据的区别不该由检索层关心，所以这里一次拼好。
- *
- * 拼接顺序固定、不加任何标题前缀：`locateFromHistory` 是按字面重合打分的，加「描述：」
- * 这种标签只会给每个词都添一条噪音。
- */
-export function descriptionOf(row: {
-  context: string | null;
-  problem: string | null;
-  outcome: string | null;
-  surfaces: string | null;
-  edge_cases: string | null;
-  out_of_scope: string | null;
-}): string {
-  return [row.context, row.problem, row.outcome, row.surfaces, row.edge_cases, row.out_of_scope]
-    .map((part) => part?.trim() ?? '')
-    .filter((part) => part !== '')
-    .join('\n');
+export function locateQuery(title: string): string {
+  return title.replace(/\s+/g, ' ').trim();
 }
 
 /** 一次走查的检索式（从需求行取，两处拼法只此一份）。 */
 function queryOfRequirement(req: RequirementRow): string {
-  return locateQuery(req.title, descriptionOf(req));
+  return locateQuery(req.title);
 }
 
 /**
@@ -781,7 +767,7 @@ export function structurePrompt(
     '        没有相似合并就是没有，不会拿别的近似信号凑数）：',
     ...repos.flatMap((repo) => locateLines(repo)),
     ...absentRule(repos),
-    `（检索用的词：${keywords.join('、')}）`,
+    `（阶段一抽出的关键词（只用于下面的结构摘要，不参与历史检索）：${keywords.join('、')}）`,
     '',
     '阶段一：两个仓的路由/页面结构：',
     ...repos.flatMap((repo) => shapeLines(repo)),
@@ -840,7 +826,7 @@ export function structureRepairPrompt(
     '证据只能来自这些仓库的真实 HEAD（路径会被 ls-tree 核对，编一个就会被退回）：',
     ...repos.flatMap((repo) => locateLines(repo)),
     ...absentRule(repos),
-    `（检索用的词：${keywords.join('、')}）`,
+    `（阶段一抽出的关键词（只用于下面的结构摘要，不参与历史检索）：${keywords.join('、')}）`,
     '',
     '重发**完整**的 JSON，形状不变：',
     '{"flows":[{"id","title","kind"}],"findings":[{"verdict","prd","code","evidence":[{"repo","path","note"}],"searched"}]}',

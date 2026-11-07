@@ -623,19 +623,21 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(await artifactCount()).toBe(1);
   }, 60_000);
 
-  it('检索式是「标题 + 描述原文」：标题对不上、描述对得上时，候选靠描述找到', async () => {
+  it('描述不进检索式：标题对不上、只有 context 对得上时，材料写「没能定位到」（裁定的代价）', async () => {
     // 标题与两条合并都不重合；只有描述（六问里的 `context`）提到发票报销审批流。
+    // 走查的检索式现在只有标题（理由与三组实测见 inspect.ts 的 locateQuery），所以这条
+    // 需求在历史里是**找不到**的——这个用例就是那条裁定的代价，写出来让它可见。
     const r = await inspectable(PRD_TEXT, { title: '老系统的一个小需求', context: '发票报销审批流要能对接' });
     fake.enqueue(STRUCTURE_OK, VERIFY_OK);
 
     await inspect(db, '吕品', { requirementId: r.id }, deps());
 
-    // 描述原文进了检索式 → 那条只在描述里出现的合并被找到
-    expect(fake.prompts[0]).toContain('`pages/invoice/apply.vue` ← 出自');
-    // 这条标题与「分享页搜索」那两次合并一个字都不重合：它们这次不该进候选，
-    // 进来的路径只能是描述找到的——反过来说明「找到的靠描述，不是靠标题或关键词表」。
-    expect(fake.prompts[0]).not.toContain('`src/pages/Share/Share.tsx` ←');
-    expect(fake.prompts[0]).not.toContain('`pages/share/index.vue` ←');
+    const prompt = fake.prompts[0]!;
+    expect(prompt).toContain('没能在代码里定位到这条需求的实现。');
+    // 描述里那个词找到的那条合并，这次不该出现（描述不参与）
+    expect(prompt).not.toContain('`pages/invoice/apply.vue` ←');
+    // 标题也照样不重合，所以那两次分享页合并同样不该出现
+    expect(prompt).not.toContain('`src/pages/Share/Share.tsx` ←');
   }, 30_000);
 
   it('只有一个仓读不到：不抛、材料里写明那一仓没读到、另一仓候选照常，账记两行', async () => {

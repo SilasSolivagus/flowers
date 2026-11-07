@@ -8,7 +8,7 @@ import { locateFromHistory } from '../src/core/locate/history.js';
 import type { HistoryRow } from '../src/core/locate/history-store.js';
 import { ABSENT_HEADLINE, NOT_FOUND_HEADLINE } from '../src/core/locate/copy.js';
 import {
-  descriptionOf, locateForInspect, locateQuery, renderLocate, type LocateDeps,
+  locateForInspect, locateQuery, renderLocate, type LocateDeps,
 } from '../src/core/uemaster/inspect.js';
 import { resetDb } from './helpers/db.js';
 
@@ -135,7 +135,7 @@ describe('读到了：none 与 candidates 分得开', () => {
   });
 });
 
-describe('检索式：标题 + 描述原文（不是关键词表）', () => {
+describe('检索式：只传标题（描述不进 query——裁定见 inspect.ts 的三组实测）', () => {
   /** 两条各自只跟「标题」或只跟「描述」对得上的合并。 */
   const TWO: HistoryRow[] = [
     {
@@ -159,44 +159,24 @@ describe('检索式：标题 + 描述原文（不是关键词表）', () => {
   const TITLE = '分享页搜索补齐';
   const DESC = '上传下载按量限速：超过阈值的下载要弹风控提示';
 
-  function pathsOf(text: string): string[] {
-    const got = locateFromHistory(TWO, text);
-    return got.kind === 'candidates' ? got.items.map((item) => item.path) : [];
-  }
-
-  it('带描述与不带描述，候选不同：描述那条只在带描述时进得来', () => {
-    const without = pathsOf(locateQuery(TITLE, null));
-    const withDesc = pathsOf(locateQuery(TITLE, DESC));
-
-    expect(without).toContain('src/pages/Share/Share.tsx');
-    expect(without).not.toContain('src/services/download-risk-modal.ts');
-
-    expect(withDesc).toContain('src/services/download-risk-modal.ts');
-    expect(withDesc).toContain('src/pages/Share/Share.tsx'); // 标题那一路没被描述挤掉
-    expect(withDesc).not.toEqual(without);
+  it('标题 + 长描述 → 检索式仍然**等于标题**（描述一个字都没进去）', () => {
+    // 函数就只收标题：这一句是编译期保证，用例把运行期的结果也钉一遍。
+    expect(locateQuery(TITLE)).toBe(TITLE);
+    expect(locateQuery(`  ${TITLE}\n\t`)).toBe(TITLE);
   });
 
-  it('描述是**原文**整句进去，不是 keywordsFrom 切出来的词', () => {
-    const query = locateQuery(TITLE, DESC);
-    expect(query).toContain(DESC); // 一个字都没被切掉
-    // 关键词表里没有这句原文（它是 n-gram 的碎片集合）——两者不能互相冒充
-    expect(keywordsFrom(DESC, TITLE).join(' ')).not.toContain(DESC);
-    expect(query.startsWith(TITLE)).toBe(true);
+  it('描述不再参与：只跟描述对得上的那条合并进不了候选（本次裁定的代价）', () => {
+    const paths = (() => {
+      const got = locateFromHistory(TWO, locateQuery(TITLE));
+      return got.kind === 'candidates' ? got.items.map((item) => item.path) : [];
+    })();
+    expect(paths).toContain('src/pages/Share/Share.tsx');       // 标题对得上的那条在
+    expect(paths).not.toContain('src/services/download-risk-modal.ts'); // 只有描述对得上的那条不在
+    // 这就是代价：那条需求「限速」是真的，但我们只拿标题去比，它找不到。
   });
 
-  it('没有描述就只传标题（不拿关键词补位）', () => {
-    expect(locateQuery(TITLE, null)).toBe(TITLE);
-    expect(locateQuery(TITLE, '   ')).toBe(TITLE);
-  });
-
-  it('描述从六问拼出来：老数据那段自由文本在 context 里', () => {
-    expect(descriptionOf({
-      context: '上传下载按量限速', problem: '现在不提示',
-      outcome: '', surfaces: null, edge_cases: '  ', out_of_scope: '不涉及',
-    })).toBe('上传下载按量限速\n现在不提示\n不涉及');
-    expect(descriptionOf({
-      context: null, problem: null, outcome: null, surfaces: null, edge_cases: null, out_of_scope: null,
-    })).toBe('');
+  it('没有标题的那一格不会被补位：压空白之后是空串就是空串', () => {
+    expect(locateQuery('   ')).toBe('');
   });
 });
 
