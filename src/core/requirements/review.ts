@@ -43,7 +43,30 @@ const NOT_REVIEWER = '签字人不是这条需求派单到的评审人';
  * 二次提交在写派单之前就撞 illegal_transition）；`where not exists` 只是兜底，
  * 让重复调用变成空操作而不是留下第二条。
  *
- * order by created_at, id 只是为了让「同一条线配了多个人」时结果稳定可复现。
+ * ── 同一条线配了多个人时派给谁（P2「派单选人」）
+ *
+ * 一条线配两个负责人不是异常配置（轮班、代管、刚交接），而旧实现是
+ * `order by created_at, id limit 1`：**永远是同一个人**，而且如果需求负责人本人
+ * 就是那条线的负责人之一，派单会派给**他自己**——自己签自己的字，评审这一整道
+ * 关口就空了，而界面上一切正常（有条派单、有人能签、点了就通过）。
+ *
+ * 所以三条排序，按优先级：
+ *
+ * 1. **不是需求负责人本人**（`(m.id = owner) asc`——false 排在 true 前面）。
+ *    这是唯一有实质后果的一条：剩下的两条只是让结果「说得过去、可复现」。
+ * 2. **最近在这套系统里动过的人**（`events` 里最后一条以他名字为 actor 的时刻）。
+ *    轮班场景下，最近还在动的人更可能是「这周值班的那个」；完全不看活动时，
+ *    两条平手的人永远按 id 取第一个，等于把「同线两人」又变回了「只有第一个」。
+ * 3. **id 升序**。同一天里两个人都没动过 → 平手，取 id 小的那个。写死这一条
+ *    只为「同一份输入给同一个答案」：派单结果进了 `review_assignments`，一个
+ *    每次跑都不一样的派单会让「谁该签」变成一次掷骰子。
+ *
+ * `nulls last` 是必须的：`desc` 在 PG 里的默认是 **NULLS FIRST**，少了它「一条事件
+ * 都没有的人」会排在「刚动过的人」前面，第 2 条就反了。
+ *
+ * `events.actor` 存的是**名字**不是 id（P1 的口径），所以活动时刻按 `e.actor = m.name`
+ * 关联。重名会让两个人共享同一个活动时刻——那不是这里的错，名字本来就是这个系统里
+ * 唯一的人标识；真出现重名时第 3 条仍然给出确定的答案。
  */
 export async function assignReviewer(tx: Tx, requirementId: string): Promise<string | null> {
   const owner = await tx.execute<{
@@ -64,10 +87,21 @@ export async function assignReviewer(tx: Tx, requirementId: string): Promise<str
   const role = leadRoleOf(row.owner_line);
   if (role === null) throw new AppError('no_reviewer', '负责人所在条线认不出，无法派单');
 
+  // 三条排序见上面那段注释：不是负责人本人 → 最近有活动 → id。
+  // 活动时刻用 lateral 取「这个人作为 actor 的最后一条事件」，与主查询分开以后
+  // 「一条事件都没有的人」仍然是一行（left join），而不是被 where 过滤掉——
+  // 过滤掉等于「刚配上来、还没干过活的新负责人永远排不上队」。
   const found = await tx.execute<{ id: string }>(sql`
-    select id from members
-     where role = ${role} and line = ${row.owner_line} and deactivated_at is null
-     order by created_at, id limit 1`);
+    select m.id
+      from members m
+      left join lateral (
+        select max(e.at) as last_at
+          from events e
+         where e.actor = m.name
+      ) act on true
+     where m.role = ${role} and m.line = ${row.owner_line} and m.deactivated_at is null
+     order by (m.id = ${row.owner_member_id}::uuid) asc, act.last_at desc nulls last, m.id asc
+     limit 1`);
   const reviewer = found.rows[0];
   if (!reviewer) throw new AppError('no_reviewer', '这个条线还没有配负责人');
 
