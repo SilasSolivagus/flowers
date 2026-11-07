@@ -107,6 +107,23 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
    `overscroll-behavior-x:contain` 是给触控板的：滚到最左/最右之后继续横推，
    浏览器不该把它当成前进/后退手势——否则「看板滑到头」会变成「页面退到上一页」。 */
 .board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto;overscroll-behavior-x:contain}
+
+/* 新增（P4-13）：看板顶部的筛选工具条（`?q=` / `?owner=`）。
+   它是 `.board` 的第一个 flex 项、在 `.gcols` 之上；`position:sticky;left:0` 让它在
+   板子横向滚 2272px 时钉在左边——否则筛完去看右边几列，工具条已经跟着滚没了，
+   「清空」也就找不到了。背景必须自铺（`--c-bg`），不然卡片会从下面透过来。
+   控件的尺寸 / 边框 / 圆角 / 字体全部照 `.fld input` 那一套抄（同一种输入框，
+   不新造一种控件语言）；`--h-control` 也与表单里的输入框同高。 */
+.fbar{position:sticky;left:0;z-index:2;display:flex;align-items:center;gap:8px;
+      padding:0 0 8px;background:var(--c-bg);flex:0 0 auto}
+.fbar input,.fbar select{height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);
+      padding:0 10px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
+.fbar .fq{width:260px}
+.fbar select{min-width:132px}
+.fbar input:focus-visible,.fbar select:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
+/* 「筛出 N / 815」：一行灰字，靠右。与 `.db .hint` 同一个字号与色阶。 */
+.fbar .hint{margin-left:auto;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.fbar .fclear{text-decoration:none}
 /* 线稿的分组带（分析 / 开发 / 归档）。本应用的状态机是 10 个状态、读模型没有分组字段，
    看板不渲染这一行；类留在原处是因为它是 views.css 原样移植的一段，删掉就看不出省略了什么。
    列宽必须与 .gcols 逐字相同：今天没人渲染它，但哪天真的画了分组带，11 列叠在 10 列网格上

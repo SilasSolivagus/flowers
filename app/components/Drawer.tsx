@@ -146,13 +146,22 @@ function ReviewRow({ review }: { review: DetailReview }) {
 }
 
 export function Drawer({
-  detail, releases, generator, owners,
+  detail, releases, generator, owners, closeHref = '/',
 }: {
   detail: Detail;
   releases: ReleaseOption[];
   generator: GeneratorView;
   /** 「改负责人」下拉的候选；没有转交权时是空数组。 */
   owners: Member[];
+  /**
+   * 关闭（遮罩 / ✕）之后回哪儿。
+   *
+   * 默认 `/` 与以前的写法逐字一致；看板带筛选时页面传 `/?q=…&owner=…`——
+   * 打开抽屉再关掉，回到的必须是筛出来的那十几条，不是全部 815 条。
+   * 这一格由页面给而不是抽屉自己从 `window.location` 读：关闭地址要和卡片上那条
+   * 链接是**同一个** `boardQuery`，两处各读一次就会有一处丢掉另一半筛选。
+   */
+  closeHref?: string;
 }) {
   const { info, commit, review, description } = detail;
   // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
@@ -164,7 +173,7 @@ export function Drawer({
       {/* 遮罩就是「点空白处关闭」（线稿的 scrim 行为）。它是一块盖住看板的区域，
           不做成可聚焦的链接：键盘用户的关闭入口只有右上角那个 ✕（tabIndex -1
           让它不进 tab 序列，避免同一个动作出现两个停靠点）。 */}
-      <Link className="scrim on" href="/" aria-label="关闭" tabIndex={-1} />
+      <Link className="scrim on" href={closeHref} aria-label="关闭" tabIndex={-1} />
       <aside className="drawer on" aria-label="需求详情">
         <div className="dh">
           {/* 抬头那一行：编号 · 类型类。Ruling 1 之后类型可能是空的，此时**整段不渲染**
@@ -181,7 +190,7 @@ export function Drawer({
             {commit.release !== null && <span className="chip">{commit.release.name}</span>}
             <span className="chip">停了 {detail.days} 天</span>
           </div>
-          <Link className="x" href="/" aria-label="关闭">✕</Link>
+          <Link className="x" href={closeHref} aria-label="关闭">✕</Link>
         </div>
 
         <div className="dbody">

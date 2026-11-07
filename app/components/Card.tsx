@@ -32,10 +32,16 @@ export function requirementKey(number: number): string {
  * - 键盘和读屏用户拿到的是一个可聚焦的链接，名字就是卡片那三行文字。
  *   一个只挂了 onClick 的 div 对读屏用户等于不存在。
  * `data-id` 仍然留着：需求 id 是这张卡在页面上的身份，链接之外的用途（脚本、用例）也认它。
+ *
+ * `query` 是**当前筛选的查询串**（`q=…&owner=…`，不带 `?`，来自 `boardQuery`）。
+ * 卡片链接把它原样带上：筛出 12 条之后点开第 3 条，抽屉里的事看完再关掉，回到的
+ * 必须是那 12 条。不带的话「读一条需求」就等于把筛选丢掉——而「筛完再一条条读」
+ * 正是这个功能唯一的使用姿势。
  */
-export function Card({ card }: { card: BoardCard }) {
+export function Card({ card, query = '' }: { card: BoardCard; query?: string }) {
+  const href = query === '' ? `/?open=${card.id}` : `/?open=${card.id}&${query}`;
   return (
-    <Link className={card.mine ? 'card mine' : 'card'} href={`/?open=${card.id}`} data-id={card.id}>
+    <Link className={card.mine ? 'card mine' : 'card'} href={href} data-id={card.id}>
       <span className="t">{card.title}</span>
       <div className={card.late ? 'w neg' : 'w'}>{card.waiting}</div>
       <div className="m">
