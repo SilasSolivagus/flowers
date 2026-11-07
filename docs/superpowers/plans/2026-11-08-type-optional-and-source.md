@@ -5,7 +5,8 @@
 | 迁移 | 裁定 | 形状 |
 |---|---|---|
 | `0020_type_optional.sql` | 1. 类型不再必填 | 只放宽约束（`DROP NOT NULL`），不动既有值 |
-| `0021_ownerless_to_inbox.sql` | 2. 没有负责人的需求回到「收集」 | 数据迁移，`where owner_member_id is null and state <> 'inbox'` |
+| `0021_ownerless_to_inbox.sql` | 2. 没有负责人的需求回到「收集」（**同日修订：终态不动**，见 §7） | 数据迁移，`where owner_member_id is null and state not in ('inbox','live','rejected','shelved')` |
+| `0023_restore_ownerless_terminal_states.sql` | 2 的修订：把被第一版误移的 29 条终态行放回去 | 数据迁移，按 Flower 的原始状态与 `state_changed_at` 逐条还原 |
 | `0022_source.sql` | 3. 新增「来源」 | 两列 + 按 `legacy_ref` 从迁移事件回填 |
 
 三条都幂等（跑第二遍命中 0 行 / 是 no-op），`npm run db:migrate` 连跑两次的证明见第 4 节。
@@ -237,9 +238,7 @@ M1 的变异是手写复原（`/tmp` 备份 → 变异 → 跑 → 还原），M
 
 ## 6. Concerns（留给下一个人）
 
-1. **`live` 6 条无主需求从「已上线」回到了「收集」**，`rejected` 17 条同理。这是裁定 2 的
-   字面意思（没有主人的状态不算数），但看板上是一处看得见的变化——如果 owner 的本意是
-   「只把进行中的拉回收集、终态别动」，那这条迁移的 where 需要加一个终态白名单。
+1. ~~**`live` 6 条无主需求从「已上线」回到了「收集」**，`rejected` 17 条同理。~~ **已由 §7 修订解决**：owner 裁定终态不动，`0021` 加了终态白名单，`0023` 把 29 行按 Flower 的原始状态与时间放回原列。
 2. **抬头那一段不渲染、信息表那一行显示「未指定」** 是两种处理，有意为之（理由见 1.4）。
    如果设计上要求两处一致，改的是 `Drawer.tsx` 一处。
 3. **来源不可编辑**（只在新建时设）。若要可编辑，`manage.ts` 的 `EDITABLE_FIELDS` /
@@ -249,3 +248,77 @@ M1 的变异是手写复原（`/tmp` 备份 → 变异 → 跑 → 还原），M
    动 attach 那条路；它现在不参与任何判断，只是白读一列。
 5. `npm run build` 会重写 `next-env.d.ts`（引用 `.next/types/*` 而不是 `.next/dev/types/*`）
    ——这是 Next 的生成物，已 `git checkout` 还原，没有进提交。
+
+---
+
+## 7. 修订（同日）：终态不动，`0023` 把 29 行放回去
+
+### 裁定
+
+第一版把「没有负责人」当成了唯一判据，于是 `rejected` / `shelved` / `live` 也被拉回了收集。
+owner 的修订：没有负责人的需求回收集，**但下列状态不动**——`shelved`（搁置）、`live`（已上线）、
+`rejected`（已拒绝）。
+
+> 终态是结论，不是流程位置。没有负责人只说明「当年谁负责没记录」，不说明「这件事要重来」。
+
+两个具体后果，都不是风格问题：
+
+- `rejected` 拉回收集，它重新变成一张可以立项的卡——**等于悄悄撤销一次拒绝决定**；
+- `live` 拉回收集，一个已经在跑的功能在看板上显示「等领取」，看到的人会去认领一个上线三
+  个月的功能。
+
+### 改了什么
+
+1. **`0021` 就地改**（刻意，不是顺手）：`where owner_member_id is null and state not in
+   ('inbox','live','rejected','shelved')`。新克隆一份仓库、空库跑迁移时走的就是这个文件，
+   它必须一开始就是对的；否则每条新库都要先做错一次再由后面那条改回来。已应用的库不会
+   重跑它——drizzle 的迁移记录只比对 `folderMillis`（`pg-core/dialect.cjs` 的
+   `lastDbMigration`），改文件既不会重跑也不会报错。
+2. **`0023_restore_ownerless_terminal_states.sql`**（新）：把这 29 行放回原状态与原时间。
+
+### 为什么 `0023` 里写了一张 29 行的表
+
+状态值猜不出来：这些行现在都在 `inbox`，它们原本是 `rejected` 还是 `live`，只有原始事实说
+得清——`requirement.migrated` 事件里的 `payload.state`，以及 Flower 线上库的 `state_key`。
+迁移是纯 SQL，碰不到 Flower，所以把 2026-11-08 读到的「Flower uuid → 状态 → `state_changed_at`」
+写进迁移，并且在 `where` 里用 `exists (… payload.state = f.state)` 逐条核对（状态对不上就不
+改，宁可漏、不可编）。
+
+`state_entered_at` **必须**写死而**不是** `now()`：`0021` 第一版已经把它刷成了 `now()`，原始
+时刻我们库里没有了，只剩 Flower 那一份。而这一列正是「停了 N 天」与「进入本状态」的来源——
+给 6 条去年上线的功能盖上「今天上线」、给 17 条被拒的需求盖上「今天被拒」，等于在库里写下
+一个假事实，而这条迁移的目的恰恰是让库说实话。
+
+### 取数与逐条核对
+
+```
+ssh dogyun "docker exec -i flower-postgres-1 psql -U flower_admin -d flower -tA -F '|' -c \
+  \"select id, state_key, state_changed_at from requirements where id in (<本库 194 条无主行的 legacy_ref>)\""
+```
+
+194 条无主迁移行的 Flower 状态：`collect` 122 · `to_evaluate` 20 · `evaluated` 18 · `rejected` 17 ·
+`launched` 6 · `shelved` 6 · `to_design` 3 · `designing` 1 · `developing` 1。按 `STATE_MAP` 映射后
+落在三个终态的正好是 **rejected 17 · live 6 · shelved 6 = 29 行**；与事件 `payload.state`
+194/194 一致。**没有出现无法映射到这三个终态的行**（`to_develop`/`developing` 等的 1 条
+`dev` 与 22 条 `design` 按修订后的口径留在 `inbox`，一个字都不动）。
+
+### 结果
+
+```
+select state, count(*) from requirements where owner_member_id is null group by state order by 1
+→ inbox 166 | live 6 | rejected 17 | shelved 6        （合计 195，与执行前一致）
+```
+
+`inbox` 的构成：原本就在收集的 142 条 + 修订认可的 `design` 22 条 + `dev` 1 条 + 1 条无
+`legacy_ref` 的行 = 166。`requirements` 815 行 / `legacy_ref` 非空 803 行，前后不变。
+
+29 行的 `state` 与 `state_entered_at` 与 Flower 的 `state_key` / `state_changed_at` **毫秒级逐条
+相等**（含唯一一条带毫秒的 `2026-03-12 07:32:56.636`）。
+
+### 幂等
+
+`0023` 的守卫是 `r.state = 'inbox'` + 无主 + 事件状态一致：第一遍命中 29、第二遍命中 0
+（`NOTICE` 打出来的就是这两个数）；空库 / 新克隆的库没有这些 `legacy_ref`，命中 0。为了证明
+这份文件本身（而不只是「已应用所以跳过」），把 29 行按第一版的后果复原成 `inbox`、删掉
+`drizzle.__drizzle_migrations` 里 `0023` 那条记录再跑 `npm run db:migrate`——重新命中 29，
+并且用上面那张表核对到毫秒级相等；再手跑两遍那份 SQL，都是 0。
