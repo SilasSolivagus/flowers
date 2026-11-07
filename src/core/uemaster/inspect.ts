@@ -300,9 +300,35 @@ function bump(map: Map<string, number>, word: string, weight: number): void {
 }
 
 /** 一段汉字里所有长度 2..6 的连续子串（n-gram）。 */
+/**
+ * 虚词/代词/量词。**任何含它们的 n-gram 都不许当关键词。**
+ *
+ * 为什么必须挡：按字切 n-gram 时，一段普通的中文句子会切出「为平台管理者」「对用户的上传」
+ * 这种碎片——它们不是词，拿去找代码等于随机挑文件。实测（`scripts/bench-locate.ts`）
+ * 一条只有标题 + 一句话的需求，8 个关键词里 7 个是这种碎片，「限速」反被挤掉，
+ * 结果两条定位路径都一个文件找不到。
+ *
+ * PRD（有「」引号、有小标题）不太受影响，因为 QUOTED 与标题那两路给的分高；受损的正是
+ * **只有一句话的老需求**——而迁移过来的 803 条里大部分长这样。
+ */
+const FUNCTION_CHARS = new Set([
+  '的', '了', '为', '对', '在', '和', '与', '把', '被', '这', '那', '次', '每', '个',
+  '是', '有', '需', '要', '可', '以', '能', '会', '就', '也', '都', '而', '并', '或',
+  '我', '你', '他', '它', '们', '之', '其', '中', '上', '下', '来', '去', '到', '给',
+]);
+
+function hasFunctionChar(text: string): boolean {
+  for (const ch of text) if (FUNCTION_CHARS.has(ch)) return true;
+  return false;
+}
+
 function ngrams(run: string, map: Map<string, number>, weight: number): void {
   for (let len = 2; len <= 6; len += 1) {
-    for (let i = 0; i + len <= run.length; i += 1) bump(map, run.slice(i, i + len), weight);
+    for (let i = 0; i + len <= run.length; i += 1) {
+      const piece = run.slice(i, i + len);
+      if (hasFunctionChar(piece)) continue;
+      bump(map, piece, weight);
+    }
   }
 }
 
