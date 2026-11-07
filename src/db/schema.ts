@@ -239,7 +239,38 @@ export const requirements = pgTable('requirements', {
    * 读侧一律 `deleted_at is null`。
    */
   deletedAt: timestamp('deleted_at', { withTimezone: true }),
-}, (t) => ({ numUnique: uniqueIndex('requirements_number_unique').on(t.number) }));
+
+  /**
+   * 迁移溯源（P1）：这一行是从哪儿搬来的 —— 线上 Flower 那张 `requirements.id`（uuid）。
+   *
+   * null = **本系统自己建的需求**（界面上录的、MCP 建的、种子数据）。非 null = 从
+   * 老系统搬来的，值就是老库那一行的 uuid。三件事靠它，缺一不可：
+   *
+   * - **幂等**：`migrate-flower.ts` 只插「`legacy_ref` 还不在库里」的行。以前这件事
+   *   靠 `events` 里 `requirement.migrated` 的 payload（`->> 'sourceId'`）兜：能算，
+   *   但那是**从副作用反推事实**——手工删掉事件、或用别的方式写了事件，幂等就断了。
+   *   写在被搬的那一行身上才是「这条搬过没有」的唯一答案。
+   * - **回滚**：`delete from requirements where legacy_ref is not null` 精确删掉搬来的
+   *   803 条，一条演示数据都不碰。这是这次迁移唯一可接受的撤销方式（不许按 created_at
+   *   或 number 猜——那两条都会连坐真实数据）。
+   * - **核对**：逐条 `legacy_ref → state/priority/platforms` 与 dry-run 基线对账，
+   *   分布对不上时能点名是哪一条。
+   *
+   * 为什么是 `text` 而不是 `uuid` 类型：它是**外部系统的标识**，我们不该对它做 uuid
+   * 语义（也不该因为老库哪天出现非 uuid 的 id 就写不进来）。这里只当不透明字符串用。
+   */
+  legacyRef: text('legacy_ref'),
+}, (t) => ({
+  numUnique: uniqueIndex('requirements_number_unique').on(t.number),
+  /**
+   * 非空即唯一：同一行老数据只许搬进来一次（`legacy_ref` 有值时才建索引，所以
+   * 本系统自建的那些 null 行不受影响——普通唯一索引会把它们当成「重复的 null」而
+   * 在第二行就报错，那是这个索引必须带 `where` 的唯一原因）。
+   */
+  legacyRefUnique: uniqueIndex('requirements_legacy_ref_unique')
+    .on(t.legacyRef)
+    .where(sql`${t.legacyRef} is not null`),
+}));
 
 export const reviewAssignments = pgTable('review_assignments', {
   id: uuid('id').primaryKey().defaultRandom(),
