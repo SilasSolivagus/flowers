@@ -28,7 +28,16 @@ import {
 const SAFE_DATABASE_NAME = /^[a-z_][a-z0-9_]*$/i;
 
 async function main() {
-  const url = resolveDatabaseUrl({ ...process.env, VITEST: 'true' });
+  /**
+   * `perRun: false`：这条命令建的是**基名**那张 `flowers_test`，不是 `flowers_test_<runId>`。
+   *
+   * 2026-11-08 起 `npx vitest run` 自带建库 + 跑迁移（每轮一张，跑完删，见
+   * `tests/global-setup.ts`），所以这条命令不再是用例的前置条件，它现在的用处是两个：
+   * 1. 给 `TEST_DATABASE_URL` 指过去当调试用的空库（逃生口需要一张现成的库）；
+   * 2. 一张「基名」库在手，出问题时能拿 `\dt` 跟那一轮比。
+   * 建一张一次性的 run 库对这条命令没有意义——建完就没人用了。
+   */
+  const url = resolveDatabaseUrl({ ...process.env, VITEST: 'true' }, { perRun: false });
   const database = databaseNameOf(url);
   /**
    * 两道检查，问的是两件不同的事：

@@ -9,7 +9,9 @@ import {
   assertNoMigratedRequirements, assertSafeToReset, countMigratedRequirements,
   resetDb, resetRefusal, shouldAllowReset, truncateMembersOnly,
 } from '../src/db/reset.js';
-import { DEMO_DATABASE, TEST_DATABASE, resolveDatabaseUrl, withDatabase } from '../src/db/url.js';
+import {
+  DEMO_DATABASE, TEST_DATABASE, databaseNameOf, resolveDatabaseUrl, withDatabase,
+} from '../src/db/url.js';
 
 afterAll(async () => {
   await pool.end();
@@ -33,7 +35,7 @@ describe('resetDb 的守卫（脚本口径）', () => {
 
   it('问的是库自己（current_database()），不是环境变量', async () => {
     // 用例跑在测试库上，守卫应当放行并把库名交回来给脚本打印。
-    await expect(assertSafeToReset()).resolves.toBe(TEST_DATABASE);
+    await expect(assertSafeToReset()).resolves.toBe(RUN_DATABASE);
   });
 });
 
@@ -81,7 +83,7 @@ describe('resetDb 的守卫（测试口径）', () => {
 
   it('resetDb 清的是测试库，并把它自己的库名交回来', async () => {
     await db.execute(sql`insert into members (name, email, role, line) values ('待清','wipe@x.test','pm',null)`);
-    await expect(resetDb()).resolves.toBe(TEST_DATABASE);
+    await expect(resetDb()).resolves.toBe(RUN_DATABASE);
     const left = await db.execute<{ n: number }>(sql`select count(*)::int as n from members`);
     expect(left.rows[0]?.n).toBe(0);
   });
@@ -92,7 +94,16 @@ describe('resetDb 的守卫（测试口径）', () => {
 /** 子进程：`src/db/client.ts` 在 import 时就把连接串定死了，改 env 必须在另一个进程里做。 */
 const runFile = promisify(execFile);
 const TSX_BIN = path.join(process.cwd(), 'node_modules', '.bin', 'tsx');
-const TEST_URL = resolveDatabaseUrl({ VITEST: 'true' });
+/**
+ * 这一轮**真正连着**的那张库（`flowers_test_<runId>`，由 `vitest.config.ts` 生成)。
+ *
+ * 以前这里是 `resolveDatabaseUrl({ VITEST: 'true' })`——凭空造一份 env。在「每轮一张库」
+ * 之后那会退化成 pid 兜底（`flowers_test_p<pid>`：一张不存在的库），于是子进程探针
+ * 连不上、断言看着像「守卫没生效」。所以这里取真实进程环境。
+ */
+const TEST_URL = resolveDatabaseUrl(process.env);
+/** 库名同理：这一轮的名字，不是基名 `flowers_test`。 */
+const RUN_DATABASE = databaseNameOf(TEST_URL);
 
 type RunResult = { code: number; out: string };
 
@@ -194,7 +205,7 @@ describe('Item 1：迁移数据在场时 --reset 必须拒绝', () => {
 describe('Item 2：truncateMembersOnly 与 resetDb 同一道门', () => {
   const asTest = { VITEST: 'true' };
 
-  it('守卫以为库是 flowers 时抛错，哨兵成员还在（真连的库是 flowers_test）', async () => {
+  it('守卫以为库是 flowers 时抛错，哨兵成员还在（真连的库是本轮那张）', async () => {
     await resetDb();
     await db.execute(sql`insert into members (name, email, role, line) values ('哨兵','sentinel@x.test','pm',null)`);
 
@@ -204,7 +215,7 @@ describe('Item 2：truncateMembersOnly 与 resetDb 同一道门', () => {
     expect(left.rows[0]?.n).toBe(1);
 
     // 放行时它确实只清成员（这是「一个成员都没有」那条用例需要的窄动作）。
-    await expect(truncateMembersOnly()).resolves.toBe(TEST_DATABASE);
+    await expect(truncateMembersOnly()).resolves.toBe(RUN_DATABASE);
     const gone = await db.execute<{ n: number }>(sql`select count(*)::int as n from members`);
     expect(gone.rows[0]?.n).toBe(0);
   });

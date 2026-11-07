@@ -49,7 +49,7 @@ export function resetRefusal(
   if (shouldAllowReset(database, allowFlag, env)) return null;
   if (isTestRun(env)) {
     return `拒绝清空：测试进程当前的库是「${database}」，而测试只允许清名字以 _test 结尾的库`
-      + `（正常应落到 ${TEST_DATABASE}）。`
+      + `（正常应落到 ${TEST_DATABASE}_<runId>，每一轮一张）。`
       + '这几乎一定是 TEST_DATABASE_URL 指到了演示库——改回来（或删掉这个变量）再跑：'
       + 'npm run db:test:setup';
   }

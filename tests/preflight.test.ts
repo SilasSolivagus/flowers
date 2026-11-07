@@ -14,17 +14,23 @@ import { resolveDatabaseUrl, withDatabase } from '../src/db/url.js';
  * pg 原文 `database "…" does not exist`，两条 `toThrow(/…/)` 立刻红。
  */
 describe('assertDatabaseReachable（3D000 → 一句能照做的话）', () => {
-  const TEST_URL = resolveDatabaseUrl({ VITEST: 'true' });
+  /**
+   * 用**这一轮真实的**连接串：`FLOWERS_TEST_RUN_ID` 由 `vitest.config.ts` 发给 worker，
+   * 所以这里拿到的是 `flowers_test_<runId>`——那张库由 `tests/global-setup.ts` 建好了。
+   * 以前这里传的是凭空造的 `{ VITEST: 'true' }`，在「每轮一张库」之后会退化成 pid 兜底，
+   * 指向一张不存在的库。
+   */
+  const TEST_URL = resolveDatabaseUrl(process.env);
 
-  it('库不存在时抛中文并点名 db:test:setup', async () => {
+  it('库不存在时抛中文并说清下一步（TEST_DATABASE_URL 指错了）', async () => {
     await expect(assertDatabaseReachable({
       VITEST: 'true',
       TEST_DATABASE_URL: withDatabase(TEST_URL, 'flowers_test_absent'),
-    })).rejects.toThrow(/测试库 flowers_test_absent 不存在，先跑 npm run db:test:setup/);
+    })).rejects.toThrow(/测试库 flowers_test_absent 不存在。[^]*TEST_DATABASE_URL/);
   });
 
   it('库在的时候放行并交回库名（不误伤正常路径）', async () => {
     await expect(assertDatabaseReachable({ VITEST: 'true', TEST_DATABASE_URL: TEST_URL }))
-      .resolves.toBe('flowers_test');
+      .resolves.toMatch(/^flowers_test_/);
   });
 });

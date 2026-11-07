@@ -5,31 +5,66 @@ import {
   databaseNameOf,
   missingDatabaseRefusal,
   resolveDatabaseUrl,
+  testDatabaseName,
   testDatabaseShapeRefusal,
+  testRunId,
   withDatabase,
 } from '../src/db/url.js';
 
 /**
- * 这条纯函数是「跑测试不再清空演示库」的唯一开关，所以四件事各钉一条：
- * 测试进程落到 flowers_test、`TEST_DATABASE_URL` 能整条覆盖、非测试进程一个字都
- * 不许变、`TEST_DATABASE_URL` 不许漏进非测试进程。
+ * 这条纯函数是「跑测试不再清空演示库」的唯一开关，所以五件事各钉一条：
+ * 测试进程落到 `flowers_test_<runId>`（**每一轮一张**，两个并发跑不互相截断）、
+ * `TEST_DATABASE_URL` 能整条覆盖、非测试进程一个字都不许变、
+ * `TEST_DATABASE_URL` 不许漏进非测试进程、`db:test:setup` 建的是基名那张。
  *
  * 不碰数据库：这里只解析字符串，没有 pool，也没有 import client.ts。
+ *
+ * 变异（下面每条都对着一次真实回归）：
+ * - 把 `testDatabaseName` 里的 `_${runId}` 去掉 → 两个并发 vitest 又共用一张库，
+ *   `测试进程默认落到 <基名>_<runId>` 那条红。
+ * - 把 `testRunId` 里 `FLOWERS_TEST_RUN_ID` 那一段删掉 → worker 落到 `w<poolId>`，
+ *   `runId 优先用 FLOWERS_TEST_RUN_ID` 那条红（这一条正是「一轮里每个文件一张库」的坑）。
+ * - 把 `resolveDatabaseUrl` 的 `perRun === false` 分支删掉 → `db:test:setup` 建的是
+ *   一次性库，`perRun:false 时回到基名` 那条红。
  */
 describe('resolveDatabaseUrl', () => {
   const PROD = 'postgres://postgres:flowers@localhost:54330/flowers';
 
-  it('VITEST 下默认换成 flowers_test，主机与账号不动', () => {
-    expect(resolveDatabaseUrl({ VITEST: 'true' })).toBe(
-      'postgres://postgres:flowers@localhost:54330/flowers_test',
+  it('测试进程默认落到 <基名>_<runId>，主机与账号不动', () => {
+    expect(resolveDatabaseUrl({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'a1b2' })).toBe(
+      `postgres://postgres:flowers@localhost:54330/flowers_test_a1b2`,
     );
-    expect(databaseNameOf(resolveDatabaseUrl({ VITEST: 'true' }))).toBe(TEST_DATABASE);
+    expect(databaseNameOf(resolveDatabaseUrl({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'a1b2' })))
+      .toBe(`${TEST_DATABASE}_a1b2`);
+    // 形状够 `reset.ts` 那道守卫（`_test` 开头）放行，也够 `db:test:setup` 的建库检查。
+    expect(testDatabaseShapeRefusal(testDatabaseName({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'x7' })))
+      .toBeNull();
+  });
+
+  it('两次「跑」拿到两张库：不同 runId 不共用', () => {
+    const a = databaseNameOf(resolveDatabaseUrl({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'runA' }));
+    const b = databaseNameOf(resolveDatabaseUrl({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'runB' }));
+    expect(a).not.toBe(b);
+  });
+
+  it('runId 优先用 FLOWERS_TEST_RUN_ID，它比 VITEST_POOL_ID / pid 都稳', () => {
+    // 一轮里每个 worker 的 VITEST_POOL_ID 都不同，所以它不能当主路：否则同一轮的
+    // 文件会各拿一张库，而 globalSetup 只建了一张。
+    expect(testRunId({ FLOWERS_TEST_RUN_ID: 'run', VITEST_POOL_ID: '3' }, 999)).toBe('run');
+    expect(testRunId({ VITEST_POOL_ID: '3' }, 999)).toBe('w3');
+    expect(testRunId({}, 4242)).toBe('p4242');
+    // 非法字符换成下划线：库名要拼进 create database "…"，只能是标识符。
+    expect(testRunId({ FLOWERS_TEST_RUN_ID: 'a-b.c' })).toBe('a_b_c');
   });
 
   it('NODE_ENV=test 也算测试进程', () => {
-    expect(databaseNameOf(resolveDatabaseUrl({ NODE_ENV: 'test', DATABASE_URL: PROD }))).toBe(
-      TEST_DATABASE,
-    );
+    expect(databaseNameOf(resolveDatabaseUrl({ NODE_ENV: 'test', DATABASE_URL: PROD, FLOWERS_TEST_RUN_ID: 'zz' })))
+      .toBe(`${TEST_DATABASE}_zz`);
+  });
+
+  it('perRun:false 时回到基名（db:test:setup 建的那张）', () => {
+    expect(databaseNameOf(resolveDatabaseUrl({ VITEST: 'true', FLOWERS_TEST_RUN_ID: 'zz' }, { perRun: false })))
+      .toBe(TEST_DATABASE);
   });
 
   it('TEST_DATABASE_URL 整条覆盖（换主机、换库名都听它的）', () => {
@@ -86,9 +121,14 @@ describe('db:test:setup 的库名形状（Item 3）', () => {
 
 /** Item 4：3D000 的说明书必须能照着做（纯字符串，不碰库）。 */
 describe('缺库时的报错文案（Item 4）', () => {
-  it('点名库名与 npm run db:test:setup', () => {
+  /**
+   * 「每轮一张库」之后，缺库基本只剩一个来源：`TEST_DATABASE_URL` 指到了一张不存在的库
+   * （否则 `tests/global-setup.ts` 会自己建）。所以文案必须点两件事——库名，以及那个变量。
+   */
+  it('点名库名、TEST_DATABASE_URL 与两条出路', () => {
     const message = missingDatabaseRefusal(TEST_DATABASE);
-    expect(message).toContain(`测试库 ${TEST_DATABASE} 不存在，先跑 npm run db:test:setup`);
+    expect(message).toContain(`测试库 ${TEST_DATABASE} 不存在`);
     expect(message).toContain('TEST_DATABASE_URL');
+    expect(message).toContain('npm run db:test:setup');
   });
 });

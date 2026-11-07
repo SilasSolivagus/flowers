@@ -11,8 +11,44 @@
 /** 演示库：`npm run seed` / 看板 / 手工验证用的那张。 */
 export const DEMO_DATABASE = 'flowers';
 
-/** 测试库：`npm run db:test:setup` 建出来的那张，全量测试只许碰它。 */
+/**
+ * 测试库的**基名**：`npm run db:test:setup` 建出来的那张。
+ *
+ * 2026-11-08 起它只是「基名」：每次 `npx vitest run` 实际用的是
+ * `flowers_test_<runId>`（见 `testDatabaseName`）。原因是一次实测——两个 vitest
+ * 同时在跑时共用 `flowers_test`，互相把对方的行 truncate 掉，60 个用例集体变红，
+ * 看上去像一次真回归，排查花了半小时。共用一张库这件事，在「并行」是默认姿势的
+ * 时代就是错的：测试之间唯一可靠的隔离是**不共享任何可变状态**，库也算状态。
+ */
 export const TEST_DATABASE = 'flowers_test';
+
+/**
+ * 这次测试跑用哪个 runId（决定库名后缀）。
+ *
+ * 三个来源，优先级从高到低：
+ * 1. `FLOWERS_TEST_RUN_ID`——由 `vitest.config.ts` 在**主进程**生成一次，通过
+ *    `test.env` 发给每一个 worker。这是唯一「整轮唯一、且所有 worker 与 globalSetup
+ *    看到同一个值」的来源，所以它是主路。
+ * 2. `VITEST_POOL_ID`——vitest 自己设的**worker**编号。它不稳：一轮测试的文件会被
+ *    分给不同 worker，用它当库名会让同一轮里的文件各拿一张库（而 globalSetup 只建了
+ *    一张），于是「表不存在」。只在没有第 1 条时兜底。
+ * 3. `process.pid`——最朴素的兜底（手工 `NODE_ENV=test tsx ...` 时用）。
+ *
+ * 字符集：库名要进 `create database "…"` 的标识符位置，`SAFE_DATABASE_NAME` 只放行
+ * 字母数字下划线，所以这里先把非法字符换掉，而不是让下游去拒绝。
+ */
+export function testRunId(env: DbEnv = process.env, pid: number = process.pid): string {
+  const explicit = env.FLOWERS_TEST_RUN_ID?.trim();
+  if (explicit !== undefined && explicit !== '') return explicit.replace(/[^\w]/g, '_');
+  const pool = env.VITEST_POOL_ID?.trim();
+  if (pool !== undefined && pool !== '') return `w${pool}`;
+  return `p${pid}`;
+}
+
+/** 这一轮的测试库名：`flowers_test_<runId>`。 */
+export function testDatabaseName(env: DbEnv = process.env, pid: number = process.pid): string {
+  return `${TEST_DATABASE}_${testRunId(env, pid)}`;
+}
 
 /** 本地默认连接串（与 docker-compose.yml 的 54330 端口一致）。 */
 const DEFAULT_DATABASE_URL = 'postgres://postgres:flowers@localhost:54330/flowers';
@@ -67,8 +103,10 @@ export function testDatabaseShapeRefusal(database: string): string | null {
  * 这条路径唯一的现实原因就是「还没跑 db:test:setup」，所以直接把那句命令写进报错。
  */
 export function missingDatabaseRefusal(database: string): string {
-  return `测试库 ${database} 不存在，先跑 npm run db:test:setup`
-    + `（它会建库并跑迁移；若 TEST_DATABASE_URL 指到了别的库，先改对或删掉它）。`;
+  return `测试库 ${database} 不存在。`
+    + '`npx vitest run` 会自己建本轮那张库并跑迁移，所以这条错误基本只有一个来源：'
+    + 'TEST_DATABASE_URL 指到了一张不存在的库——改对，或删掉这个变量回到自动建库。'
+    + '（想要一张现成的空库调试，也可以先跑 npm run db:test:setup。）';
 }
 
 /** 连接串里的库名（去掉前导斜杠）；解析不了就返回空串，交给守卫去拒绝。 */
@@ -93,17 +131,34 @@ export function withDatabase(url: string, database: string): string {
   return parsed.toString();
 }
 
+export type ResolveOptions = {
+  /**
+   * 测试进程里是否用「每次跑一张」的库名（默认是）。
+   *
+   * 只有 `scripts/db-test-setup.ts` 传 `false`：它要建的是**基名**那张
+   * （`flowers_test`），当作「手动调试时 `TEST_DATABASE_URL` 可以指过去的一张空库」
+   * 与迁移模板。建一张一次性的 run 库对那条命令没有意义——它建完就没人用了。
+   */
+  perRun?: boolean;
+};
+
 /**
  * 决定这次进程用哪条连接串。
  *
  * - 非测试进程：完全保持原行为（`DATABASE_URL`，缺省本地 flowers）。
- * - 测试进程：默认把库名换成 `flowers_test`；`TEST_DATABASE_URL` 可以整条覆盖
+ * - 测试进程：默认把库名换成 `flowers_test_<runId>`（每次跑一张，见 `testDatabaseName`）；
+ *   `TEST_DATABASE_URL` 可以整条覆盖
  *   （换主机、换账号都行），**但不做二次纠正**——写错了就是写错了，由
  *   `src/db/reset.ts` 的守卫在最危险的那一步之前把它拦下来，而不是在这里悄悄
  *   改回一个「看起来对」的库（那样真实配置错误会被掩盖成一次静默的跑绿）。
  */
-export function resolveDatabaseUrl(env: DbEnv = process.env): string {
+export function resolveDatabaseUrl(env: DbEnv = process.env, options: ResolveOptions = {}): string {
   const base = env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
   if (!isTestRun(env)) return base;
-  return env.TEST_DATABASE_URL ?? withDatabase(base, TEST_DATABASE);
+  // `TEST_DATABASE_URL` 是调试用的逃生口：写死一条连接串就照它连，连库名也不改。
+  if (env.TEST_DATABASE_URL !== undefined && env.TEST_DATABASE_URL.trim() !== '') {
+    return env.TEST_DATABASE_URL;
+  }
+  const database = options.perRun === false ? TEST_DATABASE : testDatabaseName(env);
+  return withDatabase(base, database);
 }
