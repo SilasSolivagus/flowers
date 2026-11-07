@@ -21,9 +21,16 @@ import type { Candidate, LocateResult } from './types.js';
  * 3. 相似度 = 命中的查询词 IDF 之和 ÷ 查询词 IDF 之和（0..1）；
  * 4. 取分数 > 0 的前 `TOP_MERGES` 次合并；
  * 5. 文件聚合：每条合并的相似度先按**合并宽度**打折（`mergeWeight`），同一个文件的
- *    得分取「碰过它的那些合并里最高的那个权重」；排序按 权重降序 → count 降序 → 路径
- *    升序（全序，两次运行必须一样）。`count` 只当同级兜底，不再主导排序——理由见
- *    `mergeWeight` 与 `compareFiles`；
+ *    得分（fileScore）取「碰过它的那些合并里最高的那个权重」；清单排序是
+ *    **fileScore 降序 → 路径升序**（全序，两次运行必须一样）。**`count`（被几次合并
+ *    碰过）不排序，连兜底都不做**，理由有两条，都是实测出来的：
+ *    - 它会系统性奖励公用件。按 count 排时 `上传下载按量限速风控` 的第一名是
+ *      `src/services/request.ts`（HTTP 客户端，谁都在动），真答案
+ *      `src/services/download-risk-modal.ts` 被挤到第 6；
+ *    - 把它降成「权重相同时的兜底」再测一次，**没有正收益**：同权重的那一组里被
+ *      count 顶到前面的还是公用件（`src/utils/questions.ts` 压过
+ *      `src/pages/video/video.vue`）。既然一个键只会在同权重时奖励公用件，就不要它。
+ *    细节见 `mergeWeight` 与 `compareFiles`；
  * 6. `reason` 写成 `出自 MM-DD「那次合并的第一句」`；
  * 7. 没有任何命中 / 查询切不出词 → `{ kind: 'none' }`，**绝不**回一个空 `candidates`
  *    （`copy.ts` 的 `CANDIDATES_LINE` 对空数组直接抛，那是刻意的）。
@@ -319,12 +326,14 @@ export function mergeWeight(score: number, fileCount: number): number {
 }
 
 /**
- * 聚合出来的一个文件：被几次合并碰过、最高权重、以及那次合并本身（`reason` 的来源）。
+ * 聚合出来的一个文件：最高权重，以及产出这个权重的那次合并（`reason` 的来源）。
  *
- * `count` 仍然算出来、也仍然在结构里（它是一条线索的「旁证」，将来若要写进 `reason`
- * 给人看，这里现成），但**不参与排序**——理由见 `compareFiles`。
+ * 这里**刻意不存** `count`（被几次合并碰过）：排序不用它（理由见 `compareFiles`），
+ * `reason` 也不写它，也就是说没有任何读者。一个「将来也许有用」的字段留在结构里，下一个人
+ * 会以为它在参与判断，或者干脆照着它去改排序——上一版就是这样把公用件顶上去的。真要用，
+ * 等真要用的时候再加，那时的理由会和那时的排序口径写在一起。
  */
-type FileAgg = { path: string; count: number; weight: number; best: RankedMerge };
+type FileAgg = { path: string; weight: number; best: RankedMerge };
 
 /**
  * 文件聚合后的排序：权重降序 → 路径升序。**`count` 不参与排序。**
@@ -368,7 +377,7 @@ export function locateFromHistory(
   const ranked = rankMerges(rows, query, opts.top ?? TOP_MERGES);
   if (ranked.length === 0) return { kind: 'none' };
 
-  // 聚合：path → 被几次合并碰过 + 最高权重 + 那次合并（也是 `reason` 的来源）。
+  // 聚合：path → 最高权重 + 产出它那次合并（也是 `reason` 的来源）。
   // `best` 保留的是**权重最高**的合并，不是最近的那次，也不是相似度最高的那次：
   // `reason` 要解释「凭什么说这里」，而这个文件的得分就是按这个权重算出来的——
   // 出处和分数必须是同一件事，否则材料里的「出自 X」解释不了它为什么排在这。
@@ -379,13 +388,10 @@ export function locateFromHistory(
     for (const file of hit.row.files) {
       const seen = byFile.get(file);
       if (seen === undefined) {
-        byFile.set(file, { path: file, count: 1, weight, best: hit });
-      } else {
-        seen.count += 1;
-        if (weight > seen.weight) {
-          seen.weight = weight;
-          seen.best = hit;
-        }
+        byFile.set(file, { path: file, weight, best: hit });
+      } else if (weight > seen.weight) {
+        seen.weight = weight;
+        seen.best = hit;
       }
     }
   }
@@ -402,9 +408,10 @@ export function locateFromHistory(
       reason: mergeReason(entry.best.row),
       source: 'history',
       // 候选分就是排序键本身（宽度打折后的权重），仍然落在 (0, 1]。
-      // 为什么不把 count 掺进来（上一版是 `count + 分数`）：掺进去之后 score 就在说
-      // 另一件事，而排序先看权重——两套口径分开写，早晚有一处忘了同步，那时清单的
-      // 顺序和 score 自己说的就对不上了。`count` 只当同级兜底，不进步。
+      // `score` 只说一件事：这个文件被「哪次合并、以多大权重」碰到过。别再往里掺别的量
+      // （上一版掺的是 `count`，写成 `count + 分数`）：掺进去之后 score 就在说另一件事，
+      // 而排序先看权重——两套口径分开写，早晚有一处忘了同步，那时清单的顺序和 score
+      // 自己说的就对不上了。
       score: entry.weight,
     }));
 

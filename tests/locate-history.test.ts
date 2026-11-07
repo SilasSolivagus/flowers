@@ -763,23 +763,61 @@ describe('中文检索打分', () => {
     expect(mergeWeight(0.5, 50)).toBeLessThan(mergeWeight(0.5, 1));
   });
 
-  it('碰到 0 个源码文件的合并：不崩，也不让候选分变成 NaN', () => {
-    const withEmpty = [...rows, mk('9'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', [])];
-    const got = locateFromHistory(withEmpty, '用户部分权益缩减调整');
-    expect(got.kind).toBe('candidates');
-    if (got.kind !== 'candidates') return;
-    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
-    for (const item of got.items) expect(Number.isFinite(item.score)).toBe(true);
+  it('碰了 0 个功能路径文件的合并：打分前整条剔掉，不是按权重 0 参与打分', () => {
+    // `mergeWeight` 的 n=0 算式已经在上一条用例里钉住了（`mergeWeight(0.5, 0) === 0.5`）。
+    // 这一条钉的是**另一件事**：`files: []` 的合会在 `isFeatureMerge` 这一步就判 false
+    // （一个功能路径文件都没碰），所以它连相似度都算不进去，永远走不到 `mergeWeight`。
+    // 上一版这条用例断言的是「加进来也不崩、分不是 NaN」——那个断言在有它没它时都成立，
+    // 等于什么也没说。现在的断言是「它被丢掉」+「有没有它，清单逐字相同」。
+    const noFiles = mk('9'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', []);
+    expect(isFeatureMerge(noFiles)).toBe(false);
+    expect(rankMerges([...rows, noFiles], '用户部分权益缩减调整').map((hit) => hit.row.commitSha))
+      .not.toContain('9'.repeat(40));
+    // 逐字相同（路径、出处、分数全一样）：它没有让任何一个文件变宽、变窄或换出处。
+    expect(locateFromHistory([...rows, noFiles], '用户部分权益缩减调整'))
+      .toEqual(locateFromHistory(rows, '用户部分权益缩减调整'));
   });
 
-  it('同分同 count：按路径字典序（按码点，不是按 locale）', () => {
+  it('同一次合并动的几个文件权重全相同 → 按路径码点升序（大写在小写前，不随 locale 变）', () => {
     // 用 localeCompare 的话大小写顺序会随运行环境的 locale 变；候选表的顺序是给人数的，
-    // 换台机器就换个顺序等于没有排序。
+    // 换台机器就换个顺序等于没有排序。这条 fixture 里三个文件出自同一次合并，
+    // 权重一模一样，所以顺序**只**由路径码点决定（`count` 也已不参与：它们都是 1，
+    // 上一版用例名里的「同分同 count」正是因为这一点而没有区分力）。
     const one = mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/pages/b.vue', 'src/pages/A.vue', 'src/pages/a.vue']);
     const got = locateFromHistory([one], '用户权益缩减');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
+    expect(new Set(got.items.map((item) => item.score)).size).toBe(1);
     expect(got.items.map((item) => item.path)).toEqual(['src/pages/A.vue', 'src/pages/a.vue', 'src/pages/b.vue']);
+  });
+
+  it('IDF 的语料只含**过滤后**的合并：被剔掉的那条里有稀有词，也不许压低真合并的分数', () => {
+    // 钉的是「过滤在算 df 之前」这个顺序。若把 df 算在**未过滤**的行上：
+    // 被剔的那条只含 `风控`（查询里的其余词一个都没有），它会把这个词的 df 从 0 提到 1，
+    // 于是 `风控` 进了分母却不进分子 → 真合并的覆盖率从 1.0 掉到 5/6 ≈ 0.833。
+    // 分数本身不改变名次（这份语料里只有一条可用合并），所以**只能靠分数**发现这处错序
+    // ——这正是它值得单独一条用例的原因。
+    const feature = mk('1'.repeat(40), '2026-11-03T00:00:00.000Z', 'feat: 用户权益缩减', [
+      'src/pages/video/video.vue',
+    ]);
+    // 路径落在 pages/（结构判据放它过），只有机械词「重新打包」这一条能把它剔掉。
+    const plumbing = mk('2'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 风控 / 重新打包', [
+      'src/pages/risk.vue',
+    ]);
+    expect(isFeatureMerge(plumbing)).toBe(false);
+    // 查询里的 `减风`/`风控` 在两行语料里只出现在那条被剔的合并上。
+    expect([...grams('用户权益缩减风控')]).toContain('风控');
+
+    expect(rankMerges([feature, plumbing], '用户权益缩减风控').map((hit) => hit.row.commitSha))
+      .toEqual(['1'.repeat(40)]);
+    // 覆盖率：真合并把「语料里真实存在的查询词」全覆盖了 → 1.0（错序时是 5/6 ≈ 0.833）。
+    expect(rankMerges([feature, plumbing], '用户权益缩减风控')[0]!.score).toBeCloseTo(1, 10);
+    const got = locateFromHistory([feature, plumbing], '用户权益缩减风控');
+    expect(got.kind).toBe('candidates');
+    if (got.kind !== 'candidates') return;
+    expect(got.items.map((item) => item.path)).toEqual(['src/pages/video/video.vue']);
+    // 候选分 = 覆盖率按合并宽度打折（1 个文件 → ÷log2(3)），同样不许被稀释。
+    expect(got.items[0]!.score).toBeCloseTo(mergeWeight(1, 1), 10);
   });
 
   it('只取前 5 次合并：第 6 名的独占文件不出现在候选里', () => {
