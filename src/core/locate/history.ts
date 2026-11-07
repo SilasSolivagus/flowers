@@ -10,10 +10,11 @@ import type { Candidate, LocateResult } from './types.js';
  * 而且错得看不出来（候选照样有，只是全错）。所以这里的相似度直接在中文上算：
  * 两边都是中文，比的是「字面的词组有没有重合」，不需要谁先变成另一种语言。
  *
- * 打分形状（照 spec §5，加上「先剔掉发版/同步类合并」这一道）：
- * 0. **先剔掉「杂活合并」**（`isFeatureMerge`）：升级版本号、热备域名更换、嵌套 web
- *    同步、Revert/回滚这类合并**整条不参与打分**——它们没有「功能落在哪儿」可言，
- *    放进打分只能把真正的实现压下去（理由见 `isFeatureMerge`）；
+ * 打分形状（照 spec §5，加上「先剔掉结构性杂活合并」这一道）：
+ * 0. **先剔掉结构性杂活合并**（`isFeatureMerge`）：`revert` 提交、合并主干/重新打包/
+ *    发版这类消息、以及**一个功能路径文件都没碰**的合并（版本号、package.json、纯 docs）
+ *    **整条不参与打分**。判据里**不看分支名、不看「回滚/同步」这类可能是真需求的词**
+ *    ——理由见 `isFeatureMerge`；
  * 1. 切块：中文连续段切**二字组**，英文词小写；
  * 2. IDF：`log(1 + N / df)`，`N` = **传进来的这批**行数，`df` = 含该词的合并数。
  *    不读全局、不读库：同一份历史今天和明天给出同一个排名，否则没人敢拿它当线索；
@@ -109,63 +110,68 @@ export function grams(text: string): Set<string> {
 }
 
 /**
- * 发版/同步/回滚类的「杂活合并」——消息里出现这些词就说明那次提交不是在做功能。
+ * 结构性杂活词：消息里出现这些，就说明那次提交不是在做一个功能。
  *
  * 为什么整条剔掉、而不是打个折：`mergeWeight` 的宽度打折在**奖励窄合并**，而发版杂活
- * 永远是窄的（「升级pc版本到327」动 1 个文件、「热备域名更换」动 10 个），同时它的消息
- * 又天然带着功能词（一句「feat: 专业空间回滚」把「专业空间」全命中了），相似度因此很高。
- * 任何固定倍率（0.5、0.2）都只是把门槛挪一格，换个仓、换个版本号就失效。正确的说法是
- * **语义**上的：一次版本号变更不是一次功能。它没有「功能落在哪儿」这个答案，让它参与
- * 打分只可能把真答案挤下去。
+ * 永远是窄的（版本号、打包、合并主干各动一两个文件），消息里又天然带着功能词，相似度
+ * 因此很高。任何固定倍率（0.5、0.2）都只是把门槛挪一格；正确的说法是语义上的：
+ * 一次版本号变更不是一次功能，它没有「功能落在哪儿」这个答案。
  *
- * 只按词面剔、不按词面留：这些词出现在消息任何一段都算（发版火车常常一段一个版本）。
- * 代价是可能误伤（比如「feat: 同步通讯录」里的「同步」）——所以第一优先看 `branch`。
+ * 这份清单**只留结构性、机械性**的说法，而且刻意留得很短——每多一个词面判据就多一批
+ * 误杀，这个仓已经踩过两次：
+ * - 删掉 `回滚`：`feat: 专业空间回滚-实名认证弹框文案修改` 是真功能提交，「回滚」在那
+ *   里是产品动作（把已上线的改动回滚），不是「撤销某人提交」。只认英文 `revert` 前缀
+ *   （git 自己生成的还原提交信息就是 `Revert "…"`）。
+ * - 删掉 `同步`、`热备`、`上线准备`、`升级pc版本`：它们出现在真需求消息里
+ *   （「feat: 同步通讯录」「feat:专业空间回滚-嵌套web提交」），留着就是在赌措辞。
+ *
+ * `合并master` / `mergebranch` 认的是「把主干合进分支」这类机械动作，两种写法都要收
+ * （消息里的空白先压掉再比，`合并 master` 与 `合并master` 等价）。
  */
 const PLUMBING_WORDS = [
-  'revert',
-  '回滚',
   '合并master',
-  '升级pc版本',
+  'mergebranch',
   '升级版本号',
-  '同步',
-  '热备',
   '重新打包',
   '发版',
-  '上线准备',
 ] as const;
 
 /**
- * 功能分支前缀。
+ * 「功能路径」：一个路径里有这几类目录段，就认为这次合并碰了功能代码。
  *
- * 认 `feat-` / `feature-` / `feat/` / `feature/` 四种写法，**不是**只认横杠：
- * 这个仓的真历史里 `feat/architectural-transformation`（46 条）、`feat/remould-dll`（8 条）
- * 用的是斜杠，`feat-direct-link-renovation-tw` 用的是横杠，两种并存。只认横杠会把 54 条
- * 「明摆着的功能分支」整条扔掉——那是判据没写全，不是口径问题。
+ * 这是判断「是不是功能合并」的第二把尺子，也是**不依赖措辞**的那把：只改 `package.json`、
+ * 版本号文件、纯 docs 的合并，天然落不进这些目录，于是被这条规则筛掉——不需要去认它
+ * 消息里写的是「升级版本号」还是「chore: bump」。
+ *
+ * 承认它的局限：`src/utils/` 里也有公用件，这条规则只能判断「有没有碰功能目录」，判断
+ * 不了「碰的是不是这条需求的那个文件」——后者要靠打分与聚合，不是过滤器的事。
  */
-const FEATURE_BRANCH = /^(feat|feature)[-/]/;
+const FEATURE_PATH_SEGMENT = /^(pages?|views?|screens?|components?|services?|api|store|hooks|utils)$/i;
+
+/** 一个路径里有没有功能目录段（`src/pages/video/video.vue` → true）。 */
+function isFeaturePath(file: string): boolean {
+  return file.split('/').some((segment) => FEATURE_PATH_SEGMENT.test(segment));
+}
 
 /**
  * 这条合并是不是「一次真的功能合并」。
  *
- * `branch` 是最强的信号，优先于措辞：
- * - 分支以 `feat-` / `feature-` 开头 → 是功能合并，**不再看消息**（有人在 feat 分支里
- *   写了「同步xx」也不影响它就是那次功能）；
- * - 分支存在但不是这个前缀（`master-1103`、`release-download-limit-yl`）→ 不是。
- *   发布分支上的一次提交说的是「这次发什么」，不是「功能怎么实现」；
- * - 分支为空（pc 仓有大量这种行）时退到消息：首段以 `feat` 开头、且消息里没有杂活词。
+ * **判据里没有 `branch`，这是刻意的。** 上一版曾用「`feat-` 前缀才算功能分支、
+ * `release-*` / `master-*` 不算」来判断，被真数据证伪：这个仓里 326 条挂在 `release-*`
+ * / `master-*` 上的合并，消息看着就是功能提交（`release-download-limit-yl |
+ * feat: 修改视频播放时重复弹窗问题 / feat: 下载限速风控开发`），「下载限速风控」这条
+ * 需求的真答案就在其中。分支名说的是「这个仓怎么发版」，不是「这次提交做了什么」，
+ * 拿它当功能判据等于用仓库的发布习惯去否决提交内容。
  *
- * 消息里的空白先压掉再匹配：清单里的写法是「合并 master」「合并master」并存。
+ * 于是只剩两条结构性判据，任意一条命中就剔除：
+ * 1. 消息以 `revert` 开头，或含机械性杂活词（`PLUMBING_WORDS`）；
+ * 2. 这次合并**一个功能路径文件都没碰**（`isFeaturePath`）——版本号、打包、纯 docs。
  */
 export function isFeatureMerge(row: HistoryRow): boolean {
-  const branch = (row.branch ?? '').trim().toLowerCase();
-  if (FEATURE_BRANCH.test(branch)) return true;
-  if (branch !== '') return false;
-
-  const head = (row.message.split(' / ')[0] ?? '').trim().toLowerCase();
-  if (!head.startsWith('feat')) return false;
-
-  const haystack = row.message.toLowerCase().replace(/\s+/g, '');
-  return !PLUMBING_WORDS.some((word) => haystack.includes(word));
+  const message = row.message.toLowerCase().replace(/\s+/g, '');
+  if (message.startsWith('revert')) return false;
+  if (PLUMBING_WORDS.some((word) => message.includes(word))) return false;
+  return row.files.some(isFeaturePath);
 }
 
 /** 一次合并与查询的匹配结果。`score` 只用于排序，绝对值没有意义。 */
@@ -195,7 +201,7 @@ function compareRanked(a: RankedMerge, b: RankedMerge): number {
 /**
  * 按相似度给合并排名，只留分数 > 0 的，取前 `top` 条。
  *
- * 打分前先过 `isFeatureMerge`：发版/同步/回滚类合并整条不参与（理由见那里的注释）。
+ * 打分前先过 `isFeatureMerge`：结构性杂活合并整条不参与（理由见那里的注释）。
  * 剔完一条不剩时返回空数组，调用方据此给 `{ kind: 'none' }`。
  *
  * `top` 用 `Number.isFinite` 兜一下：调用方从命令行/配置拿来的值可能是 `NaN`
@@ -312,33 +318,34 @@ export function mergeWeight(score: number, fileCount: number): number {
   return score / Math.log2(2 + fileCount);
 }
 
-/** 聚合出来的一个文件：被几次合并碰过、最高权重、以及那次合并本身（`reason` 的来源）。 */
+/**
+ * 聚合出来的一个文件：被几次合并碰过、最高权重、以及那次合并本身（`reason` 的来源）。
+ *
+ * `count` 仍然算出来、也仍然在结构里（它是一条线索的「旁证」，将来若要写进 `reason`
+ * 给人看，这里现成），但**不参与排序**——理由见 `compareFiles`。
+ */
 type FileAgg = { path: string; count: number; weight: number; best: RankedMerge };
 
 /**
- * 文件聚合后的排序：权重降序 → count 降序 → 路径升序。
+ * 文件聚合后的排序：权重降序 → 路径升序。**`count` 不参与排序。**
  *
- * 为什么**权重**第一、`count` 只当兜底（这一版改的就是这里）：按 `count` 排会系统性
- * 地奖励「被很多次合并碰过」的文件，而被很多次合并碰过的通常是公用件——`request.ts`
- * 这种 HTTP 客户端、`global-component.vue` 这种全局壳——而不是这条需求的实现。真数据
- * 657 行上的实测：`上传下载按量限速风控` 按 count 排的第一名是 `src/services/request.ts`，
- * 正确答案 `src/services/download-risk-modal.ts` 被挤到第 6。原因很直白：一条动了 106 个
- * 文件的 2023 年老合并（20+ 条提交拼起来的打包合并）也在前 5 名里，它把 request.ts 的
- * count 顶到 4，而它对自己那 106 个文件里的任何一个都说明不了什么。
+ * 权重第一的理由：按「被几次合并碰过」排会系统性地奖励公用件——`request.ts` 这种 HTTP
+ * 客户端、`global-component.vue` 这种全局壳——而不是这条需求的实现。真数据实测过两次：
+ * count 优先时 `上传下载按量限速风控` 的第一名是 `src/services/request.ts`，而正确答案
+ * 被挤到第 6；换成权重优先后它回到前面。所以先按合并宽度打折（`mergeWeight`），再取
+ * 「碰过这个文件的合并里最高的权重」——取 max 而不是求和/平均，是因为一个文件只要被
+ * **一次**高度相似的合并动过，它就是一条值得看的线索。
  *
- * 所以先按合并宽度打折（`mergeWeight`），再取「碰过这个文件的合并里最高的权重」——
- * 取 max 而不是求和/平均，是因为一个文件只要被**一次**高度相似的合并动过，它就是一条
- * 值得看的线索；求和会把「被十次不相关的合并顺手改过」的公用件顶上去。
- *
- * `count` 留在第二级不是装饰：权重完全相同时（同一个合并动的几个文件），被更多次合并
- * 碰过的那个更可能是落点。它只在同级内起作用，不会翻掉上面的判断。
+ * 权重完全相同时（最常见的情形：**同一次合并**动的几个文件，权重一模一样）按路径升序。
+ * 这里原本用 `count` 兜底，实测没有正收益、反而有害：同权重的组里被 count 顶到前面的
+ * 还是公用件（`src/utils/questions.ts` 压过 `src/pages/video/video.vue`），换成纯路径
+ * 反而把实现文件排回来。既然一个兜底键只会奖励公用件，就不要它。
  *
  * 路径用**码点**比（`<` / `>`）而不是 `localeCompare`：后者的大小写与重音顺序随运行
  * 环境的 locale 变，候选清单的顺序换台机器就换一次，等于没有排序。
  */
 function compareFiles(a: FileAgg, b: FileAgg): number {
   if (a.weight !== b.weight) return b.weight - a.weight;
-  if (a.count !== b.count) return b.count - a.count;
   if (a.path === b.path) return 0;
   return a.path < b.path ? -1 : 1;
 }

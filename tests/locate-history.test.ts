@@ -526,9 +526,10 @@ describe('中文检索打分', () => {
     mergedAt: string,
     message: string,
     files: string[],
-  ): Row => ({ repo: 'r', commitSha, mergedAt, branch: 'feat-x', message, files });
-  // 默认 `branch: 'feat-x'`：`isFeatureMerge` 认的是 `feat-` / `feature-` 前缀，
-  // fixture 里这些行就是在说「一次功能合并」。要测杂活合并时显式改 branch 或加杂活词。
+  ): Row => ({ repo: 'r', commitSha, mergedAt, branch: null, message, files });
+  // `branch` 一律给 null：**判据里已经不看分支名**（这个仓的 `release-*` 分支上挂着的
+  // 就是功能提交）。fixture 的路径默认落在功能目录（pages/ utils/ components/ …），
+  // 因为在新的口径里「有没有碰功能路径」才是结构性的那条判据。
 
   /** 与 Task 5 brief 同一份 fixture：一次真命中、一次无关、一次共用同一个文件。 */
   const rows: Row[] = [
@@ -585,16 +586,16 @@ describe('中文检索打分', () => {
   it('只差一个字的两次合并：换个输入顺序，排名一模一样', () => {
     // 同一天、同一批词，只有最后一个字不同 → 分数很容易相同。排序若只靠 score，
     // 结果就跟着 Array.sort 的实现走（同一份数据两次运行可能不同序）。
-    const twinA = mk('d'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
-    const twinB = mk('e'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减免', ['src/y.ts']);
+    const twinA = mk('d'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/pages/x.vue']);
+    const twinB = mk('e'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减免', ['src/pages/y.vue']);
     const forward = rankMerges([twinA, twinB], '用户权益缩减');
     const backward = rankMerges([twinB, twinA], '用户权益缩减');
     expect(forward.map((hit) => hit.row.commitSha)).toEqual(backward.map((hit) => hit.row.commitSha));
   });
 
   it('同分同日：按 sha 兜底成固定顺序（tie-break 是契约，不是碰巧）', () => {
-    const sameA = mk('a'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
-    const sameB = mk('b'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/x.ts']);
+    const sameA = mk('a'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/pages/x.vue']);
+    const sameB = mk('b'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/pages/x.vue']);
     expect(rankMerges([sameB, sameA], '用户权益缩减').map((hit) => hit.row.commitSha))
       .toEqual(['a'.repeat(40), 'b'.repeat(40)]);
   });
@@ -605,10 +606,10 @@ describe('中文检索打分', () => {
     // 有 IDF 时：`文案` 在 4 条里出现 3 次（几乎不值钱）、`风控` 只出现 1 次（很值钱），
     // 于是 R2 明显胜出。这正是「按中文词面的稀有程度比」的意义。
     const flatText = [
-      mk('a'.repeat(40), '2026-11-05T00:00:00.000Z', '文案调整提示', ['src/faq.ts']),
-      mk('b'.repeat(40), '2026-11-01T00:00:00.000Z', '下载风控开发', ['src/risk.ts']),
-      mk('c'.repeat(40), '2026-10-01T00:00:00.000Z', '文案样式修改', ['src/style.ts']),
-      mk('d'.repeat(40), '2026-09-01T00:00:00.000Z', '文案展示效果', ['src/show.ts']),
+      mk('a'.repeat(40), '2026-11-05T00:00:00.000Z', '文案调整提示', ['src/pages/faq.vue']),
+      mk('b'.repeat(40), '2026-11-01T00:00:00.000Z', '下载风控开发', ['src/pages/risk.vue']),
+      mk('c'.repeat(40), '2026-10-01T00:00:00.000Z', '文案样式修改', ['src/pages/style.vue']),
+      mk('d'.repeat(40), '2026-09-01T00:00:00.000Z', '文案展示效果', ['src/pages/show.vue']),
     ];
     const ranked = rankMerges(flatText, '风控文案');
     expect(ranked[0]!.row.commitSha).toBe('b'.repeat(40));
@@ -655,80 +656,101 @@ describe('中文检索打分', () => {
       mk('6'.repeat(40), '2023-08-01T00:00:00.000Z', '缩减提示', ['src/utils/request.ts', 'src/utils/b.ts']),
       mk('7'.repeat(40), '2023-07-01T00:00:00.000Z', '缩减样式', ['src/utils/request.ts', 'src/utils/c.ts']),
     ];
+    // 排序现在是「权重 → 路径」，`count` 不下场；这里 4 个实现文件权重相同（都是 0.5），
+    // 顺序由路径决定，公用件因为权重只有 0.063 排在后面。
     // `top: 10` 让 7 次合并全部进入聚合：默认的 5 次里只装得下 3 次真合并 + 2 次杂合并，
     // 就凑不出「公用件 count=4 > 实现文件 count=3」这个形状（真数据里正是这个形状出的事：
     // 前 5 名里 3 次真合并都碰了 request.ts，第 4 名那条巨型合并又把它的 count 顶上去）。
     const got = locateFromHistory(corpus, '用户权益缩减', { top: 10 });
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
-    expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
-    expect(got.items[0]!.reason).toContain('用户权益缩减');
-    // 三次真合并抱住的四个文件，无一例外排在那条公用件之前。
+    // 三次真合并抱住的四个文件把前四名占满（权重相同 → 按路径升序），
+    // 一个公用件都挤不进来。
     const paths = got.items.map((item) => item.path);
-    const utilityRank = paths.indexOf('src/utils/request.ts');
-    expect(utilityRank).toBeGreaterThan(0);
-    for (const impl of [
-      'src/pages/video/video.vue',
+    expect(paths.slice(0, 4)).toEqual([
       'src/components/modal/modal.vue',
+      'src/pages/video/video.vue',
       'src/services/equity.ts',
       'src/types/video.ts',
-    ]) {
-      expect(paths.indexOf(impl)).toBeLessThan(utilityRank);
-    }
-    // count 并没有「不算数」：它只够把公用件留在清单里，不够把它顶到任何真合并前面。
-    // 而那条动了 50 个文件的杂合并，宽度打折后一个文件都没进清单。
+    ]);
+    expect(got.items[0]!.reason).toContain('用户权益缩减');
+    // 公用件（被 4 次杂合并碰过）与那条动了 50 个文件的杂合并的边角文件，一条都没进清单。
+    expect(paths).not.toContain('src/utils/request.ts');
     expect(paths.some((path) => path.startsWith('src/legacy/'))).toBe(false);
   });
 
   it('发版杂活合并整条不参与打分：动 1 个文件、相似度近乎满分也不露面', () => {
-    // 这是「宽度打折奖励窄合并」的反面：发版杂活永远窄、又天然带着功能词，
-    // 所以它只能被**剔掉**，不能被打折。
-    const plumbing = {
-      ...mk('c'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减 / 升级pc版本到327', [
-        'src/services/release-plumbing.ts',
-      ]),
-      branch: null,
-    };
+    // 「重新打包」是结构性的机械动作。这条 fixture 刻意让它 1 个文件、相似度满分
+    // （宽度打折与相似度都会偏向它），只有整条剔除才拦得住。
+    const plumbing = mk('c'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减 / 重新打包', [
+      'src/services/release-plumbing.ts',
+    ]);
     const feature = mk('d'.repeat(40), '2026-11-03T00:00:00.000Z', 'feat: 用户权益缩减', [
       'src/pages/video/video.vue',
     ]);
-    // branch 为 null 才会走到消息判断；它就是靠「升级pc版本」被判成杂活的。
     expect(isFeatureMerge(plumbing)).toBe(false);
     const got = locateFromHistory([plumbing, feature], '用户权益缩减');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
     expect(got.items.map((item) => item.path)).toEqual(['src/pages/video/video.vue']);
-    // 只剩杂活合并时，等于「这条历史里没有可用的合并」→ none，而不是把它的文件交上去。
+    // 只剩杂活合并时，等于「这条历史里没有可用的合并」→ none。
     expect(locateFromHistory([plumbing], '用户权益缩减').kind).toBe('none');
   });
 
-  it('同样一句「feat: … / 升级pc版本」，挂在 feat- 分支上就要用：branch 说话，措辞不算', () => {
-    // 反向钉一遍：判据是 `branch`，不是消息里那几个词。否则一旦有人真在功能分支里
-    // 写了一句「同步xx」，整条合成就凭空消失了。
-    const onFeatureBranch = {
-      ...mk('e'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减 / 升级pc版本到327', [
-        'src/pages/video/video.vue',
-      ]),
-      branch: 'feat-userEquity-fjd',
-    };
-    expect(isFeatureMerge(onFeatureBranch)).toBe(true);
-    const got = locateFromHistory([onFeatureBranch], '用户权益缩减');
+  it('只碰 package.json / 版本号文件的合并不参与打分的语料', () => {
+    // 结构性判据：一个功能目录文件都没碰 → 剔。不需要去认它消息里写的是什么。
+    const bump = mk('e'.repeat(40), '2026-11-04T00:00:00.000Z', 'feat: 用户权益缩减', [
+      'package.json',
+      'package-lock.json',
+      'docs/CHANGELOG.md',
+    ]);
+    expect(isFeatureMerge(bump)).toBe(false);
+    expect(locateFromHistory([bump], '用户权益缩减').kind).toBe('none');
+    // 同一个仓里只要有一条真的碰了功能路径，它照旧能被打分。
+    const real = mk('f'.repeat(40), '2026-11-03T00:00:00.000Z', 'feat: 用户权益缩减', [
+      'package.json',
+      'src/pages/video/video.vue',
+    ]);
+    expect(isFeatureMerge(real)).toBe(true);
+  });
+
+  it('消息里写了「回滚」但碰了 pages/ 的合并**要**参与（这条曾被误杀）', () => {
+    // 「回滚」在真历史里是产品动作（把已上线的改动回滚），不是「撤销某人提交」：
+    // `feat: 专业空间回滚-实名认证弹框文案修改` 就是那条需求的真合并。
+    // 只有英文 `revert` 前缀才是 git 自己生成的还原提交。
+    const rollbackFeature = mk('1'.repeat(40), '2026-11-03T00:00:00.000Z', 'feat: 用户权益回滚-弹窗文案修改', [
+      'src/pages/video/video.vue',
+    ]);
+    expect(isFeatureMerge(rollbackFeature)).toBe(true);
+    const got = locateFromHistory([rollbackFeature], '用户权益缩减');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
     expect(got.items[0]!.path).toBe('src/pages/video/video.vue');
+    // 反过来：`revert` 开头的合并剔掉。
+    expect(isFeatureMerge(mk('2'.repeat(40), '2026-11-03T00:00:00.000Z', 'Revert "feat: 用户权益缩减"', ['src/pages/video/video.vue']))).toBe(false);
   });
 
-  it('isFeatureMerge：分支前缀优先，分支为空才看消息，杂活词一票否决', () => {
-    expect(isFeatureMerge({ ...mk('1'.repeat(40), '2026-11-01T00:00:00.000Z', 'whatever', []), branch: 'feat-userEquity-fjd' })).toBe(true);
-    expect(isFeatureMerge({ ...mk('2'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 用户权益缩减', []), branch: 'master-1103' })).toBe(false);
-    // 发布分支不是功能分支：它说的是「这次发什么」。
-    expect(isFeatureMerge({ ...mk('3'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 下载限速风控开发', []), branch: 'release-download-limit-yl' })).toBe(false);
-    expect(isFeatureMerge({ ...mk('4'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 用户权益缩减', []), branch: null })).toBe(true);
-    // 「合并 master」与「合并master」两种写法都要拦住。
-    expect(isFeatureMerge({ ...mk('5'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: 合并master', []), branch: null })).toBe(false);
-    expect(isFeatureMerge({ ...mk('6'.repeat(40), '2026-11-01T00:00:00.000Z', 'feat: Revert 用户权益缩减', []), branch: null })).toBe(false);
-    // 不是 feat 开头的一段，本来就不算功能提交。
-    expect(isFeatureMerge({ ...mk('7'.repeat(40), '2026-11-01T00:00:00.000Z', 'fix: 文案调整', []), branch: null })).toBe(false);
+  it('isFeatureMerge：分支名不参与判断，只看结构（revert / 杂活词 / 有没有功能路径）', () => {
+    const withBranch = (branch: string | null, message: string, files: string[]) => ({
+      ...mk('3'.repeat(40), '2026-11-01T00:00:00.000Z', message, files),
+      branch,
+    });
+    // 发布分支上挂着的功能提交照用——上一版按分支判把它整条扔了，探针 2 的真答案就在里面。
+    expect(isFeatureMerge(withBranch('release-download-limit-yl', 'feat: 下载限速风控开发', ['src/pages/x.vue']))).toBe(true);
+    expect(isFeatureMerge(withBranch('master-1103', 'feat: 用户权益缩减', ['src/pages/x.vue']))).toBe(true);
+    expect(isFeatureMerge(withBranch('feat-userEquity-fjd', 'feat: 用户权益缩减', ['src/pages/x.vue']))).toBe(true);
+    // 结构性杂活词（压空白后比对，「合并 master」与「合并master」等价）。
+    expect(isFeatureMerge(withBranch(null, 'feat: 合并master', ['src/pages/x.vue']))).toBe(false);
+    expect(isFeatureMerge(withBranch(null, 'feat: 合并 master', ['src/pages/x.vue']))).toBe(false);
+    expect(isFeatureMerge(withBranch(null, 'feat: Merge branch develop into release', ['src/pages/x.vue']))).toBe(false);
+    expect(isFeatureMerge(withBranch(null, 'feat: 升级版本号到 3.2.7', ['src/pages/x.vue']))).toBe(false);
+    expect(isFeatureMerge(withBranch(null, 'feat: 发版', ['src/pages/x.vue']))).toBe(false);
+    // 没有功能路径文件 → 剔；只改 docs / package.json 的都属于这一类。
+    expect(isFeatureMerge(withBranch(null, 'chore: bump deps', ['package.json']))).toBe(false);
+    expect(isFeatureMerge(withBranch(null, 'feat: 修改文案', ['docs/PRD.md']))).toBe(false);
+    // 停手：真需求里常见的「同步」「热备」不再当杂活词（这两个词曾经误杀真合并）。
+    expect(isFeatureMerge(withBranch(null, 'feat: 同步通讯录到云端', ['src/pages/x.vue']))).toBe(true);
+    expect(isFeatureMerge(withBranch(null, 'feat: 热备域名切换', ['src/pages/x.vue']))).toBe(true);
   });
 
   it('mergeWeight：文件数为 0 也不除零、不出 NaN，且合并越宽权重越小', () => {
@@ -753,28 +775,28 @@ describe('中文检索打分', () => {
   it('同分同 count：按路径字典序（按码点，不是按 locale）', () => {
     // 用 localeCompare 的话大小写顺序会随运行环境的 locale 变；候选表的顺序是给人数的，
     // 换台机器就换个顺序等于没有排序。
-    const one = mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/b.ts', 'src/A.ts', 'src/a.ts']);
+    const one = mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/pages/b.vue', 'src/pages/A.vue', 'src/pages/a.vue']);
     const got = locateFromHistory([one], '用户权益缩减');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
-    expect(got.items.map((item) => item.path)).toEqual(['src/A.ts', 'src/a.ts', 'src/b.ts']);
+    expect(got.items.map((item) => item.path)).toEqual(['src/pages/A.vue', 'src/pages/a.vue', 'src/pages/b.vue']);
   });
 
   it('只取前 5 次合并：第 6 名的独占文件不出现在候选里', () => {
     // top 是常量（后面还要调），所以这里钉的是「6 个候选合并里只用 5 个」这件事本身。
     const many = [
-      mk('1'.repeat(40), '2026-11-06T00:00:00.000Z', '用户权益缩减', ['src/rank1.ts']),
-      mk('2'.repeat(40), '2026-11-05T00:00:00.000Z', '用户权益缩减', ['src/rank2.ts']),
-      mk('3'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', ['src/rank3.ts']),
-      mk('4'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/rank4.ts']),
-      mk('5'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/rank5.ts']),
-      mk('6'.repeat(40), '2026-11-01T00:00:00.000Z', '用户权益缩减', ['src/rank6.ts']),
+      mk('1'.repeat(40), '2026-11-06T00:00:00.000Z', '用户权益缩减', ['src/pages/rank1.vue']),
+      mk('2'.repeat(40), '2026-11-05T00:00:00.000Z', '用户权益缩减', ['src/pages/rank2.vue']),
+      mk('3'.repeat(40), '2026-11-04T00:00:00.000Z', '用户权益缩减', ['src/pages/rank3.vue']),
+      mk('4'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/pages/rank4.vue']),
+      mk('5'.repeat(40), '2026-11-02T00:00:00.000Z', '用户权益缩减', ['src/pages/rank5.vue']),
+      mk('6'.repeat(40), '2026-11-01T00:00:00.000Z', '用户权益缩减', ['src/pages/rank6.vue']),
     ];
     expect(rankMerges(many, '用户权益缩减')).toHaveLength(5);
     const got = locateFromHistory(many, '用户权益缩减');
     expect(got.kind).toBe('candidates');
     if (got.kind !== 'candidates') return;
-    expect(got.items.map((item) => item.path)).not.toContain('src/rank6.ts');
+    expect(got.items.map((item) => item.path)).not.toContain('src/pages/rank6.vue');
     // limit 只截断、不重排。
     const two = locateFromHistory(many, '用户权益缩减', { limit: 2 });
     expect(two.kind).toBe('candidates');
@@ -782,9 +804,13 @@ describe('中文检索打分', () => {
     expect(two.items).toHaveLength(2);
   });
 
-  it('命中了合并但文件列表为空 → none（候选永不为空）', () => {
+  it('候选永不为空：文件列表为空 / limit 为 0 → none，不是空清单', () => {
     // CANDIDATES_LINE 对空数组直接抛，所以检索层绝不能把「零个文件」交上去。
+    // 两条路径都要落到 none：①那条合并一个文件都没有（新口径下它连功能合并都不算）；
+    // ②`limit: 0` 把清单截成空。
     expect(locateFromHistory([mk('a'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', [])], '用户权益').kind)
       .toBe('none');
+    const one = mk('b'.repeat(40), '2026-11-03T00:00:00.000Z', '用户权益缩减', ['src/pages/video/video.vue']);
+    expect(locateFromHistory([one], '用户权益', { limit: 0 }).kind).toBe('none');
   });
 });
