@@ -284,10 +284,38 @@ describe('validateWalkmap', () => {
   });
 });
 
-// ─── 用例：与上游逐字节一致 ──────────────────────────────────────────────────
+// ─── 用例：与上游逐字节一致（除一处有记录的本地补丁） ──────────────────────
+
+/**
+ * 我们对 vendored 模板打的**唯一**一处补丁（2026-11-08）：
+ * 全屏时把中栏与右栏撤掉，否则全屏画布左下角会露出手机框的一条边。
+ *
+ * 这件事改变了 `vendor/uemaster/README.md` 里「我们改了什么：没有改」那句话，所以
+ * 字节比对必须跟着改，而且改法要能把「只多了这一块」钉住：
+ * 把这一块从我们的产物里剥掉之后，剩下的必须与上游**逐字节相同**；同时这一块必须
+ * 真的出现在我们的产物里（否则这条比对就成了「两边都没这块」的假绿灯）。
+ *
+ * 为什么剥而不是直接放宽成「包含」：放宽之后，任何一处模板改动都不再有人管——
+ * 而那正是 vendoring 唯一能防住的事（上游一升级，我们这侧的差异就没人知道了）。
+ * 补丁本身写在 `templates/walkthrough.html` 里、带 `本地补丁（2026-11-08，非上游）` 开头，
+ * 整块剥除靠这两个锚点。
+ */
+const PATCH_START = '/* 本地补丁（2026-11-08，非上游）';
+const PATCH_RULE = '.flow-panel.fs ~ .stage, .flow-panel.fs ~ .anno-panel { display: none; }';
+
+/** 剥掉那块补丁（含它上面的注释）。找不到就原样返回——让 byte 比对自己去红。 */
+function withoutLocalPatch(html: string): string {
+  const from = html.indexOf(PATCH_START);
+  if (from < 0) return html;
+  const end = html.indexOf(PATCH_RULE, from);
+  if (end < 0) return html;
+  const to = end + PATCH_RULE.length;
+  // 连它后面的那个换行一起剥：上游那一段是「`}` + 换行 + 下一条规则」。
+  return html.slice(0, from) + html.slice(to + (html[to] === '\n' ? 1 : 0));
+}
 
 describe('与上游 build.py 逐字节一致', () => {
-  it.skipIf(!hasUpstream)('同一份 walkmap：vendored 与上游原件的产物 byte-identical', async () => {
+  it.skipIf(!hasUpstream)('同一份 walkmap：剥掉那一处本地补丁后 byte-identical', async () => {
     const { walkmap, fragments, svgText } = await upstreamExample();
     const dir = await tempDir('flowers-bytes-');
     await materializeWalkmap(dir, walkmap, { svg: svgText, fragments });
@@ -302,11 +330,17 @@ describe('与上游 build.py 逐字节一致', () => {
     expect(reportOf(mine.stdout)).toEqual(reportOf(theirs.stdout));
     expect(reportOf(mine.stdout).errors).toEqual([]);
 
-    const a = await readFile(path.join(dir, 'mine.html'));
-    const b = await readFile(path.join(dir, 'theirs.html'));
-    expect(a.byteLength).toBe(b.byteLength);
-    expect(a.equals(b)).toBe(true);
-    expect(a.byteLength).toBeGreaterThan(40_000);
+    const a = await readFile(path.join(dir, 'mine.html'), 'utf8');
+    const b = await readFile(path.join(dir, 'theirs.html'), 'utf8');
+
+    // 1. 补丁真的在产物里（模板 → build.py → 产物这条链没断）
+    expect(a).toContain(PATCH_RULE);
+    // 2. 剥掉它之后逐字节相同：除了这一块，模板与上游一个字都不差
+    expect(withoutLocalPatch(a)).toBe(b);
+    // 3. 补丁只多出那几十个字节，不是把整段模板换掉了
+    expect(Buffer.byteLength(a)).toBeGreaterThan(40_000);
+    expect(Buffer.byteLength(a) - Buffer.byteLength(b))
+      .toBe(Buffer.byteLength(a) - Buffer.byteLength(withoutLocalPatch(a)));
   });
 });
 

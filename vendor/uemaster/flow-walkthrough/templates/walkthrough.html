@@ -45,6 +45,14 @@ html, body { min-height: 100%; background: var(--wt-bg); color: var(--wt-text);
   height: calc(100vh - var(--ux-s-7)); display: flex; flex-direction: column; }
 .flow-panel.fs { position: fixed; inset: 0; z-index: 300; width: auto; height: 100vh;
   padding: var(--ux-s-4) var(--ux-s-5); background: var(--wt-bg); }
+/* 本地补丁（2026-11-08，非上游）：全屏时中栏与右栏仍然排在下面。
+   `.flow-panel.fs` 是 `position: fixed; inset: 0`，只盖住视口内的那一片；底下的
+   `.stage` 与 `.anno-panel` 照旧参与布局（窄视口那条 media query 还把它们的
+   `position` 改回 `static`），于是全屏画布左下角会露出一条手机框的边。
+   全屏要的是「只剩流程图」，所以直接把它们撤掉；退出全屏时类名一摘，规则即失效。
+   用同级选择器 `~`（三栏是 `.layout` 的直接子元素）而不是 `:has()`：后者在老
+   WebView 里没有，而这份模板会被原样塞进产物 HTML。 */
+.flow-panel.fs ~ .stage, .flow-panel.fs ~ .anno-panel { display: none; }
 .fp-title { font-size: var(--ux-fs-title-2); font-weight: 700; border-bottom: 2px solid var(--wt-text);
   padding-bottom: var(--ux-s-2); margin-bottom: var(--ux-s-2); }
 .fp-bar { display: flex; align-items: center; gap: var(--ux-s-2); margin-bottom: var(--ux-s-3); font-size: var(--ux-fs-caption); color: var(--wt-dim); }

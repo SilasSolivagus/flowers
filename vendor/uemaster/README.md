@@ -73,15 +73,30 @@ cmp /tmp/a.html /tmp/b.html && echo 一致
 
 ## 我们改了什么
 
-**没有改。** `flow-canvas/scripts/*.py` 与 `_theme/*` 与上游逐字节一致，可直接
-`diff -r` 比对：
+**一处，只有一处（2026-11-08）。** 其余部分与上游逐字节一致，可直接 `diff -r` 比对：
 
 ```
 diff -r vendor/uemaster/flow-canvas/scripts /tmp/uem/skills/flow-canvas/scripts
 diff -r vendor/uemaster/_theme /tmp/uem/skills/_theme
 ```
 
-升级方式就是整目录覆盖，不要就地打补丁——补丁会让下一次同步变成人工合并。
+### 本地补丁：全屏时撤掉中栏与右栏
+
+文件：`flow-walkthrough/templates/walkthrough.html`，紧跟 `.flow-panel.fs` 那条规则后面：
+
+```css
+.flow-panel.fs ~ .stage, .flow-panel.fs ~ .anno-panel { display: none; }
+```
+
+为什么：`.flow-panel.fs` 是 `position: fixed; inset: 0`，只盖住视口内的那一片；中栏
+`.stage` 与右栏 `.anno-panel` 照旧参与布局（窄视口那条 media query 还把它们的 `position`
+改回 `static`），于是点「全屏」之后画布左下角会露出一条手机框的边。整块补丁（含上面那段
+中文注释）以 `本地补丁（2026-11-08，非上游）` 开头，`tests/walkmap.test.ts` 的字节比对
+靠这两个锚点把它剥掉再比——**补丁变多或变样，那条用例就会红**。
+
+升级时怎么办：整目录覆盖之后，把这一条规则（连注释）重新贴回同一位置，然后跑
+`npx vitest run tests/walkmap.test.ts`。不要为了省这一步去改那条用例——它是唯一会
+告诉你「上游的模板长什么样、我们差了哪一行」的东西。
 
 ## 文件
 
