@@ -7,6 +7,7 @@ import {
   commandReady, placeholderIn, type Candidate,
 } from './candidates.js';
 import { detect } from './detect.js';
+import { adoptLegacyArtifact } from './store.js';
 
 /**
  * 「把一段任务包变成一份 HTML」的那一层：只认一条命令，别的都不认。
@@ -411,6 +412,19 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
 
   // 没有产物路径可比对（调用方自己管文件）：退出 0 就是成功。
   if (opts.file === undefined) return { ok: true, url };
+
+  /**
+   * 命令跑完了，先把它写出来的文件**收到产物根**里再比 mtime。
+   *
+   * 任务包对外部 CLI 说的仍是「写到本项目根目录下的 `data/uemaster/…`」（agent CLI 的
+   * 写权限通常被限制在 cwd 之内，改成一个家目录外的绝对路径只会换来拒绝写入），
+   * 而产物根在仓库外（见 `store.ts` 的 `adoptLegacyArtifact`）。所以在「看文件」这一步
+   * 之前必须搬一次——否则这里会看到「文件不存在」，而它其实就在仓库里躺着。
+   *
+   * 放在 `runGenerator` 里而不是调用方：文件模式的判断（新鲜 / 不存在 / stdout 兜底）
+   * 全部发生在这一层，搬晚了就轮不到它了。
+   */
+  adoptLegacyArtifact(url);
 
   const after = await mtimeOf(opts.file);
   const before = opts.before ?? null;

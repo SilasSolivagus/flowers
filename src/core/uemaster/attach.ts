@@ -7,7 +7,7 @@ import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { evaluateInTx } from '../requirements/evaluate.js';
 import type { Locked } from '../requirements/lock.js';
 import { isStage, type Stage } from './packs.js';
-import { ARTIFACT_PREFIX, BAD_URL, artifactFile } from './store.js';
+import { ARTIFACT_PREFIX, BAD_URL, adoptLegacyArtifact, artifactFile } from './store.js';
 
 const BAD_STAGE = '阶段只能是 evaluate、review、inspect 之一';
 
@@ -126,6 +126,12 @@ const siteFile = artifactFile;
  * 就该在交回来的时候验掉。http(s) 链接不验：那种产物在别人的服务器上，够不着。
  */
 async function assertSiteFileExists(url: string): Promise<void> {
+  /**
+   * 先把「写到仓库里了」那一份收过来（`store.ts` 的 `adoptLegacyArtifact`）：
+   * 任务包让 agent 写到 `<仓库>/data/uemaster/...`，而产物根在仓库外。
+   * 这一步放在 stat 之前，所以对调用方来说「包怎么写、文件就该在哪」仍然成立。
+   */
+  adoptLegacyArtifact(url);
   const file = siteFile(url);
   const rel = `data${url}`;
   try {

@@ -18,7 +18,7 @@ import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
-import { artifactFile } from './store.js';
+import { adoptLegacyArtifact, artifactFile } from './store.js';
 import type { AttemptView } from './trace.js';
 
 /**
@@ -425,7 +425,13 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     }
 
     // 产物路径从包里来（包写死了它），跑之前先记一份快照。
+    //
+    // 两处 `adoptLegacyArtifact`：包让 agent 写到仓库内 `data/uemaster/...`，而产物根
+    // 在仓库外（`store.ts` 的 `adoptLegacyArtifact` 解释为什么不能改包）。跑前收一次，
+    // 是为了让 `before` 说的是「仓库外那份」的 mtime；跑后收一次，否则刚写好的文件
+    // 还躺在仓库里，`snapshot` 会判定「文件没更新」——一次成功的生成被报成失败。
     const url = artifactUrlIn(pack);
+    adoptLegacyArtifact(url);
     const file = artifactFile(url);
     const before = await snapshot(file);
 
@@ -442,6 +448,7 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       return;
     }
 
+    adoptLegacyArtifact(url);
     const after = await snapshot(file);
     if (after === null) {
       await failJob(db, jobId, `生成命令已结束，但产物文件不存在：data${result.url}`);

@@ -20,7 +20,7 @@ import {
 import { runJob, startGeneration } from '../src/core/uemaster/start.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { resetDb, seedPeople } from './helpers/db.js';
-import { REPO_ROOT, artifactExists, cleanArtifacts } from './helpers/files.js';
+import { REPO_ROOT, artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
  * P2.7 的生成器选择：候选表、探测、解析顺序、两种命令形状、两种产物交法、
@@ -544,7 +544,8 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
 
     const url = `/uemaster/PAN-${r.number}/evaluate.html`;
     expect(await artifactExists(url)).toBe(true);
-    const body = await readFile(path.join(REPO_ROOT, 'data', url), 'utf8');
+    // 产物根在仓库外（`FLOWERS_DATA_DIR` 指向临时目录），按站内路径反解，不拼仓库路径。
+    const body = await readFile(siteFile(url), 'utf8');
     expect(body).toContain('<title>stub stdout</title>');
   });
 

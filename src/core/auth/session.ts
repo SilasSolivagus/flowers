@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ensureDataRoot, resetRuntimeDirCache } from '../runtime-dir.js';
 import { SESSION_COOKIE, signSession, verifySession, type SessionTicket } from './session-token.js';
 
 /**
@@ -11,21 +10,27 @@ import { SESSION_COOKIE, signSession, verifySession, type SessionTicket } from '
  * ── 密钥从哪来
  *
  * 1. `FLOWERS_SESSION_SECRET` 环境变量（部署时的正路）；
- * 2. 没有就用仓库里的 `data/.flowers-session-secret`，**没有就生成一个 32 字节的**
- *    并以 0600 落盘。
+ * 2. 没有就用**仓库外**数据目录里的 `flowers/.flowers-session-secret`，**没有就生成一个
+ *    32 字节的**并以 0600 落盘（位置由 `src/core/runtime-dir.ts` 统一决定：macOS 是
+ *    `~/Library/Application Support/flowers`，Linux 是 `$XDG_DATA_HOME/flowers`，
+ *    `FLOWERS_DATA_DIR` 可覆盖）。
  *
- * 为什么要落盘而不是「每次启动随机生成一个」：那样每次重启 / 每次 dev 热重载都会把
- * 所有人踢下线，而 dev 下热重载一天能发生几十次——那不是安全，那是不好用。落盘的
- * 文件只在开发机上，权限 0600，不进 git（`.gitignore` 已经忽略 `data/`）。
+ * 为什么不落盘而用「每次启动随机生成一个」：那样每次重启 / 每次 dev 热重载都会把
+ * 所有人踢下线，而 dev 下热重载一天能发生几十次——那不是安全，那是不好用。
  *
  * 为什么不把默认密钥写死在代码里：写死的就是公开的——任何人都能给任何名字签一个
  * 合法的 cookie。宁可每台机器不一样。
  *
- * 路径按**模块位置**算，不看 `process.cwd()`：有一条既有用例会把 cwd 换到 /tmp，
- * 而那时候密钥不该跟着换地方（换了就等于「换了一个人」）。
+ * ── 为什么不在仓库里（2026-11-08）
+ *
+ * 以前它住在 `<仓库>/data/.flowers-session-secret`，而 `data/` 是 git 忽略目录：一次
+ * `git clean -fdx` 连它一起删掉，下一个请求就地生成一把新密钥，**所有人手里的 cookie
+ * 同时失效**，表现得像「登录随机掉线」，而 `git status` 是干净的、当场没人发现。
+ * 密钥是不可重建数据，不该住在任何「清理未跟踪文件」会走到的路径上。
+ *
+ * 路径按**模块位置**算，不看 `process.cwd()`（这条口径没变，只是现在由 `runtime-dir`
+ * 统一算）：有一条既有用例会把 cwd 换到 /tmp，而那时候密钥不该跟着换地方。
  */
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const SECRET_FILE = path.join(REPO_ROOT, 'data', '.flowers-session-secret');
 
 let cached: string | null = null;
 
@@ -37,16 +42,18 @@ export function sessionSecret(): string {
     cached = fromEnv;
     return cached;
   }
-  if (existsSync(SECRET_FILE)) {
-    const stored = readFileSync(SECRET_FILE, 'utf8').trim();
+  // 路径**每次**从 ensureDataRoot 取（它自己缓存）：密钥文件可能在第一次调用之后才
+  // 迁到新位置，模块加载时算死的常量会指着一个已经不存在的旧路径。
+  const { secretFile } = ensureDataRoot();
+  if (existsSync(secretFile)) {
+    const stored = readFileSync(secretFile, 'utf8').trim();
     if (stored !== '') {
       cached = stored;
       return cached;
     }
   }
   const generated = randomBytes(32).toString('hex');
-  mkdirSync(path.dirname(SECRET_FILE), { recursive: true });
-  writeFileSync(SECRET_FILE, `${generated}\n`, { mode: 0o600 });
+  writeFileSync(secretFile, `${generated}\n`, { mode: 0o600 });
   cached = generated;
   return cached;
 }
@@ -54,7 +61,9 @@ export function sessionSecret(): string {
 /** 只用测：改了 `FLOWERS_SESSION_SECRET` 之后要让缓存忘掉旧值。 */
 export function resetSessionSecretCache(): void {
   cached = null;
+  resetRuntimeDirCache();
 }
+
 
 /** 签发一个值（不写 cookie）。给用例与需要自己 Set-Cookie 的地方用。 */
 export function sessionValue(name: string, epoch: number, now: number = Date.now()): string {
