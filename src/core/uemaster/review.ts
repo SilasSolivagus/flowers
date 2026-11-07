@@ -14,12 +14,14 @@ import {
   type ComposeDeps, type ComposeUsage, type FlowNode, type RequirementRow,
 } from './compose.js';
 import { renderFlowchart } from './flow.js';
-import { head, lsTree, grep, show, type MirrorResult } from '../codemirror/mirror.js';
-import { repoShape } from '../codemirror/route.js';
-import { isGenericWord, pathTokens } from '../codemirror/terms.js';
-import { locateAcross, type CodeIndex, type Probe } from '../codemirror/code-index.js';
+import { head, lsTree, show, type MirrorResult } from '../codemirror/mirror.js';
+import { type CodeIndex } from '../codemirror/code-index.js';
 import { repoIndex, type BuiltIndex } from '../codemirror/index-store.js';
-import { keywordsFrom, prdVersionOf } from './inspect.js';
+import { createExpand } from '../locate/expand.js';
+import { recordLocate } from '../locate/ledger.js';
+import { expandedKeywords, locateFromStructure, type ExpandFn } from '../locate/structure.js';
+import type { LocateResult } from '../locate/types.js';
+import { keywordsFrom, prdVersionOf, renderLocate } from './inspect.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig,
@@ -192,10 +194,14 @@ export type ReviewRequest = { requirementId: string; jobId?: string };
 // ─── 依赖（测试注入用） ──────────────────────────────────────────────────────
 
 /**
- * 四件事照抄 compose（同一套实现），另外三件是本文件自己的输入口。
+ * 四件事照抄 compose（同一套实现），另外几件是本文件自己的输入口。
  *
  * 为什么 `readPrd` / `latestSnapshot` / `attach` 也在这里：用例要能证明「没有快照时
  * 真的去读了」以及「零条命中时不落产物行」，而这两件事都不该靠真实网络与真实写盘。
+ *
+ * `grep` 与 `repoShape` 已经不在了（任务 9）：评审定位改走结构索引，那条 grep 退路
+ * 已无调用者，留着它最大的害处是让「评审还有一条备用路」这句话看起来成立
+ * （走查那边删掉同类型的死代码时用的是同一条理由）。
  */
 export type ReviewDeps = ComposeDeps & {
   readPrd: (db: Db, actor: string, input: { requirementId: string }) => Promise<PrdReadResult>;
@@ -204,15 +210,36 @@ export type ReviewDeps = ComposeDeps & {
   /** 代码镜像：评审要先知道「现在是什么样」，才评得了「这个改动对不对」。 */
   head: typeof head;
   lsTree: typeof lsTree;
-  grep: typeof grep;
   show: typeof show;
-  repoShape: typeof repoShape;
-  /** 静态索引：有索引就按索引定位，没有（或建失败）就退回 grep。 */
+  /** 静态索引：按索引定位（评审阶段没有可 grep 的代码，见 `locateFromStructure`）。 */
   repoIndex: (db: Db, repo: string, sha: string) => Promise<MirrorResult<BuiltIndex>>;
+  /**
+   * 扩展词：把标题/描述交给模型，要一组「代码里可能出现的词」。
+   *
+   * 可注入是因为真的那个要 provider 配置与留痕，而留痕绑在**本次作业**上（`jobId`
+   * 为 null 时整条跳过）。所以 `reviewRequirement` 每次现造一个带留痕的实现，
+   * 用例则注入一个假的——不发一次网。
+   */
+  expand?: ExpandFn;
+};
+
+/**
+ * `gatherBaseline` 真正用得到的那五格。
+ *
+ * 为什么不让它收整个 `ReviewDeps`：那一格里有一半（图、页面片段、构建、PRD 读取）
+ * 与「摸清现状」无关，而用例要能**只**摆出定位需要的东西。窄依赖也让「这一步读了
+ * 什么」这件事在签名上就看得见。
+ */
+export type ReviewLocateDeps = {
+  head: ReviewDeps['head'];
+  lsTree: ReviewDeps['lsTree'];
+  show: ReviewDeps['show'];
+  repoIndex: ReviewDeps['repoIndex'];
+  expand: ExpandFn;
 };
 
 const LIVE: ReviewDeps = {
-  head, lsTree, grep, show, repoShape,
+  head, lsTree, show,
   repoIndex: (db, repo, sha) => repoIndex(db, repo, sha),
   complete,
   render: (mermaid) => renderFlowchart(mermaid),
@@ -321,8 +348,17 @@ function prdBlock(prd: ReviewPrd): string[] {
  * 实测就是如此——第一版评审画出来的流程是「进入PRD评审→打开PRD文档→逐步走查」，
  * 那不是产品的流程，是「做评审这件事」的流程。
  *
- * 现状从代码镜像里取，取法与走查同一套（`codemirror`）：关键词 grep 定位候选文件，
- * 再 `show` 出正文。**不猜**：没定位到就说没定位到。
+ * 任务 9 把取法换成了「结构检索 + 模型扩展词」（见 `locate/structure.ts` 的文件头）：
+ * 评审发生在开工**之前**，代码可能压根不存在，所以不能问「历史里有没有做过」，只能问
+ * 「这条需求在代码里会叫什么」。三条纪律与走查那边一字不差：
+ *
+ * 1. **三种结果不许合并**：读不到代码是 `absent`，读到了没有相似命名是 `none`。
+ *    两句文案在 `copy.ts`，全仓一份；
+ * 2. **扩展词失败即回落**：模型没配、超时、回的不是 JSON——都用 PRD 抽出来的原始关键词，
+ *    评审照常出材料。**评审绝不因为「猜词的那个模型」挂了而失败**；
+ * 3. **记账**（`locate_runs`，`stage: 'review'`）：三种结果各记一条，攒真实案例用。
+ *
+ * 这一段是**尽力而为**的：它的产出是材料里的一段话（`text`），不是评审的通过条件。
  */
 export type Baseline = {
   /** 进提示词的现状描述（人读的几段话）。 */
@@ -332,178 +368,204 @@ export type Baseline = {
   /** 每个仓库 HEAD 上的路径集合，校验代码证据用。 */
   trees: Map<string, Set<string>>;
   /**
-   * 索引给出的候选（带 `why` 与 `route`）。下一步（提示词改成 next probes）会读它；
-   * 现在先原样带着，好让材料里那句「为什么是这几处」有出处。
+   * 这一次定位的结论（三种里的哪一种）。材料里那句话由 `renderLocate` 渲染，
+   * 但结论本身也要交出去：用例与留痕要能分开断言「没读到」与「没有」，
+   * 而两者的 `text` 只是一句话的差别，靠读字符串分辨迟早会被改坏。
    */
-  probes: Array<{ repo: string } & Probe>;
+  locate: LocateResult;
+  /** 真正拿去检索的词（模型的扩展词，或回落的原始关键词）——标题里没有，但留痕要看。 */
+  keywords: string[];
 };
 
 /** 现状摘取的文件数/字节预算：够模型看出「现在怎么做的」，又不至于把仓库搬进提示词。 */
 export const BASELINE_FILES = 6;
 export const BASELINE_BYTES = 28_000;
 
-/** 功能实现只会落在这几类目录里（退回 grep 那条路时用）。 */
-const FEATURE_PATH = /(^|\/)(pages?|views?|screens?|components?|services?|api|store|hooks)\//i;
-const CODE_EXT = /\.(tsx?|jsx?|vue)$/i;
+/**
+ * 评审要摸的两个仓。顺序就是候选清单的顺序（`locateFromStructure` 不跨仓重排）。
+ *
+ * 为什么写死而不是从设置里读：这两个仓是「这个产品的前端」这件事的定义，评审要的
+ * 是「改动会落在哪儿」，而不是「用户在设置里填了哪些仓」。两个仓读不到都算 `absent`——
+ * 一个仓没读到就出候选，等于把「半份现状」当一份交给 PM（见 `readBaselineInputs`）。
+ */
+export const BASELINE_REPOS = ['123pan-pc', '123pan-uni-app'] as const;
 
+/** `gatherBaseline` 需要的全部输入，或者「为什么没读到」。 */
+type BaselineInputs =
+  | {
+    ok: true;
+    repos: Array<{ id: string; sha: string; date: string }>;
+    trees: Map<string, Set<string>>;
+    entries: Array<{ repo: string; index: CodeIndex }>;
+  }
+  | { ok: false; why: string };
+
+/** 报错文本：`Error` 取 message，其余 `String()`——一句话能进材料就行。 */
+function whyText(error: unknown): string {
+  return error instanceof Error && error.message !== '' ? error.message : String(error);
+}
+
+/**
+ * 把「镜像 + 索引」全部拿到手；**任何一格拿不到就整段 `absent`**，并点名是哪一个仓。
+ *
+ * 为什么一个仓失败就整段 absent（而不是拿另一个仓的候选继续）：评审的结论只有一条
+ * `LocateResult`，表达不了「pc 找到了、uni 没读到」。硬出候选的结果是材料写着
+ * 「最可能的位置」，而实际上有一半代码我们没看见——这正是本仓修过两遍的那个形状
+ * （失败被渲染成一个看起来正常的取值）。宁可在材料里说「代码没读到」。
+ *
+ * 索引**空**不算失败：那是「这个仓里没有前端文件」（后端仓），`locateAcross` 会给它
+ * `source: 'grep'` 且一个候选都不贡献，最后结论是 `none`——我们确实查了，那棵树里没有。
+ */
+async function readBaselineInputs(db: Db, deps: ReviewLocateDeps): Promise<BaselineInputs> {
+  const repos: Array<{ id: string; sha: string; date: string }> = [];
+  const trees = new Map<string, Set<string>>();
+  const entries: Array<{ repo: string; index: CodeIndex }> = [];
+
+  try {
+    for (const id of BASELINE_REPOS) {
+      const h = await deps.head(id);
+      if (!h.ok) return { ok: false, why: `${id}：${h.message}` };
+      // 镜像仓已就位但一个提交都没有：没有 sha 就没有「对着哪一版代码评的」。
+      if (h.data === null) return { ok: false, why: `${id}：镜像仓库还没有任何提交` };
+      repos.push({ id, sha: h.data.sha, date: h.data.date });
+
+      const tree = await deps.lsTree(id);
+      if (!tree.ok) return { ok: false, why: `${id}：${tree.message}` };
+      trees.set(id, new Set(tree.data));
+
+      const indexed = await deps.repoIndex(db, id, h.data.sha);
+      if (!indexed.ok) return { ok: false, why: `${id}：建结构索引失败（${indexed.message}）` };
+      entries.push({ repo: id, index: indexed.data.index });
+    }
+  } catch (error) {
+    // 镜像读口自己抛（ssh 层）也是「没读到」：消息原样带出去，PM 才有能催人的线索。
+    return { ok: false, why: whyText(error) };
+  }
+  return { ok: true, repos, trees, entries };
+}
+
+/**
+ * 需求自己的那几段话，拼成给模型的「描述」。
+ *
+ * 为什么是六问而不是 PRD：一次 4 秒的猜词调用里，19k 字的 PRD 既不是「描述」也买不起；
+ * 六问是**需求自己的话**（提出人怎么描述这个改动），与「代码里会叫什么」最近。
+ * 六格全空就是空串——手写一句话的需求在库里很常见，`expand` 那边据此整行不发描述。
+ *
+ * 截到 1200 字：六问每一格都可以很长，而这一层要的是「这条需求在做什么」，
+ * 头几百字已经够了；再长只是把一个猜词任务变成一次阅读理解。
+ */
+const DESCRIPTION_MAX = 1_200;
+
+export function descriptionOf(req: RequirementRow): string {
+  const parts = [
+    req.context, req.problem, req.outcome, req.surfaces, req.edge_cases, req.out_of_scope,
+  ].map((part) => (part ?? '').trim()).filter((part) => part !== '');
+  const text = parts.join('\n');
+  return text.length <= DESCRIPTION_MAX ? text : `${text.slice(0, DESCRIPTION_MAX)}…`;
+}
+
+/**
+ * 候选路径属于哪个仓。
+ *
+ * `Candidate` 不带 repo（那是任务 6 定的形状：跨仓清单只关心路径与理由）。索引与树来自
+ * **同一个 sha**，所以路径反查仓是确定的；两个仓有同一条相对路径时取排在前面的那个——
+ * 这种撞名在真实仓库里近乎不存在，而为此把候选清单拆成两份的代价（跨仓重排）更大。
+ * 反查不到（索引比树旧？）就跳过：读不到正文的候选不该被当成「已经看过」。
+ */
+function repoOf(path: string, trees: Map<string, Set<string>>): string | null {
+  for (const [id, set] of trees) {
+    if (set.has(path)) return id;
+  }
+  return null;
+}
+
+/**
+ * 摸底：结构索引上定位 → 记账 → 把结论与代码片段拼成材料里那一段。
+ *
+ * 顺序是硬的：
+ * 1. 读镜像 + 索引。读不到 → `absent`（**不调模型**：没有索引可搜时猜词是纯浪费）；
+ * 2. 扩展词：`expandedKeywords(expand, 标题, 描述, PRD 关键词)`。任何失败都回落，
+ *    一次都不重试（见 `structure.ts` 与 `expand.ts`）；
+ * 3. `locateFromStructure`：结构命中一律 `low`，不重排、不跨仓比分数；
+ * 4. 记账：**三种结果都记**（`recordLocate` 抛就抛——那是库坏了，与模型无关）；
+ * 5. 有候选才 `show` 正文：那几段是模型判断「与现状冲突」时唯一能引用的东西。
+ *
+ * 返回 `Baseline` 而不是 `Baseline | null`：以前的 `null` 表示「镜像没配」，材料里那句
+ * 「这次没有代码现状可参考」把「没读到」与「没配」混成了一句。现在读不到就是 `absent`，
+ * 材料里由 `ABSENT_LINE` 指名原因——而 `repos` 为空时标题仍写「未参考代码现状」，
+ * 这一句照样诚实。
+ */
 export async function gatherBaseline(
   prd: ReviewPrd,
-  keywordsRaw: string[],
-  deps: ReviewDeps,
+  req: RequirementRow,
+  deps: ReviewLocateDeps,
   db: Db,
-): Promise<Baseline | null> {
-  const keywords = keywordsRaw.filter((word) => !isGenericWord(word) && word.length >= 2);
-  let repos: Array<{ id: string; sha: string; date: string }>;
-  try {
-    const shapeProbe = await deps.lsTree('123pan-pc');
-    if (!shapeProbe.ok) return null; // 没配镜像：退化成「只看 PRD」，标题会写清楚
-    repos = [];
-    for (const id of ['123pan-pc', '123pan-uni-app']) {
-      const h = await deps.head(id);
-      if (!h.ok || h.data === null) return null;
-      repos.push({ id, sha: h.data.sha, date: h.data.date });
-    }
-  } catch {
-    return null;
-  }
-  if (repos.length === 0) return null;
+): Promise<Baseline> {
+  const inputs = await readBaselineInputs(db, deps);
 
-  const trees = new Map<string, Set<string>>();
-  const picked: Array<{ repo: string; path: string }> = [];
-  /** 索引给出的候选（带 `why`）：下一步的提示词与证据栏要它。 */
-  const probes: Array<{ repo: string } & Probe> = [];
-  /** 没有路径命中的仓：现状里要对读者说清楚「这一侧没定位到」。 */
-  const emptyRepos: string[] = [];
-  // ── 第一趟：每仓的树与索引 ──
-  //
-  // 先全部拿到手、**再**一起定位：`locateAcross` 要看到所有仓才判得了「这份 PRD 到底
-  // 有没有具体线索」。每仓各判各的会把 `123pan-pc` 的「文件」噪音排到 `search.vue`
-  // 前面（实测 rank 7）——那正是旧路径靠全局 `STOP_WORDS` 侥幸做对、我们做错的一处。
-  const structs: Array<{ repo: (typeof repos)[number]; set: Set<string> }> = [];
-  for (const repo of repos) {
-    const tree = await deps.lsTree(repo.id);
-    if (!tree.ok) return null;
-    const set = new Set(tree.data);
-    trees.set(repo.id, set);
-    structs.push({ repo, set });
-  }
-
-  const indexes: Array<{ repo: string; index: CodeIndex | null }> = [];
-  for (const struct of structs) {
-    const indexed = await deps.repoIndex(db, struct.repo.id, struct.repo.sha);
-    indexes.push({ repo: struct.repo.id, index: indexed.ok ? indexed.data.index : null });
-  }
-  const choices = locateAcross(indexes, keywords, { limit: BASELINE_FILES });
-
-  for (const struct of structs) {
-    const { repo, set } = struct;
-    const choice = choices.get(repo.id) ?? { source: 'grep' as const, reason: '没有索引' };
-
-    // ── 定位：走索引（P4-10） ──
-    //
-    // 走这一支**不发一次 grep**：结构早就在库里，按路由 > 名字 > 被引用 > 导出符号
-    // 的固定权重打分即可（实测 3–50 ms）。
-    if (choice.source === 'index') {
-      if (choice.probes.length === 0) emptyRepos.push(repo.id);
-      for (const probe of choice.probes) {
-        picked.push({ repo: repo.id, path: probe.path });
-        probes.push({ repo: repo.id, ...probe });
-      }
-      continue;
-    }
-
-    // ── 降级：旧的 grep + 路径加权（§3.5，保留原样） ──
-    // 候选池只取「页面 + 接口」两类（`repoShape` 给的形状）。
-    //
-    // 为什么不在整棵树里找：实测按正文命中排序，排第一的是 `src/enum/umengPoint.ts`
-    // ——那个文件里全是「搜索_展示」这种埋点字符串，命中数最高，但它**不是功能的实现**。
-    // 功能的界面只会落在页面里，所以先在页面里找，找不到再退到接口。
-    // 候选池：路径落在页面/组件/服务目录里的源码文件。
-    // 不从 `repoShape` 拿：它有上限（pages 120），实测把 `share.vue` 截掉了，
-    // 只剩一个 `search.vue`——一个文件撑不起「现状」。
-    const pool = new Set<string>(
-      [...set].filter((p) => FEATURE_PATH.test(p) && CODE_EXT.test(p)),
-    );
-
-    // 两条线索加权：
-    // 1. **路径**里出现关键词——最强的定位信号。「搜索」出现在 `pages/search/` 的路径上，
-    //    比它出现在某个大文件正文里的偶然命中靠谱得多（人也是这样找代码的）。
-    // 2. 正文命中次数——弱信号，只用来在同分里排序。
-    const hits = new Map<string, { content: number; path: number }>();
-    const bump = (path: string, field: 'content' | 'path'): void => {
-      const cur = hits.get(path) ?? { content: 0, path: 0 };
-      cur[field] += 1;
-      hits.set(path, cur);
-    };
-    const lower = (text: string): string => text.toLowerCase();
-    for (const path of pool) {
-      const low = lower(path);
-      for (const word of keywords) {
-        // 中文命中（少数路径带中文）或英文对应词命中，都算路径命中。
-        if (low.includes(lower(word))) bump(path, 'path');
-        else if (pathTokens(word).some((token) => low.includes(token))) bump(path, 'path');
-      }
-    }
-    for (const word of keywords) {
-      const found = await deps.grep(repo.id, word, { max: 60 });
-      if (!found.ok) continue;
-      for (const hit of found.data) {
-        if (!pool.has(hit.path)) continue; // 池外的命中（枚举、配置）不参与排序
-        bump(hit.path, 'content');
-      }
-    }
-    // 路径命中 10 倍于正文命中：实测 3 倍时，`privacy.vue`（隐私政策里全是「文件」「返回」）
-    // 会挤掉真正实现这个功能的那几个文件。路径命中是「这个文件叫这个名字」，正文命中只是
-    // 「这段文字恰好出现」——现在这个功能在哪，前者说了才算。
-    // **只**在路径命中的里面挑。纯正文命中的文件是噪音——实测 `privacy.vue`（隐私政策里
-    // 全是「文件」「返回」）会挤掉真正的实现；PC 侧更是挑到过 `Layouts.tsx` 这种布局组件。
-    // 一个仓没有路径命中，就是「这个功能不在这个仓」，如实写下来，不要拿噪音顶数。
-    const ranked = [...hits.entries()]
-      .filter(([, v]) => v.path > 0)
-      .sort((a, b) => (b[1].path * 10 + b[1].content) - (a[1].path * 10 + a[1].content)
-        || a[0].localeCompare(b[0]))
-      .slice(0, BASELINE_FILES)
-      .map(([path]) => path);
-    if (ranked.length === 0) {
-      emptyRepos.push(repo.id);
-    }
-    for (const path of ranked) picked.push({ repo: repo.id, path });
-  }
-
-  if (picked.length === 0) {
+  if (!inputs.ok) {
+    const located: LocateResult = { kind: 'absent', why: inputs.why };
+    await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
     return {
-      text: '（在代码镜像里没有定位到这个功能现有的实现——下面只能就 PRD 本身评，凡需要「现状」的判断不要写。）',
-      repos: repos.map(({ id, sha }) => ({ id, sha })),
-      trees,
-      probes,
+      text: renderLocate(located),
+      repos: [],
+      trees: new Map(),
+      locate: located,
+      keywords: [],
     };
   }
 
+  // 回落值取**全量** markdown，不是提示词里那份截断过的 `prd.text`：关键词只要词，
+  // 而 PRD 后半段里的词对定位一样有用。
+  const fallback = keywordsFrom(prd.snapshot.markdown, req.title);
+  const keywords = await expandedKeywords(deps.expand, req.title, descriptionOf(req), fallback);
+  const located = locateFromStructure(inputs.entries, keywords, { limit: BASELINE_FILES });
+  await recordLocate(db, { requirementId: req.id, stage: 'review', result: located });
+
+  const repoLine = `现状基线：${inputs.repos
+    .map((r) => `${r.id}@${r.sha.slice(0, 8)}（${r.date.slice(0, 10)}）`).join(' / ')}`;
+
+  // `none`：读到了、没有相似命名。这一句与 `absent` 必须长得不一样（`copy.ts`）。
+  // `absent` 走不到这里——读不到代码时 `readBaselineInputs` 已经整段返回了；类型上它还在
+  // 联合里，所以一并按结论渲染：不抛（评审不该因为一个不该发生的分支失败），也不假装有候选。
+  if (located.kind !== 'candidates') {
+    return {
+      text: `${renderLocate(located)}\n${repoLine}`,
+      repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
+      trees: inputs.trees,
+      locate: located,
+      keywords,
+    };
+  }
+
+  // 有候选：把候选文件的正文读出来。预算与旧路径相同（`BASELINE_BYTES` / 每个 6KB），
+  // 只是候选从哪来换了——旧路径是 grep 打分，现在是结构索引。
   const chunks: string[] = [];
   let left = BASELINE_BYTES;
-  for (const item of picked) {
+  for (const item of located.items) {
     if (left <= 0) break;
-    const body = await deps.show(item.repo, item.path, { maxBytes: Math.min(left, 6_000) });
+    const repo = repoOf(item.path, inputs.trees);
+    if (repo === null) continue;
+    const body = await deps.show(repo, item.path, { maxBytes: Math.min(left, 6_000) });
     if (!body.ok) continue;
     left -= body.data.length;
-    chunks.push(`【${item.repo}:${item.path}】\n${body.data}`);
+    chunks.push(`【${repo}:${item.path}】\n${body.data}`);
   }
 
-  const head0 = repos[0]!;
   return {
     text: [
-      `现状基线：${repos.map((r) => `${r.id}@${r.sha.slice(0, 8)}（${r.date.slice(0, 10)}）`).join(' / ')}`,
-      ...(emptyRepos.length === 0
+      // 第一行永远是那三句结论之一（`copy.ts`）：读者先看到「这是什么结论」，
+      // 再看到「对着哪一版代码」和片段。
+      renderLocate(located),
+      repoLine,
+      ...(chunks.length === 0
         ? []
-        : [`（${emptyRepos.join('、')} 里没有定位到这个功能的实现——它可能不在这个仓库，`
-          + '不要据此判断现状。）']),
-      '下面是这个功能**现在**的实现片段（从代码镜像只读取出，未经修改）：',
-      '',
-      ...chunks,
+        : ['', '下面是这些位置**现在**的样子（从代码镜像只读取出，未经修改）：', '', ...chunks]),
     ].join('\n'),
-    repos: repos.map(({ id, sha }) => ({ id, sha })),
-    trees,
-    probes,
+    repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
+    trees: inputs.trees,
+    locate: located,
+    keywords,
   };
 }
 
@@ -1120,9 +1182,31 @@ export async function reviewRequirement(
   const nodes = parseFlow(flow.mermaid).nodes;
 
   // ── 现状：先摸清「现在是什么样」，才评得了「这个改动对不对」 ──
-  // 关键词取自 PRD（与走查同一套抽取），定位失败不等于报错：退化成「只看 PRD」，
-  // 标题会写「未参考代码现状」——那是一句诚实的话，读者自己会打折看。
-  const baseline = await gatherBaseline(prd, keywordsFrom(prd.text, req.title), counted, db);
+  // 任务 9：结构索引上定位 + 模型扩展词。扩展词这一段是**尽力而为**的——
+  // 没配模型、超时、回的不是 JSON 都只用 PRD 的原始关键词，评审照样出材料；
+  // 失败原因写进 `uemaster_job_attempts` 的 `locate` 行（走 `trace`，与走查同一个阶段名）。
+  const expand: ExpandFn = full.expand ?? createExpand({
+    // 走 `counted` 而不是 `full.complete`：这是一次真实的模型调用，`stats.modelCalls` 要数它。
+    complete: counted.complete,
+    resolveConfig: full.resolveConfig,
+    onAttempt: async (record) => {
+      await trace.write({
+        attempt: 1,
+        phase: 'locate',
+        promptChars: record.promptChars,
+        outputChars: record.outputChars,
+        error: record.error,
+        ms: record.ms,
+      });
+    },
+  });
+  const baseline = await gatherBaseline(prd, req, {
+    head: counted.head,
+    lsTree: counted.lsTree,
+    show: counted.show,
+    repoIndex: counted.repoIndex,
+    expand,
+  }, db);
 
   // ── 问题清单 ──
   const found = await collectFindings(cfg, req, prd, nodes, baseline, counted, usage, trace);
