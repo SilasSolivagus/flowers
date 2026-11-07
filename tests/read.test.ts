@@ -12,7 +12,7 @@ import { makeRelease } from './helpers/factory.js';
 import { getBoard } from '../src/core/read/board.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
-import { cleanArtifacts, writeArtifact } from './helpers/files.js';
+import { cleanArtifacts, removeArtifact, writeArtifact } from './helpers/files.js';
 import { listReleases } from '../src/core/read/version.js';
 import { actorFromCookie, listMembers } from '../src/core/read/member.js';
 
@@ -693,6 +693,61 @@ describe('参考段：三处槽位从产物表读', () => {
     expect(d.refs.find((x) => x.stage === 'inspect')).toMatchObject({
       label: '走查材料', url: null, at: null, atLabel: null, present: false,
     });
+  });
+
+  /**
+   * 2026-11-08 事故的读侧那一半：`data/uemaster/` 被一次 `git clean -fdx` 整个删掉，
+   * 而 `uemaster_artifacts` 的行还在。`present` 说的是「库里有没有这一行」，
+   * 所以它仍然是 `true`；**新加的那一格 `filePresent` 说的才是「盘上还有没有文件」**。
+   * 这两个答案必须能同时给出，否则界面只有两种选择：画一条 404 链接，或者假装
+   * 这份材料从没生成过（后者更糟：日期、版本数、指纹全都对不上）。
+   */
+  it('行在、文件也在：filePresent 为真（照旧给链接）', async () => {
+    const r = await seedInbox('房超');
+    await writeArtifact('/uemaster/PAN-7/evaluate.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: r.id, stage: 'evaluate', url: '/uemaster/PAN-7/evaluate.html',
+    });
+
+    const ref = (await getRequirementDetail(r.id))!.refs.find((x) => x.stage === 'evaluate')!;
+    expect(ref).toMatchObject({
+      present: true, filePresent: true, url: '/uemaster/PAN-7/evaluate.html',
+    });
+  });
+
+  it('行在、文件被删掉：present 仍为真，filePresent 为假', async () => {
+    const r = await seedInbox('房超');
+    await writeArtifact('/uemaster/PAN-7/evaluate.html');
+    await attachArtifact(db, '吕品', {
+      requirementId: r.id, stage: 'evaluate', url: '/uemaster/PAN-7/evaluate.html',
+    });
+    // 模拟那场事故：只删文件，不碰库里的行。
+    await removeArtifact('/uemaster/PAN-7/evaluate.html');
+
+    const ref = (await getRequirementDetail(r.id))!.refs.find((x) => x.stage === 'evaluate')!;
+    expect(ref).toMatchObject({
+      // 库里的那行还在：url / 日期 / 版本数一样不少，界面因此还能说清「丢的是哪一份」
+      present: true, url: '/uemaster/PAN-7/evaluate.html', atLabel: shanghaiMonthDay(),
+      // 但盘上没有了——这一格是界面据以画「文件已丢失」的唯一依据
+      filePresent: false,
+    });
+  });
+
+  it('站外链接不由本地磁盘判死活：filePresent 为 null', async () => {
+    const r = await seedInbox('房超');
+    await attachArtifact(db, '吕品', {
+      requirementId: r.id, stage: 'evaluate', url: 'https://docs.example.com/uemaster/e.html',
+    });
+
+    const ref = (await getRequirementDetail(r.id))!.refs.find((x) => x.stage === 'evaluate')!;
+    // 别人的服务器上那份文件我们够不着：不给结论，界面照旧给它一个链接。
+    expect(ref).toMatchObject({ present: true, filePresent: null });
+  });
+
+  it('没有产物行时 filePresent 也是假：本来就没有文件可丢', async () => {
+    const r = await seedInbox('房超');
+    const d = (await getRequirementDetail(r.id))!;
+    expect(d.refs.every((x) => x.present === false && x.filePresent === false)).toBe(true);
   });
 
   it('没有产物时两处 present 为假，url 与 atLabel 都是 null', async () => {

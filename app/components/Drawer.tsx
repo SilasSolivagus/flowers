@@ -44,7 +44,12 @@ const PILL: Record<string, string> = {
   voided: 'no',
 };
 
-function RefRow({
+/**
+ * 导出的理由只有一条：这一行「画链接还是画『文件已丢失』」是一个必须被用例钉住的
+ * 判断（`tests/artifact-missing.test.tsx`），而整张抽屉带着 `next/link`，在用例进程里
+ * 起不来。判据在这一格里，用例就渲染这一格。
+ */
+export function RefRow({
   item, id, number, generator, canEdit,
 }: {
   item: DetailRef;
@@ -73,8 +78,17 @@ function RefRow({
     <div className="row3" data-stage={item.stage}>
       <div className="l">
         <b>{item.label}</b>
-        {item.url !== null && (
+        {/* 链接只在**文件还在**时画。库里有行、磁盘上没文件（`filePresent: false`，
+            2026-11-08 那次 `git clean -fdx` 就是这么把 `data/uemaster/` 整个删掉的）
+            时画的是一个 404：链接看起来仍然可点，点开是「产物不存在」。
+            `filePresent === null` 是站外链接——那不是我们的文件，照旧给链接。 */}
+        {item.url !== null && item.filePresent !== false && (
           <span><a className="att" href={item.url} target="_blank" rel="noreferrer">{item.url}</a></span>
+        )}
+        {/* 「丢了」要连「怎么办」一起说：这一行右边的「生成」按钮就是那个办法，
+            但没有 `edit` 的人看不到按钮，所以这句话里要带动作名。 */}
+        {item.present && item.filePresent === false && (
+          <span className="miss">文件已丢失，重新生成</span>
         )}
       </div>
       <div className="acts">

@@ -1,5 +1,7 @@
 import { sql } from 'drizzle-orm';
+import { stat } from 'node:fs/promises';
 import { db } from '../../db/client.js';
+import { ARTIFACT_PREFIX, artifactFile } from '../uemaster/store.js';
 import {
   can, lineLabelOf, type Ability, type Member, type RequirementFacts,
 } from '../auth/roles.js';
@@ -83,7 +85,26 @@ export type DetailRef = {
   at: string | null;
   /** 已格式化成 MM-DD 的那一天（页面不再自己算日期）。 */
   atLabel: string | null;
+  /** 库里**有没有这一行**（有行才谈得上「文件在不在」）。 */
   present: boolean;
+  /**
+   * 磁盘上**还有没有**这份文件：`present` 只说库里有行，这一格说文件在不在。
+   *
+   * 为什么要多一格（2026-11-08 事故）：`data/uemaster/` 是 git 忽略的运行期目录，
+   * 一次在子 agent 会话里跑的 `git clean -fdx` 把它整个删掉，而
+   * `uemaster_artifacts` 的行还在——抽屉照样给出链接，点开是 404「产物不存在」。
+   * 两个读侧（磁盘 / 库）之间没有任何一处对过账，界面因此把一条死链当成按钮。
+   *
+   * 三态，不是布尔：
+   * - `true`：站内路径，文件在；
+   * - `false`：站内路径，文件不在（要么被删，要么从没落过盘）——界面显示「文件已丢失」；
+   * - `null`：**站外链接**（`http(s)://…`，人能 attach 外链）。那不是我们的文件，
+   *   不该由本地磁盘判它死没死，所以不给结论。
+   *
+   * 没有产物行（`present: false`）时是 `false`：本来就什么都没有，这一格只在
+   * `present` 为真时被界面读。
+   */
+  filePresent: boolean | null;
   /**
    * 这份产物与**当前**描述是否对得上（P4-02）。
    *
@@ -464,6 +485,27 @@ function timeUsed(
 }
 
 /**
+ * 一个站内产物路径 → 文件在不在磁盘上。
+ *
+ * 为什么在这里 stat 而不是在写侧记一列：文件是被**别的东西**删掉的（一次
+ * `git clean -fdx`、一次手工 `rm`、一次换机器但没搬 `data/`），写侧根本没有机会
+ * 知道。读一次 stat 是唯一能回答「现在还在不在」的办法，而一行一 stat 的代价是
+ * 可以接受的：一条需求最多三处材料。
+ *
+ * 站外链接直接给 `null`（不是我们的文件，不判）；`artifactFile` 的越界/形状错误
+ * 折成 `false`：那种名字本来就不会有文件。
+ */
+async function filePresentOf(url: string): Promise<boolean | null> {
+  if (!url.startsWith(ARTIFACT_PREFIX)) return null;
+  try {
+    const info = await stat(artifactFile(url));
+    return info.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 参考段里「一处 UEmaster 材料」那一行：有产物就是链接 + 那天的日期，没有就是
  * 「还没生成」（`present: false`）。
  *
@@ -472,29 +514,34 @@ function timeUsed(
  * 另外还留着「交回材料」这条人走的路。所以 `present` 只决定**渲染链接还是「还没
  * 生成」**，不决定渲染还是不渲染。
  *
+ * 2026-11-08 起多了 `filePresent`：库里有行 ≠ 磁盘上有文件。这一格是异步来的
+ * （`filePresentOf` 要 stat），所以这函数也是异步的——三行并发，不是串行三次。
+ *
  * `generation` 是「这个阶段正在跑的那次作业」，由调用方传入。三行同一种形状，
  * 包括 review（P2 之前它在没有产物时显示「PRD 快照」）：PRD 链接不靠这一行承载——
  * 信息段的「PRD 链接」一直在，抽屉里点得到。
  */
-function artifactRef(
+async function artifactRef(
   stage: DetailRef['stage'],
   label: string,
   artifact: ArtifactRef | undefined,
   runningJobId: string | null,
   currentHash: string,
-): DetailRef {
+): Promise<DetailRef> {
   const generation = runningJobId === null ? null : { id: runningJobId };
   if (!artifact) {
     // 没有产物：新鲜度这一格没有意义（界面上那一行是「生成」入口，不是链接）。
     // 给 'unknown' 而不是留空：类型只有三态，而这一格只在 `present` 时被读。
+    // `filePresent: false`：库里没有行，也就不可能有「这一行的文件」。
     return {
       stage, label, url: null, at: null, atLabel: null, present: false,
-      freshness: 'unknown', versions: 0, generation,
+      filePresent: false, freshness: 'unknown', versions: 0, generation,
     };
   }
   const at = artifact.at.toISOString();
   return {
     stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true,
+    filePresent: await filePresentOf(artifact.url),
     freshness: freshnessOf(artifact.inputHash, currentHash),
     versions: artifact.versions,
     generation,
@@ -723,11 +770,12 @@ export async function getRequirementDetail(
       edgeCases: row.edge_cases,
       outOfScope: row.out_of_scope,
     },
-    refs: [
+    // 三行并发 stat：一次请求只多三个 `stat(2)`，而串行写会让抽屉多等两个来回。
+    refs: await Promise.all([
       artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), running.get('evaluate') ?? null, currentHash),
       artifactRef('review', '评审材料', artifacts.get('review'), running.get('review') ?? null, currentHash),
       artifactRef('inspect', '走查材料', artifacts.get('inspect'), running.get('inspect') ?? null, currentHash),
-    ],
+    ]),
     review,
     events: eventRes.rows.map((e) => ({
       seq: Number(e.seq),

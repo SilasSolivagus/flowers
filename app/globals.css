@@ -222,6 +222,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .row3:last-child{border-bottom:0}
 .row3 b{display:block;font-weight:500}
 .row3 .l span{color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
+/* 新增（2026-11-08）：库里有产物行、磁盘上没文件时那一句「文件已丢失，重新生成」。
+   与旁边那条灰色链接同一个位置、同一号字，但用负向色——它不是一条说明，是一次数据
+   丢失。`.row3 .l span` 会把它刷成 text-4，所以这里必须带上 `.l` 两级（0,3,0）。 */
+.row3 .l .miss{color:var(--c-negative)}
 .pill{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-caption) var(--f-sans)}
 .pill.ok{background:var(--c-positive-weak);color:var(--c-positive)}
 .pill.warn{background:var(--c-warning-weak);color:var(--c-warning)}
