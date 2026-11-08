@@ -660,6 +660,11 @@ export const blobIndex = pgTable('blob_index', {
    * 可空是必须的：这一列出现**之前**写下的行没有它，读侧按 `[]` 处理（见
    * `blob-index.ts` 的 `readBlobRows`）。按 blob 存而不是按提交存，理由与 `symbols`
    * 同一个：同一块内容只该扫一次 template。
+   *
+   * **它不会自己回填**（I5）：写入是 `on conflict do nothing`、键是内容地址，内容不变
+   * 就永远不重写，所以迁移 0032 之前索引过的仓这一列恒为 null，只有 `--force-reparse`
+   * 能补。因此读侧不许把 null 读成「确实没有组件」：整仓为空时按「没读到」处理
+   * （`copy.ts` 的 `pagesOutlineMissing` → 清单不完整）。
    */
   outline: jsonb('outline'),
   /** `pages.json` 自己说的页面清单（迁移 0032）：`[{ route, title, source }]`。 */

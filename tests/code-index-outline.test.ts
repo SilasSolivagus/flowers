@@ -7,11 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { db } from '../src/db/client.js';
 import { readBlobRows } from '../src/core/codemirror/blob-index.js';
-import { extractIndex, outlineOf, type CodeIndex } from '../src/core/codemirror/code-index.js';
+import {
+  HEAD_LINES, extractIndex, outlineOf, parseBlob, type CodeIndex,
+} from '../src/core/codemirror/code-index.js';
 import {
   assembleFor, clearAssembleCache, forgetBlobs, syncRepoIndex,
 } from '../src/core/codemirror/index-store.js';
-import { DEFAULT_SSH_HOST, lsTreeEntries } from '../src/core/codemirror/mirror.js';
+import { DEFAULT_SSH_HOST, headLines, lsTreeEntries } from '../src/core/codemirror/mirror.js';
 
 /**
  * Task 2：一页里已经有哪些组件（outline 第一层）。
@@ -193,6 +195,59 @@ describe('outlineOf 扩展到 tsx / jsx / ts（Task 2b）', () => {
     expect(outlineOf('a.ts', ts).map((n) => [n.name, n.line])).toEqual([['useA', 1], ['b', 2]]);
   });
 
+  /**
+   * C3：`useState<IFile>(null)` 在正则眼里就是一个大写开头的标签，实测它让 pc 的
+   * `VideoModule.tsx` 一行代码造出 3 个假组件，最后材料写「/VideoPage 已有组件 IFile」。
+   * 同一份文件里的真标签必须还在——「宁可少说一个真组件」也比编一个假组件好，
+   * 但同行嵌套（`<div><HeaderBar /></div>`）前面也是 `>`，不能被一起误伤。
+   */
+  it('tsx 里的泛型实参（useState<IFile>）不是组件，同一份文件里的真标签照旧', () => {
+    const tsx = [
+      'import { useState } from "react";',
+      'export function Page() {',
+      '  const [file, setFile] = useState<IFile>(null);',
+      '  const ref = useRef<IVideoPlayerRef>(null);',
+      '  const marked = <div><HeaderBar /><FileList /></div>;',
+      '}',
+    ].join('\n');
+    const names = outlineOf('src/pages/VideoPage/VideoModule.tsx', tsx).map((n) => n.name);
+    expect(names).not.toContain('IFile');
+    expect(names).not.toContain('IVideoPlayerRef');
+    expect(names).toEqual(['HeaderBar', 'FileList']);
+  });
+
+  it('泛型实参的另一种形态（`Foo<Bar>` 前面是 `>`）也不是组件', () => {
+    const tsx = 'type X = Map<string, Promise<IFile>>;\nexport const P = () => <Panel />;';
+    expect(outlineOf('a.tsx', tsx).map((n) => n.name)).toEqual(['Panel']);
+  });
+
+  /**
+   * I1：`.ts` 的导出检测必须与 `.tsx` 同一口径（先抹注释与字符串）。
+   * 实测一个文件里 4 条「导出」有 3 条出自注释/字符串——它们会原样进 `blob_index.outline`。
+   */
+  it('ts 里注释与字符串中的 export 不算符号', () => {
+    const ts = [
+      '// export const legacy = 1;',
+      '/* export function oldOne() {} */',
+      "const hint = 'export const fromString = 2';",
+      'export const real = 3;',
+    ].join('\n');
+    expect(outlineOf('src/share.ts', ts).map((n) => n.name)).toEqual(['real']);
+  });
+
+  /** I2：`.vue` 的 template 里注释掉的旧组件与 `.tsx` 注释里的标签同一条规矩。 */
+  it('vue template 里 HTML 注释掉的组件不算（与 tsx 口径一致）', () => {
+    const vue = [
+      '<template>',
+      '  <div>',
+      '    <!-- 旧写法 <LegacyBar /> 已删 -->',
+      '    <HeaderBar />',
+      '  </div>',
+      '</template>',
+    ].join('\n');
+    expect(outlineOf('pages/x/index.vue', vue).map((n) => n.name)).toEqual(['HeaderBar']);
+  });
+
   it('vue 行为不变（回归）：只取 template 里的大写标签', () => {
     const names = outlineOf('pages/share/index.vue', VUE);
     expect(names).toEqual([
@@ -215,6 +270,41 @@ describe('装配：outline 按路径挂到索引上', () => {
     // Task 2b 之后 `.ts` 也进 outline：它给的是导出符号，不是组件使用。
     expect(index.outline['src/services/share.ts']).toEqual([{ kind: 'symbol', name: 'a', line: 1 }]);
     expect(Object.keys(index.outline)).toEqual(['src/pages/share/index.vue', 'src/services/share.ts']);
+  });
+});
+
+// ─── I3：符号只看文件头，outline / pages 看整份 ─────────────────────────────
+
+/**
+ * 整份读是 outline 的需求（`</template>` 常在 80 行之后），但它同时会让 `exports`
+ * 多看到几百个名字，而 `exports` 是 `locate` 的评分输入——那正是计划写明的非目标。
+ * 所以 `parseBlob` 有两个文本参数，这条用例钉的就是「哪个消费者拿哪一份」。
+ */
+describe('parseBlob 的两个文本（I3 的裁决）', () => {
+  const full = [
+    '<template>',
+    '  <div>',
+    '    <SearchBar />',
+    ...Array.from({ length: 90 }, (_, i) => `    <div class="filler-${i}" />`),
+    '    <LateBar />',
+    '  </div>',
+    '</template>',
+    '<script setup lang="ts">',
+    'const kw = ref("");',
+    '</script>',
+  ].join('\n');
+
+  it('outline 看整份（105 行之后的组件在），符号只看文件头 80 行（script 还没开始）', () => {
+    const parsed = parseBlob(headLines(full, HEAD_LINES), 'index.vue', full);
+    expect(parsed.outline.map((n) => n.name)).toEqual(['SearchBar', 'LateBar']);
+    // 本轮之前的口径：`.vue` 的 `<script setup>` 在第 80 行之后 → 一个符号都没有
+    expect(parsed.symbols).toEqual([]);
+  });
+
+  it('默认只用一份文本（纯函数调用方不必关心这件事）', () => {
+    const parsed = parseBlob(full, 'index.vue');
+    expect(parsed.outline.map((n) => n.name)).toEqual(['SearchBar', 'LateBar']);
+    expect(parsed.symbols).toContain('kw');
   });
 });
 
@@ -328,6 +418,23 @@ describe('落库：outline / pages 按内容地址存', () => {
       { kind: 'component-use', name: 'LateShareBar', line: 105 },
     );
     expect(assembled.data.index.pages.map((page) => page.route)).toContain('/pages/p29/index');
+  });
+
+  /**
+   * I3 在真链路上的样子：`SHARE_VUE` 的 `<script setup>` 在 100 行之后。整份读如果也
+   * 喂给符号抽取，`exports` 就会多出 `kw` 等名字（真仓实测 +545），`locate` 的排序被
+   * 推走。所以这条断言 `exports` 为空——那是本轮之前逐字相同的口径。
+   */
+  it('exports 仍按文件头 80 行算（.vue 整份读只给 outline / pages）', async () => {
+    clearAssembleCache();
+    const assembled = await assembleFor(db, REPO, fixture.sha);
+    expect(assembled.ok).toBe(true);
+    if (!assembled.ok) return;
+    expect(assembled.data.index.files['src/pages/share/index.vue']?.exports).toEqual([]);
+    // 同一块内容：outline 看整份，第 105 行的组件在（口径不同不是「少读」）
+    expect(assembled.data.index.outline['src/pages/share/index.vue']).toContainEqual(
+      { kind: 'component-use', name: 'LateShareBar', line: 105 },
+    );
   });
 
   it('outline 是 null 的老行按 [] 读，装配不报错', async () => {

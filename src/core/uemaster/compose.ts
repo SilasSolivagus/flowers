@@ -12,7 +12,7 @@ import { makeTrace, type Trace } from './attempts.js';
 import { typeLabel } from '../requirements/type.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
-import type { KnownSurface } from '../locate/copy.js';
+import { EMPTY_SURFACES, type KnownSurface, type KnownSurfaces } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
@@ -123,7 +123,7 @@ export type ComposeDeps = {
    * 真实路径（`start.ts` 的 `runJob`）显式注入 `() => loadKnownSurfaces(db)`。
    * 读失败由注入方吞成空数组（见 `loadKnown`）：上下文缺了不该让材料失败。
    */
-  loadSurfaces?: () => Promise<KnownSurface[]>;
+  loadSurfaces?: () => Promise<KnownSurfaces>;
 };
 
 /** 真实的四个依赖：真 HTTP、真 Python 排版器、真配置解析、真 walkmap 构建器。 */
@@ -141,12 +141,12 @@ const LIVE: ComposeDeps = {
  * 「代码没读到」——那是评审那条链路的 `absent`，它有专门的一句话（`copy.ts`）。
  * 评估这里少一段上下文，材料照旧成立，只是这一次材料**不计入基线**（报告里要写明）。
  */
-export async function loadKnown(deps: ComposeDeps): Promise<readonly KnownSurface[]> {
-  if (deps.loadSurfaces === undefined) return [];
+export async function loadKnown(deps: ComposeDeps): Promise<KnownSurfaces> {
+  if (deps.loadSurfaces === undefined) return EMPTY_SURFACES;
   try {
     return await deps.loadSurfaces();
   } catch {
-    return [];
+    return EMPTY_SURFACES;
   }
 }
 
@@ -216,12 +216,21 @@ function titleOf(surface: KnownSurface): string {
   return (surface.title ?? '').trim() === '' ? '无标题' : surface.title!;
 }
 
-/** 清单里的一行。两个提示词共用，免得一处改了标点、另一处忘了。 */
+/**
+ * 清单里的一行。两个提示词共用，免得一处改了标点、另一处忘了。
+ *
+ * `被 N 处引用`（I4）：`importedBy` 本来是每次装配都算、生产路径零次读取的死数据。
+ * 一行只放一个数字、不放引用者名单——材料要的是「改这一页会波及几处」，一个数就够，
+ * 列名单会把这一行变成文件清单，而清单是要被模型照着抄的。
+ * `importers === null` 是「这一页没有视图文件」，与「0 处引用」不是一件事，所以分开写。
+ */
 function surfaceLine(surface: KnownSurface): string {
+  const hidden = surface.componentTotal - surface.components.length;
   const components = surface.components.length > 0
-    ? `已有组件 ${surface.components.join('、')}`
+    ? `已有组件 ${surface.components.join('、')}${hidden > 0 ? `（另有 ${hidden} 个未列出，共 ${surface.componentTotal} 个）` : ''}`
     : '没读到组件';
-  return `  - ${surface.route}（${titleOf(surface)}）：${components}`;
+  const refs = surface.importers === null ? '没有视图文件' : `被 ${surface.importers} 处引用`;
+  return `  - ${surface.route}（${titleOf(surface)}）：${components}；${refs}`;
 }
 
 /**
@@ -241,21 +250,36 @@ function surfaceLine(surface: KnownSurface): string {
  * 文件列表」。「现有页面」只说得出「这页在」，说不出「这页里有什么」，那一句就只
  * 剩半个用处。组件名**只来自索引里这一页的视图文件**（口径见 `knownSurfaces`）。
  */
-export function surfacesBlock(known: readonly KnownSurface[]): string[] {
-  if (known.length === 0) return [];
-  const first = known[0]!;
+export function surfacesBlock(known: KnownSurfaces): string[] {
+  if (known.surfaces.length === 0) return [];
+  const first = known.surfaces[0]!;
   const exampleTitle = titleOf(first) === '无标题' ? '页面文案' : titleOf(first);
+  const counted = known.total === known.surfaces.length
+    ? `共 ${known.total} 个`
+    : `共 ${known.total} 个，本次只列出前 ${known.surfaces.length} 个`;
+  // C1 的裁决：清单不完整时**不许**说「不要假设清单之外还有页面」。
+  // 同一句话在「清单是完整的」时是对的，在「只覆盖一个仓 / 截断了 / 某个仓轮廓没读到」
+  // 时会把失明说成看得全，被漏掉的页面因此全被标成「新增」——那正是本任务要压的指标。
+  const boundary = known.complete
+    ? ['不要把清单里的页面标成新增，也不要假设清单之外还有页面。清单里的组件是这页已经有的，',
+      '不要说它们要新建。写法示例：']
+    : [
+      '不要把清单里的页面标成新增。',
+      `但这份清单**不完整**（${known.note ?? '只覆盖部分仓'}）：未列出的页面不等于不存在，`,
+      '不要断言它不存在、也不要把它写成「新增页面」；只有清单里没有、且需求明确要求新做的才写「新增页面」。',
+      '清单里的组件是这页已经有的，不要说它们要新建。写法示例：',
+    ];
   return [
     '',
-    `已知现有页面（来自代码索引，共 ${known.length} 个）。流程里落在这些页面上的步骤，必须标注：`,
+    `已知现有页面（来自代码索引，${counted}）。流程里落在这些页面上的步骤，必须标注：`,
     '  · 节点文案分两行，用 <br> 连接：第一行是页面文案（≤12 汉字），第二行是归属标注；',
     '  · 落在清单里的页面 → 第二行写「现有页面：<route>」，route 逐字抄清单里的写法；',
     '  · 不在清单里的 → 第二行只写「新增页面」。',
-    '不要把清单里的页面标成新增，也不要假设清单之外还有页面。清单里的组件是这页已经有的，',
-    '不要说它们要新建。写法示例：',
+    ...boundary,
     `  A["${exampleTitle}<br>现有页面：${first.route}"]`,
-    '清单（路由（标题）：已有组件）：',
-    ...known.map(surfaceLine),
+    '清单（路由（标题）：已有组件；被 N 处引用 = 有 N 个文件 import 这一页的视图文件，',
+    '步骤落在这页时把它写进材料——它就是「改这一页会波及几处」）：',
+    ...known.surfaces.map(surfaceLine),
   ];
 }
 
@@ -269,15 +293,21 @@ export function surfacesBlock(known: readonly KnownSurface[]): string[] {
  * 换成一句自己概括的页面名——那一换，材料里「这一步落在哪个现有页面」就没了，
  * 而它正是这份材料唯一能对上代码的一行字。
  */
-export function fragmentsSurfacesBlock(known: readonly KnownSurface[]): string[] {
-  if (known.length === 0) return [];
+export function fragmentsSurfacesBlock(known: KnownSurfaces): string[] {
+  if (known.surfaces.length === 0) return [];
   return [
     '',
     '其中这些页面是**已经存在**的（来自代码索引）：',
-    ...known.map(surfaceLine),
+    ...known.surfaces.map(surfaceLine),
     '这一类节点的 title 要原样保留流程图里的那行标注（「现有页面：<route>」或「新增页面」），',
     '不要删、不要概括成另一个页面名；页面里出现清单列出的组件时沿用它的名字与位置，',
-    '不要换成自造的等价物；清单之外的页面不要画。',
+    '不要换成自造的等价物；',
+    // 与 `surfacesBlock` 同一条 C1 口径：清单不完整时，没列出的页面只是「不确定」。
+    known.complete
+      ? '清单之外的页面不要画。'
+      : `这份清单不完整（${known.note ?? '只覆盖部分仓'}）：清单之外的页面只是不确定，不要把它画成「新增页面」。`,
+    '清单里「被 N 处引用」是这一页视图文件被几个文件 import 了——页面片段里有归属说明时，',
+    '把这一页的引用数一并写出来（它就是这一页改动的波及面）。',
   ];
 }
 
@@ -296,7 +326,7 @@ export function fragmentsSurfacesBlock(known: readonly KnownSurface[]): string[]
 export function flowPrompt(
   req: RequirementRow,
   stage: Stage,
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): string {
   const prd = req.prd_url === null
     ? '未提供（照需求标题与类型推断；推断的地方不要假装有依据）'
@@ -382,7 +412,7 @@ export function repairPrompt(
   req: RequirementRow,
   stage: Stage,
   previous: { mermaid: string; check: FlowCheck; shape: FlowShape },
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): string {
   const { mermaid, check, shape } = previous;
   const focus: string[] = [];
@@ -468,7 +498,7 @@ export function fragmentsPrompt(
   req: RequirementRow,
   stage: Stage,
   nodes: FlowNode[],
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): string {
   const list = nodes
     .map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`)
@@ -541,7 +571,7 @@ export function fragmentsRepairPrompt(
   nodes: FlowNode[],
   previous: string,
   why: string,
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): string {
   const trimmed = previous.trim();
   const shown = trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
@@ -946,7 +976,7 @@ export async function buildFlow(
   deps: ComposeDeps,
   usage: ComposeUsage,
   trace: Trace,
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): Promise<{ mermaid: string; check: FlowCheck; attempts: number; usage: ComposeUsage }> {
   let prompt = flowPrompt(req, stage, known);
   let spent = usage;
@@ -1029,7 +1059,7 @@ export async function buildPages(
   deps: ComposeDeps,
   usage: ComposeUsage,
   trace: Trace,
-  known: readonly KnownSurface[] = [],
+  known: KnownSurfaces = EMPTY_SURFACES,
 ): Promise<{ assembly: Assembly; warnings: string[]; usage: ComposeUsage }> {
   const ids = nodes.map((node) => node.id);
   const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;

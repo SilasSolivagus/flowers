@@ -1,6 +1,6 @@
 import type { Db } from '../../db/client.js';
 import {
-  HEAD_LINES, PAGES_JSON, assembleIndex, isIndexable, parseBlob, summarize,
+  HEAD_LINES, assembleIndex, isIndexable, parseBlob, summarize,
   type CodeIndex, type IndexSummary, type KindCounts,
 } from './code-index.js';
 import {
@@ -134,19 +134,23 @@ export type AssembleResult = {
  * 这类错误结论正是被那 80 行造出来的。`pages.json` 同理（250 行、27 条页面，前 80 行只
  * 够 9 条）。
  *
- * 非 `.vue` 的文件仍在解析前按 `HEAD_LINES` 截断（见 `clipFor`）：符号与引用的口径与这一轮
- * 之前**逐字相同**，这条路只多花一点字符串内存。
+ * **整份读只喂 outline / pages，不喂 symbols / refs**（I3 的裁决）：`clipFor` 仍把文件头
+ * `HEAD_LINES` 行交给符号抽取，那个口径与本轮之前**逐字相同**。为什么必须这样：`exports`
+ * 是 `locate` 的评分输入，而「不改变 `locate` 的命中率评分」是计划的非目标；整份读曾让
+ * uni-app 的 `exports` 多出 545 个名字，`locate` 的 7 组关键词里有 5 组排序被推走。
+ * 两个文本各给各的消费者，见 `parseInto` 与 `parseBlob` 的第三个参数。
  */
 export const READ_LINES = 100_000;
 
-/** 这块内容是不是要整份进解析器：`.vue`（template）与 `pages.json`（页面清单）。 */
-function needsWholeText(path: string): boolean {
-  return /\.vue$/i.test(path) || PAGES_JSON.test(path);
-}
-
-/** 交给解析器的那段文本：`.vue` / `pages.json` 整份，其余仍只给头 `HEAD_LINES` 行。 */
-function clipFor(path: string, text: string): string {
-  return needsWholeText(path) ? text : headLines(text, HEAD_LINES);
+/**
+ * 交给**符号与引用**抽取的那段文本：文件头 `HEAD_LINES` 行（本轮之前的口径，逐字不变）。
+ *
+ * 为什么这里不再按扩展名分流（曾经 `.vue` / `pages.json` 整份进解析器）：整份文本仍然
+ * 要喂 outline 与 pages，但那是 `parseBlob` 的第三个参数的事。让这一处「只负责符号口径」，
+ * 「谁看整份、谁只看文件头」就只有一个地方要改。
+ */
+function clipFor(text: string): string {
+  return headLines(text, HEAD_LINES);
 }
 
 /** 内存里「sha → 已解析」的缓存：同一轮里同一块内容被多个路径引用时只解析一次。 */
@@ -161,7 +165,9 @@ function parseInto(
 ): BlobFacts {
   const hit = cache.get(blobSha);
   if (hit !== undefined) return hit;
-  const parsed = parseBlob(text, path);
+  // 两个文本：`clipFor(text)` 只喂符号与引用（`locate` 的评分输入，口径不许动），
+  // 整份 `text` 喂 outline 与 pages（`.vue` 的 `</template>`、`pages.json` 的第 200 行）。
+  const parsed = parseBlob(clipFor(text), path, text);
   const facts: BlobFacts = {
     blobSha,
     lang: parsed.lang,
@@ -291,7 +297,7 @@ export async function assembleFor(
       const raw = got.data.get(ref.blobSha);
       // 读不回来的块不进索引（少一个文件比编一个空文件好）；它下一轮还会被当成缺失再试。
       if (raw === undefined) continue;
-      parseInto(cache, ref.blobSha, ref.path, ref.size, clipFor(ref.path, raw));
+      parseInto(cache, ref.blobSha, ref.path, ref.size, raw);
     }
     parsedBlobs = await writeBlobRows(db, [...cache.values()]);
     if (parsedBlobs > 0) {
@@ -417,7 +423,7 @@ export async function buildIndex(
   for (const ref of first) {
     const raw = got.data.get(ref.blobSha);
     if (raw === undefined) continue;
-    parseInto(cache, ref.blobSha, ref.path, ref.size, clipFor(ref.path, raw));
+    parseInto(cache, ref.blobSha, ref.path, ref.size, raw);
   }
 
   const bySha = new Map([...cache.values()].map((facts) => [facts.blobSha, facts]));

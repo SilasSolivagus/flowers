@@ -706,6 +706,11 @@ function lineAt(text: string, index: number): number {
   return text.slice(0, index).split('\n').length;
 }
 
+/** `<!-- … -->` 抹成空格（换行保留）：`.vue` 的 template 里注释掉的旧组件不算这页的组件。 */
+function maskHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, (block) => block.replace(/[^\n]/g, ' '));
+}
+
 /**
  * 把注释与引号字符串抹成空格（换行保留）。
  *
@@ -771,14 +776,18 @@ function maskCode(text: string): string {
   return out;
 }
 
-/** `.vue`：template 里的组件（Task 2 的原始口径，**一行都没动**）。 */
+/** `.vue`：template 里的组件（Task 2 的原始口径；只多一条「注释抹成空格」，见下）。 */
 function vueOutline(text: string): OutlineNode[] {
   const open = TEMPLATE_OPEN.exec(text);
   if (open === null) return [];
   const bodyStart = open.index + open[0].length;
   const close = text.lastIndexOf('</template>');
   if (close < bodyStart) return [];
-  const body = text.slice(bodyStart, close);
+  // `<!-- <LegacyBar /> 已删 -->` 在 Vue 仓里是最常见的一类注释，而注释掉的东西**不是**
+  // 这页已经有的组件。`.tsx` 那半边一直跑 `maskCode`（注释也抹），这里不抹就是同一个
+  // 文件类型两套口径：`.vue` 说「这页已经有 LegacyBar」，`.tsx` 不会说。
+  // 抹成空格而不是删掉，理由与 `maskCode` 同一条：行号必须留在原地。
+  const body = maskHtmlComments(text.slice(bodyStart, close));
   const before = text.slice(0, bodyStart).split('\n').length - 1;
   const out: OutlineNode[] = [];
   COMPONENT_TAG.lastIndex = 0;
@@ -793,21 +802,45 @@ function vueOutline(text: string): OutlineNode[] {
 }
 
 /**
+ * `<` 前面与标签名后面是什么，决定它是 JSX 标签还是**泛型实参**。
+ *
+ * 为什么必须有这一条：`useState<IFile>(null)` 在正则眼里就是一个大写开头的标签，而它会
+ * 原样进 `blob_index.outline`，于是评估材料写「`/VideoPage` 已有组件 `IFile`」——`IFile`
+ * 是一个类型参数（实测 `src/pages/VideoPage/VideoModule.tsx` 一行代码造出 3 个假组件）。
+ *
+ * 判据分两段，只为了「宁可少说一个真组件，也不编一个假组件」，同时不误伤同行嵌套：
+ * - 前一字符是标识符字符或 `]` → 类型位置（`useState<IFile>`、`Array<T>`、`Foo<T>[]`…）；
+ * - 前一字符是 `>` → 只有**标签名后面既没有属性也没有自闭合斜线**时才算泛型
+ *   （`Foo<Bar>` / `Foo<Bar,>` 是这个形态）。`<div><HeaderBar /></div>` 这种同行嵌套
+ *   前面也是 `>`，但名字后面跟的是属性或 `/>`，所以保留。
+ */
+function typeArgPosition(masked: string, index: number, name: string): boolean {
+  const prev = masked[index - 1] ?? '';
+  if (/[A-Za-z0-9_$]/.test(prev) || prev === ']') return true;
+  if (prev !== '>') return false;
+  const next = masked[index + 1 + name.length] ?? '';
+  return next === '>' || next === ',';
+}
+
+/**
  * `.tsx` / `.jsx`：JSX 里**大写开头**的标签，与 `.vue` 的 template 同一条规矩。
  *
  * 为什么整份匹配而不是先找 `return (`：React 组件可以写成 `const Page = () => <div/>`、
  * 也可以 `return <A/>` 多行、还可以在 `?.` / `&&` 后面直接跟 JSX。找「起点」的规则一多
- * 就会漏，而「大写开头的标签」在这个文件类型里几乎没有别的含义（内置类型 `React.FC`、
- * 泛型 `<T,>` 都是小写或带逗号/冒号的写法）。
+ * 就会漏，而「大写开头的标签」在这个文件类型里几乎没有别的含义——除了泛型实参，
+ * 那一条由 `typeArgPosition` 单独挡掉。
  */
 function jsxOutline(text: string): OutlineNode[] {
   const masked = maskCode(text);
   const out: OutlineNode[] = [];
   COMPONENT_TAG.lastIndex = 0;
   for (let m = COMPONENT_TAG.exec(masked); m !== null; m = COMPONENT_TAG.exec(masked)) {
-    out.push({ kind: 'component-use', name: m[1] ?? '', line: lineAt(masked, m.index) });
+    const name = m[1] ?? '';
+    if (name === '') continue;
+    if (typeArgPosition(masked, m.index, name)) continue;
+    out.push({ kind: 'component-use', name, line: lineAt(masked, m.index) });
   }
-  return out.filter((node) => node.name !== '');
+  return out;
 }
 
 /**
@@ -817,18 +850,24 @@ function jsxOutline(text: string): OutlineNode[] {
  * outline 等于给每个文件造几十行噪音；而「这一页/这个服务对外提供了什么」正是导出名。
  * 为什么两类合在一起按位置排序：`export const useA` 写在 `export function b` 前面时，
  * outline 的顺序必须与文件一致，否则同一份内容两次读出来的顺序会不一样。
+ *
+ * 为什么要先 `maskCode`：`// export const legacy = 1` / `'export const fromString = 2'`
+ * 在这条正则眼里都是导出符号（实测一个文件里 4 条「导出」有 3 条出自注释与字符串），
+ * 而它们会原样进 `blob_index.outline`。`.tsx` 那半边一直抹注释，`.ts` 不抹就是同一个
+ * 索引里两套口径；`maskCode` 保留换行，所以行号不动。
  */
 function symbolOutline(text: string): OutlineNode[] {
+  const masked = maskCode(text);
   const hits: Array<{ index: number; name: string }> = [];
   for (const re of [TS_EXPORT_FN, TS_EXPORT_CONST]) {
     re.lastIndex = 0;
-    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    for (let m = re.exec(masked); m !== null; m = re.exec(masked)) {
       const name = (m[1] ?? '').trim();
       if (name !== '') hits.push({ index: m.index, name });
     }
   }
   hits.sort((a, b) => a.index - b.index);
-  return hits.map((hit) => ({ kind: 'symbol', name: hit.name, line: lineAt(text, hit.index) }));
+  return hits.map((hit) => ({ kind: 'symbol', name: hit.name, line: lineAt(masked, hit.index) }));
 }
 
 /**
@@ -910,8 +949,16 @@ export type ParsedBlob = {
  * 判断是不是 `.vue`（`.vue` 的 `<script setup>` 没有 `export`，顶层声明就是它的符号）。
  * 用 `index.<lang>` 与用真路径的结果**逐字相同**，而前者让「同一内容 → 同一符号表」
  * 变成不依赖调用顺序的事实。`outlineOf` / `pagesFromConfig` 同理：它们各自只看扩展名。
+ *
+ * **两个文本参数（I3 的裁决）**：`text` 是**符号与引用**的输入，`fullText` 是
+ * **outline 与 pages** 的输入。调用方（`index-store.ts` 的 `parseInto`）给前者的是
+ * 「文件头 `HEAD_LINES` 行」，给后者的是整份内容。为什么必须分开：整份读是 outline 的
+ * 需求（`</template>` 常在 80 行之后），但它顺手让 `exports` 多看到 545 个导出名，
+ * 而 `exports` 是 `locate` 的评分输入——那是计划 §0.2 明确的非目标。两条需求方向相反，
+ * 只能各给各的文本；`fullText` 缺省等于 `text`，纯函数调用方（用例、`extractIndex`）
+ * 不需要关心这件事。
  */
-export function parseBlob(text: string, path: string): ParsedBlob {
+export function parseBlob(text: string, path: string, fullText: string = text): ParsedBlob {
   const lang = langOf(path);
   const routes = routeDecls(text);
   const locals: Record<string, string> = {};
@@ -924,9 +971,9 @@ export function parseBlob(text: string, path: string): ParsedBlob {
     lang,
     symbols: exportsOf(text, `index.${lang}`),
     refs: { specs: importSpecs(text), locals, routes },
-    outline: outlineOf(`index.${lang}`, text),
+    outline: outlineOf(`index.${lang}`, fullText),
     // 进索引的 json 只有 `pages.json`（见 `isIndexable`），所以这里用它的名字问一次。
-    pages: lang === 'json' ? pagesFromConfig('pages.json', text) : [],
+    pages: lang === 'json' ? pagesFromConfig('pages.json', fullText) : [],
   };
 }
 

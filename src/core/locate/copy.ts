@@ -220,22 +220,68 @@ export function withSnapshots(
 // 最终落到材料里「现有页面：/pages/share/index」那行字上；换句话说，材料里
 // 「这页已经存在」这句话的真伪，完全由这个函数取哪些字段决定。
 //
-// 三条口径（都是被真实数据逼出来的，改之前先看报告里的数字）：
+// 四条口径（都是被真实数据逼出来的，改之前先看报告里的数字）：
 // 1. **只认视图文件**（`.vue` / `.tsx` / `.jsx`）。第一版按「路径里含 route」找文件，
 //    结果 pc 的 `/login` 把 `src/apis/login.ts` 也算了进去，于是提示词里
 //    「登录页已有组件」列的是 `fetchAccountLogin`、`fetchRegister` 这些接口函数——
 //    模型据此说「这页有 X」就是在说假话。页面文件是视图，`.ts` 是同名工具/接口。
-// 2. **组件只取 `component-use` 与 `symbol`**（`tag` 是 `.vue` 里小写标签的占位，
+// 2. **页面目录下的子组件算这一页**（C2 的裁决）。`src/pages/Login/login.tsx` 之外，
+//    `src/pages/Login/**` 才是登录页的组成：实测 8 个组件全在
+//    `src/pages/Login/components/{InputPassword,VcodeInput,blacklistModal,…}` 里。
+//    只看页面自己的那个视图文件，材料就会写「/login：没读到组件」——把「已有」说成
+//    「没有」，而它正好是「其实早就存在却被标成新增」这个指标最大的燃料。
+// 3. **组件只取 `component-use` 与 `symbol`**（`tag` 是 `.vue` 里小写标签的占位，
 //    给模型看只会变成噪音），并且**去重**：同一页里 `<MfyIcon>` 用两次是一个组件。
-// 3. **组件名只可能来自 `index.files` 里有的文件**（`outline` 的键就是它们）。
+// 4. **组件名只可能来自 `index.files` 里有的文件**（`outline` 的键就是它们）。
 //    `importedBy` 的键可以不在 `files` 里（`static/storeSdk.ts` 那种），所以这里
 //    遍历的是 `files` 而不是 `outline`——把 `static/` 当组件写进提示词，是同一类假话。
+//    引用数（`importers`）同理只在 `files` 里的文件上数。
 //
-// 没有索引（`pages` 为空）时返回空数组，调用方据此**整段不写**：说「现有页面上
+// 没有索引（`pages` 为空）时返回空清单，调用方据此**整段不写**：说「现有页面上
 // 什么都没有」比不说更坏，它把「没读到索引」伪装成「读过了、确实没有」。
 
-/** 一个已知页面：路由、标题（可能没有）、这一页里读到的组件名。 */
-export type KnownSurface = { route: string; title: string | null; components: string[] };
+/** 一个已知页面：路由、标题（可能没有）、这一页里读到的组件名、被几处引用。 */
+export type KnownSurface = {
+  route: string;
+  title: string | null;
+  components: string[];
+  /**
+   * 这一页**一共读到几个**组件（去重后、封顶前）。
+   *
+   * 为什么要带：`components` 只列前 12 个（`SURFACE_COMPONENT_CAP`），而清单里那句
+   * 「清单里的组件是这页已经有的」读起来像「这就是全部」——被砍掉的那些正好会被材料
+   * 说成「要新建」。pc 的 `/login` 实测 24 个（8 个弹窗组件叠在一页上），只列 12 个
+   * 而不说还有 12 个，就是 C1 那条「静音安全」的同一种坏法，只是规模小一点。
+   */
+  componentTotal: number;
+  /**
+   * 有多少个文件 import 了这一页的视图文件（I4：`importedBy` 的第一个生产消费方）。
+   * `null` = 这一页没有视图文件，这个数无从谈起（不是 0）。
+   */
+  importers: number | null;
+};
+
+/**
+ * 一份清单，带**覆盖率**（C1 的裁决）。
+ *
+ * 为什么必须带：`surfaces` 非空时提示词原本写死「不要假设清单之外还有页面」，而清单
+ * 可能只覆盖一部分仓、可能被 `SURFACE_LIMIT` 截断、可能某个仓的组件轮廓一行都没读到——
+ * 三种情况下那句话都在把「失明」说成「看得全」，模型于是把被漏掉的页面全标成新增。
+ * `complete === false` 时提示词换成「本清单不完整：…」，并禁止模型断言未列出的页面不存在。
+ */
+export type KnownSurfaces = {
+  /** 要进提示词的那些页（已按上限截断）。 */
+  surfaces: KnownSurface[];
+  /** 截断**之前**的真页面数——提示词里的「共 N 个」必须是这个数。 */
+  total: number;
+  /** 是否「所有仓都读到 + 所有页面都在清单里 + 轮廓都读到了」。 */
+  complete: boolean;
+  /** `complete === false` 时的一句话原因（进提示词，中文）。 */
+  note: string | null;
+};
+
+/** 空清单：调用方据此整段不写（与「读失败」同一个出口）。 */
+export const EMPTY_SURFACES: KnownSurfaces = { surfaces: [], total: 0, complete: false, note: null };
 
 /** 提示词里一页最多列几个组件。再多就不是「这页有什么」，而是一份文件清单。 */
 const SURFACE_COMPONENT_CAP = 12;
@@ -243,41 +289,107 @@ const SURFACE_COMPONENT_CAP = 12;
 /** 页面文件只可能是这三种扩展名（见上面第 1 条）。 */
 const VIEW_FILE = /\.(vue|tsx|jsx)$/i;
 
-/** 路由 → 这一页的视图文件。比较一律小写：pc 的 `/login` 对应 `src/pages/Login/login.tsx`。 */
+/** 目录（不含末段）。`src/pages/Login/login.tsx` → `src/pages/Login`。 */
+function dirOf(path: string): string {
+  const at = path.lastIndexOf('/');
+  return at < 0 ? '' : path.slice(0, at);
+}
+
+/**
+ * 路由 → 这一页的**构成文件**：页面自己的视图文件 ＋ 页面目录下的其它视图文件。
+ *
+ * 第二、三条命（`<pageDir>/*.vue|tsx` 与 `<pageDir>/components/**`）是 C2：登录页的 8 个
+ * 组件全在 `components/` 下，只看页面自己那个 `login.tsx` 就会写成「没读到组件」。
+ * 边界刻意收在**页面目录之内**，不放宽到整棵树：`src/components/share/share.vue` 是全局
+ * 组件，把它算成 `/share` 的组成就是另一种假话（那是 M5 记下的坑）。
+ */
 function pageFiles(files: Readonly<Record<string, unknown>>, route: string): string[] {
   const want = route.replace(/^\/+/, '').toLowerCase();
   if (want === '') return [];
-  const out: string[] = [];
-  for (const path of Object.keys(files)) {
+  const paths = Object.keys(files);
+  const direct: string[] = [];
+  for (const path of paths) {
     if (!VIEW_FILE.test(path)) continue;
     const noExt = path.replace(VIEW_FILE, '').toLowerCase();
     // `pages/share/index` ↔ `src/pages/share/index.vue`；`login` ↔ `src/pages/Login/login.tsx`；
     // `VideoPage` ↔ `src/pages/VideoPage/index.tsx`（目录名即路由）。
     if (noExt === want || noExt.endsWith(`/${want}`) || noExt.endsWith(`/${want}/index`)) {
-      out.push(path);
+      direct.push(path);
+    }
+  }
+  const out = [...direct];
+  for (const page of direct) {
+    const dir = dirOf(page);
+    const componentsPrefix = dir === '' ? 'components/' : `${dir}/components/`;
+    for (const path of paths) {
+      if (path === page || !VIEW_FILE.test(path) || out.includes(path)) continue;
+      const parent = dirOf(path);
+      // 同目录的其它视图文件（`src/pages/Login/BindPhoneModal.tsx`），或这一页自己的
+      // `components/` 子树（任何深度）。两条都只在页面目录之内成立。
+      if (parent === dir || parent.startsWith(componentsPrefix)) out.push(path);
     }
   }
   return out;
 }
 
 /**
- * 索引 → 提示词能吃的页面清单。
+ * 这一仓的页面**是不是真的一个组件都没读到**（C1 第 1 条 / I5）。
+ *
+ * 为什么需要它：`blob_index.outline` 是 0032 新加的可空列，`writeBlobRows` 用的是
+ * `on conflict do nothing`、而 `blob_sha` 是内容地址——**内容不变就永远不会重写**。
+ * 于是任何在 0032 之前同步过、之后没跑过 `--force-reparse` 的仓，`outline` 永远是
+ * `null`，读侧按 `[]` 归一。那种仓的每一页都会显示「没读到组件」，读者分不出
+ * 「扫过、确实没有」和「压根没扫」——说「没读到组件」比不说更坏，所以整仓按「没读到」
+ * 处理（`surfaces.ts` 会把这一仓从清单里去掉，并在提示词里写明清单不完整）。
+ */
+export function pagesOutlineMissing(
+  index: Pick<CodeIndex, 'pages' | 'outline' | 'files'>,
+): boolean {
+  if (index.pages.length === 0) return false;
+  return index.pages.every((page) =>
+    pageFiles(index.files, page.route).every((file) => (index.outline[file] ?? []).length === 0));
+}
+
+/**
+ * 索引 → 提示词能吃的页面清单（带覆盖率）。
  *
  * `limit` 是**页面条数**上限（默认 40）：两仓加起来 29 页，40 不会截到任何真数据，
- * 但换一个大仓时它保证提示词不会因为索引变大而线性变长。
+ * 但换一个大仓时它保证提示词不会因为索引变长而线性变长。**截断不是静默的**：
+ * `total` 是截断前的真数、`complete` 记 false——否则提示词会写「共 40 个」并禁止
+ * 模型假设还有别的页，被砍掉的那 160 页全部变成「新增页面」。
  */
 export function knownSurfaces(
-  index: Pick<CodeIndex, 'pages' | 'outline' | 'files'>,
+  index: Pick<CodeIndex, 'pages' | 'outline' | 'files' | 'importedBy'>,
   limit = 40,
-): KnownSurface[] {
-  return index.pages.slice(0, limit).map((page) => {
+): KnownSurfaces {
+  const total = index.pages.length;
+  const surfaces = index.pages.slice(0, limit).map((page) => {
     const seen: string[] = [];
-    for (const file of pageFiles(index.files, page.route)) {
+    const files = pageFiles(index.files, page.route);
+    for (const file of files) {
       for (const node of index.outline[file] ?? []) {
         if (node.kind === 'tag') continue;
         if (!seen.includes(node.name)) seen.push(node.name);
       }
     }
-    return { route: page.route, title: page.title, components: seen.slice(0, SURFACE_COMPONENT_CAP) };
+    // `importedBy` 的键可能不在 `files` 里（`static/storeSdk.ts` 那种），所以按 `files`
+    // 过滤一次：提示词只该数「被索引里的文件引用了几处」，而这也是这一层唯一的出口。
+    const importers = files.length === 0
+      ? null
+      : new Set(files.flatMap((file) =>
+        (index.importedBy[file] ?? []).filter((from) => index.files[from] !== undefined))).size;
+    return {
+      route: page.route,
+      title: page.title,
+      components: seen.slice(0, SURFACE_COMPONENT_CAP),
+      componentTotal: seen.length,
+      importers,
+    };
   });
+  return {
+    surfaces,
+    total,
+    complete: total <= limit,
+    note: total <= limit ? null : `页面数超过上限，只列了前 ${limit} 个（共 ${total} 个）`,
+  };
 }
