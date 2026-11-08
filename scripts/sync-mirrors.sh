@@ -32,7 +32,10 @@ LOCK="${SYNC_FLOWERS_LOCK:-/var/lock/sync-flowers-mirror.lock}"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-300}"
 # 白名单写死在脚本里：这两个仓是「这个产品的前端」的定义，不是可配置项。
 # 想加仓就改这一行——顺带提醒：加仓要同时确认 `code.mirror.repos` 里也配了它。
-REPOS=(123pan-pc 123pan-uni-app)
+# 一个仓失败不拖另一个（见 --help 与退出码约定）。
+# cross-frontend 是 owner 2026-11-08 追加的：它在 code.mirror.repos 里，不跟上的话
+# 材料会一直按它的旧快照算，并显示「代码快照较旧」。
+REPOS=(123pan-pc 123pan-uni-app 123pan-cross-frontend)
 
 usage() {
   cat <<'USAGE'
