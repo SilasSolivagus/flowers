@@ -450,3 +450,254 @@ owner 明确说过不要一墙红。这不是接入出错，是「上游真的�
   差 1，不是本轮造成的——本轮一个 `insert into requirements` 都没有）；
 - 没改 cron 时间、没改 `sync-mirrors.sh` 的失败语义；
 - 那 7 个不存在的仓**留在清单里**（带 `ok=false` 的证据），删不删由 owner 决定。
+
+---
+
+## 9. 第三轮（2026-11-09 凌晨）：删掉 7 个不存在的仓、阈值按仓定、同步重试、5 个 Go 仓
+
+§8.8 里那几条「只提议、一行没实现」的东西，这一轮挑了两条落地（第 1、3 条），
+外加 owner 的三条裁定。**衡量标准只有一条：把「每晚都亮」的灯关掉，把「该亮」的灯留下。**
+
+### 9.1 清单：23 → 21 行（文件 66 → 104 行）
+
+| 项 | 之前 | 现在 |
+|---|---|---|
+| `config/repos.txt` 总行数 | 66 | **104**（多出来的是删仓说明与第三格的理由） |
+| 仓行（非注释非空） | 23 | **21**（−7 不存在，+5 Go） |
+| `app_settings.code.mirror.repos` | 23 | **21**（`repos-apply.ts` 已播种，读侧读回 21） |
+| `repo_coverage` 行 | 23 | **28**（21 个在清单里 + 7 个孤儿行，**一行都没删**） |
+| `blob_index` 行 | 3229 | **3603**（+374：5 个 Go 仓的唯一内容 + 2 个仓重测） |
+| `requirements` 活行 | 814 | **814**（没 reseed，一个 insert 都没有） |
+
+删掉的 7 个：`123pan-ssr`、`123pan-video`、`123pan-windowsPro`、`crazy-api`、
+`platform-fontend`、`app-ui-test`、`web-ui-test`。**证据留在表里**：那 7 行仍是
+`ok=false` + 原因原文（§8.4）。清单里加了一段注释，写清「这 7 个去哪了、要查为什么
+当初以为它们存在就看 `repo_coverage`、**不要再从《代码仓库全景图-2026-04-16.md》把名字
+抄回来**」。
+
+为什么这一步值得单独一次决定：`sync-mirrors.sh` 对每个目录不存在的仓各打一条
+`FAIL … 目录不存在` 并让整轮 `rc=3`。**一整年每晚都是 3 的退出码，读到第 30 天就不再是
+信息了**——而真正的那一次 fetch 故障也会被算进「反正每天都红」。
+
+### 9.2 `stale_after_days`：语法、语义、以及为什么它不进库
+
+`config/repos.txt` 的第三格，可选：
+
+```text
+<仓名>  <分支>  [<stale_after_days>]
+```
+
+| 写法 | 含义 |
+|---|---|
+| 不写 | 用全局 `MIRROR_STALE_DAYS = 7` |
+| 正整数（1–999999） | 超过这么多天没有新提交才提醒 |
+| `never` | **不因「上游不动了」提醒**；同步失败照报 |
+
+- 解析：`parseRepoInventory()` 收 2 或 3 格（第四格起整份失败并点名行号）；
+  `sync-mirrors.sh` 同一套校验（**只认不解释**）。两处必须一起改：一边能读、一边报错
+  退出 2，那一晚整份清单都不同步。
+- `0` / 负数 / `1.5` 一律拒绝：0 不是一个天数，而「关掉」有专门的写法 `never`。
+  两种「关掉」的写法会给下一个人留下一个必须猜的歧义。
+- **不需要迁移，也不落库**：阈值是**清单里的配置**（这个仓是什么），`mirror_health`
+  存的是**测量**（它现在停在哪一天）。混进 `mirror_health` 会让「改一次阈值」变成一次
+  数据迁移，而改清单只是一次 `git diff`。读侧每轮从清单读一次：
+  `scripts/index-nightly.ts` 本来就在读清单（漂移检查），直接复用同一次读取，
+  读不到时退回全局 7 天并在日志里说清退回了哪种口径。
+- 用例钉住了边界（`tests/mirror-health.test.ts`）：同一个 400 天前的仓，阈值 365 → 报、
+  500 → 不报、`never` → 不报；**同一个仓、同一个 `never`，`ok=false` 时仍然报**。
+  这就是「上游死了」与「我们抓不到」不能共用一个静音开关的那条线。
+
+六个仓的取值，以及为什么这几个数：
+
+| 仓 | HEAD | 天数 | 第三格 | 理由 |
+|---|---|---|---|---|
+| `123pan-virtuallist-antd` | 2023-06-04 | 1254 | **`never`** | 已归档的组件库。任何有限数字早晚被跨过，写 1460 只是把同一句话推迟一年 |
+| `123pan-ele-react` | 2025-11-10 | 364 | `730` | 停更的 Electron 客户端；留一条硬上界，两年后有人接手时那句提醒仍然会响 |
+| `share` | 2025-12-05 | 339 | `540` | 产品仓，只是发版稀疏：一年半没有提交本身就该被问一句 |
+| `eslint-config` | 2026-06-01 | 161 | `365` | 配置库，按年改一次是正常节奏 |
+| `123pan-agent-tracker` | 2026-08-28 | 73 | `365` | 内部工具，季度级改动 |
+| `123pan-gateway` | 2026-09-20 | 50 | `180` | 活跃组件，十天前刚越过全局 7 天；半年是上界 |
+
+**只有这六个写了第三格**，其余 15 个仍是全局 7 天：给所有仓放宽阈值等于把这一列取消掉。
+
+### 9.3 同步重试，以及 `rc` 现在是什么意思
+
+两段改动，都在 `scripts/sync-mirrors.sh`：
+
+1. **只重试瞬时失败**（`FETCH_RETRIES` 默认 2，退避 `RETRY_BACKOFF × 第几次`，默认 2 s）。
+   判定按**错误文本**（git 的退出码太粗：DNS 失败、连不上、认证失败都是 128）：
+   `Could not resolve host` / `Failed to connect` / `Connection reset|refused|timed out` /
+   `early EOF` / `RPC failed` / `HTTP 5xx` / 我们自己的超时。分支不存在、仓不存在、
+   凭据失效**不重试**——它们的答案已经很明确，重试三次只是把一个明确的答案拖成 3 倍
+   等待，而且日志会长得和真故障一样。实测验证：`123pan-pc` 写一个不存在的分支 →
+   `FAIL … 试了 1 次: fatal: couldn't find remote ref no-such-branch`。
+2. **超时最多再试一次**。一次 300 s 的挂起已经吃掉 05:05→05:10 那 5 分钟窗口的十分之一，
+   两次就顶穿（那时 `index-nightly` 会开始索引一个还在同步的镜像）。「连不上」是秒级
+   失败，重试它很便宜；「挂住」不是，所以两者不共用同一个次数上限。
+
+实测（dogyun，21 个仓，清单已换成新版）：
+
+| 轮次 | 耗时 | `RETRY` 行 | 重试后仍失败 | rc |
+|---|---|---|---|---|
+| 第 1 轮 | **114 s** | **13**（10 个仓触发） | 2（`123pan-cross-frontend`、`123pan-agent-tracker`） | 3 |
+| 第 2 轮 | 155 s | **22**（14 个仓触发） | 6 | 3 |
+| 合成：清单里一个没建镜像的仓 | 秒级 | 0 | — | **4** |
+| 合成：一个不存在的分支 | 秒级 | 0 | 1 | **3** |
+
+两轮各救回 **8 个仓**（第 1 轮 10 个触发重试 → 8 个成功、2 个三次仍失败；第 2 轮 14 个
+触发 → 8 个成功、6 个失败）。这一夜 codeup 是持续抖动（同一条 `Failed to connect …
+after 1 ms` 反复出现），所以两轮都以 3 收尾是**诚实**的：那不是噪音，是真的没抓到。
+**关键的一格是「仓本身没坏」**：这 20 个失败仓的镜像与 HEAD 全都正常，只是那一夜连不上
+——这正是「重试」与「rc=3」各自该负责的那一半。
+
+新的退出码契约（四档，`scripts/README.md` 与脚本头部同步改了）：
+
+| rc | 意思 | 下一步 |
+|---|---|---|
+| `0` | 全部仓 fetch + `update-ref` 成功（含 `moved=0`），cfg 检查通过 | 不用管 |
+| `3` | **真故障**：某仓在所有重试后仍失败，或 `config` 里出现 `remote` / 带凭据 URL | 看 `/var/log/sync-flowers-mirror.log` |
+| `4` | **没有真故障，但有仓还没有镜像**（清单里有、还没 onboard） | 跑 `scripts/onboard-repos.ts` |
+| `2` | 环境/清单不对（缺 flock、清单不合格式、建不了日志或锁目录） | 修清单或环境 |
+| `0`（flock 被占） | 另一次同步在做，这一轮跳过 | 不用管 |
+
+`4` 与 `3` 分开，是因为两者的下一步完全不同：一个是「去建镜像」，一个是「去查网络」。
+合成之前它们是同一个真值，只有读日志才知道差别。实现上 `sync_one` 用返回码 `2` 表达
+「镜像不存在」，调用方据此把整轮收成 `4`——`if ! sync_one` 那种写法会把两者合成一个 1。
+
+### 9.4 5 个 Go 仓（不是 79 个）
+
+**怎么挑的**：先看 35 条 `backend` 活需求落在哪，再看仓在不在 codeup 的 123pan 组下。
+需求聚成四块：风控/封禁（10 条）、对象存储与 CDN 直链（6 条）、会员/付费/发票（3 条）、
+文件域（回收站/批量重命名/修改时间/搜索，4 条）；`apisrv` 已接（583/624）。
+
+| 仓 | 入选理由 |
+|---|---|
+| `usercenter` | 账号与封禁字段——8 条风控需求都改在这类字段上 |
+| `pay_server` | 会员到期时间、活动商品配置、发票 |
+| `contentTreeSrv` | 文件树/目录结构：回收站恢复、批量重命名、`file.update_at` |
+| `api_server_restful` | RESTful 入口（`/blacklist/add` 这类接口的另一份实现） |
+| `osssrv` | 对象存储：直链产品的回源/生命周期/日志/成本 |
+
+**没能进来的**：`cdn-manager`、`cloud-drive` 在 `codeup.aliyun.com/…/123pan/` 下**不存在**
+（`ls-remote` 每种拼法都 `未知的仓库路径`；`cloud-drive` 试过 `cloud_drive`/`clouddrive`）。
+直链那 6 条需求因此只有 `osssrv` 这一侧的代码。而 `123pan_manager`（GoFrame 管理后台）
+**存在**、且 `[封禁阶梯-BugH] /blacklist/add 接口可绕过阶梯` 直接指向它——下一轮该换它。
+
+实测（`repo_coverage` + 本轮 `du -sk` + `ls-tree` 计数）：
+
+| 仓 | HEAD | 日期 | 索引/树 | 跳过生成 | 页面 | 轮廓 | outline 节点（按 kind） | import | 镜像 | `vendor/` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `usercenter` | `2caf4507` | 2023-10-24 | **38/67** | 7 | 0 | 31 | 149（method 85 / struct 40 / func 24） | 0 | 0.24 MB | 无 |
+| `pay_server` | `d1f7c0c8` | 2026-11-03 | **174/296** | 95 | 0 | 163 | 964（method 489 / func 277 / struct 198） | 0 | 5.4 MB | 无 |
+| `contentTreeSrv` | `b3aed6dd` | 2026-10-19 | **35/58** | 12 | 0 | 26 | 216（method 146 / func 40 / struct 30） | 0 | 19.0 MB | 无 |
+| `api_server_restful` | `8f81ae7a` | 2026-11-02 | **102/115** | 0 | 0 | 99 | 946（struct 517 / method 362 / func 67） | 0 | 139.6 MB | 无 |
+| `osssrv` | `161c3cbc` | 2026-09-18 | **40/62** | 12 | 0 | 33 | 166（method 81 / struct 52 / func 33） | 0 | 2.0 MB | 无 |
+
+怎么读这张表：
+
+- **`import` 一律 0 是设计**（§2.1 的取舍：Go 的导入单位是包，不是文件），不是没接上。
+- **`files_indexed < files_total` 的三块原因**：`_test.go` 整类排除（`_test.go`：usercenter 0、
+  pay_server 19、contentTreeSrv 6、api_server_restful 1、osssrv 5）、非 `.go`（`go.mod`/`.md`/
+  `.json`/脚本）、以及 **`vendor/` 类目录**。`123pan-gateway` 那行 0/49 的解释在这里同样成立：
+  语言不在解析器里 = 接进来等于没接。
+- **`vendor/` 这五个仓一个都没有**（`ls-tree | grep -c '^vendor/'` 全是 0），所以
+  `5c69dd3` 那条 `vendor/` 排除规矩这一轮**没有被真正考验到**。79 个一起接的时候它才是关键。
+- **`usercenter` 是一个新发现**：上游只有 `v1` 一个分支（`ls-remote --heads` 只返回它），
+  HEAD `2023-10-24`（**1112 天**）。这个仓名下的代码是 2023 年的——如果风控/封禁逻辑今天
+  还在跑，它不在这个仓里。这一条没有在本轮解决（换仓需要 owner 定），但它意味着
+  **usercenter 那一格覆盖率只能当「历史参考」用，不能当「后端现状」**。
+- 磁盘：5 个仓合计 **≈ 0.17 GB**（166 MB），服务器可用 44.9 → 44.7 GB。按 apisrv 0.37 GB
+  与这五个的中位数量级外推，79 个约 5–30 GB——**装得下**，但 `api_server_restful` 一个就
+  139.6 MB（它把 `dist` 类产物提交了？没有：那 103 个 `.go` 之外还有 13 个非源码），
+  说明「Go 仓都小」这句话不能当预算用。
+
+### 9.5 两个覆盖率洞：一个修了，一个判定「不修」
+
+**`123pan-virtuallist-antd`：0/38 → 1/38（修了）**
+
+- 根因：这个仓 38 个文件里**只有一个产品源码** `src/index.tsx`，其余是
+  `.eslintrc.js`、`rollup.config.js`、`jest.config.js`、`babel.config.js`、
+  `__mocks__/`×2、`tests/basic.test.js`、`docs/` 下 20 个 md + `docs/examples/*.tsx` 9 个演示、
+  `.umirc.ts`、`tsconfig.json`、`src/style.css`。组件库没有 `pages/`、没有 `components/`，
+  于是**唯一的那个产品文件落 `other`**，整仓 0。
+- 修法（`code-index.ts` 新增 `LIB_ENTRY`）：`src/index.*` 或 `lib/index.*` 判 `component`。
+  **故意窄**：只认这两个目录的**直接子文件**且名字正好是 `index.<源码扩展名>`；
+  `src/main.ts`、`src/utils/index.ts`、`app/index.ts` 仍然是 `other`（用例钉住）。
+- 为什么判 `component` 而不是新造 `'entry'`：`FileKind` 是**前端角色**的轴，组件库入口导出的
+  就是组件；新加一个 kind 会让 `KIND_RANK`、`locate` 排序、所有穷举 `FileKind` 的地方各多
+  一条分支，而它能表达的信息没有消费者。副作用写明在代码注释里：普通 app 仓的
+  `src/index.tsx` 此后也会以 `component` 进索引。
+- 结果：**1/38**，1 个轮廓、1 条 import。剩下的 37 个全是配置/文档/演示/测试——那 37 个
+  **不该进索引**，0.026 这个比例是诚实的。
+
+**`123pan-ele-react`：6/544 保留不动（判定：我们的约定不适配这个布局，猜会更糟）**
+
+先把 544 拆开（1080 个树文件先被 `isNoisePath` 去掉 536 个 png/ico/bmp/dll/exe 与 `build/`）：
+
+| 块 | 数量 | 是什么 |
+|---|---|---|
+| NSIS 安装器资源 | **403** | 220 `.nsh` + 116 `.nlf` + 67 `.xml`（`123pan-nsis/`、`123pan-nsis-version/`） |
+| 源码扩展名但没进索引 | **55** | 6 个 `.d.ts`、15 个 `123pan-bin` 构建/打包脚本、23 个 Electron 主进程模块（tray/dialog/updater/sentry/monitor/window/system/ipc/preload）、2 个配置（`.umirc.ts`、`eslint.config.mjs`）、1 个打包产物 `dist-dll/vendor.dll.js`、8 个前端 utils/enum/bin |
+| **进了索引** | **6** | 2 个页面（`pages/home`、`pages/home2`）、1 个组件、2 个 store、1 个 service |
+| 其它非源码 | 80 | `.json`/`.md`/`.less`/`.svg`/`.nsi`/`.bat`/NSIS 二进制 `Stubs/` |
+
+结论：**这个仓的 UI 面只有 4 个文件**（一个 Electron 壳 + 两屏），它们**已经全在索引里**
+（页面 2 / 组件 1 / store 有 2）。剩下能进索引的只有 Electron 主进程那一层，而我们的角色轴
+（页面/组件/服务/状态/路由表）对「主进程的 tray / updater / sentry」没有诚实的桶——塞进
+`service` 会让 `locate` 把 `updater/index.ts` 报成「已有这个接口」，那正是 §2.1 拒绝
+「把测试当产品」的同一类错误。所以**不改**：6/544 是对这个仓的正确读数，538 里 403 是安装器
+资源、80 是非源码、49 是构建与本不该属于「前端角色」的主进程代码、6 是 `.d.ts`。
+
+**一句话**：`virtuallist-antd` 是「我们的约定漏了一个真的产品文件」，`ele-react` 是
+「这个仓本来就没有更多产品文件」。两者的数字都是 0/near-0，但只有前者该修。
+
+### 9.6 mutation 表
+
+| 文件 | 动作 | 为什么 / 风险 |
+|---|---|---|
+| `config/repos.txt` | −7 行、+5 行、6 行加第三格、注释写明去向与取值理由 | 纯数据；66 → 104 行 |
+| `src/core/codemirror/repo-inventory.ts` | 第三格解析 + `DEFAULT_STALE_AFTER_DAYS` / `STALE_NEVER` / `staleThresholdsOf()` | 只放宽格子数，其余校验一格没松 |
+| `src/core/codemirror/health.ts` | `judgeMirror` / `checkMirrorFreshness` 收 `staleAfterDays` | **只作用于 `old` 那条判据**；`failed` / `unknown` 一个字没动 |
+| `src/core/codemirror/code-index.ts` | 新增 `LIB_ENTRY`（一行判断 + 注释） | 不碰抽取规则（`outlineOf`/`imports`/`exports`）、不碰 `isIndexable` 的扩展名 |
+| `scripts/sync-mirrors.sh` | 第三格解析、`is_transient()`、重试循环、`sync_one` 返回 2、rc 3/4 分档 | CAS / flock / chmod / userinfo 抹除 / 超时语义原样保留 |
+| `scripts/index-nightly.ts` | 漂移检查里顺手取阈值表，传给 `checkMirrorFreshness` | 只多一次纯映射；清单读不到时退回 7 天 |
+| `scripts/README.md` | 第三格三行表 + `never` 的边界 + 四档 rc | 与脚本/解析器逐条对齐 |
+| `tests/repo-inventory.test.ts` | 15 → **17** 条 | 第三格解析 / 非法值 / 只写偏离默认的格子 |
+| `tests/mirror-health.test.ts` | 12 → **14** 条 | 判定表 + 端到端（含「never 也报失败」） |
+| `tests/index.test.ts` | 17 → **18** 条 | 库仓入口 + 「不是什么都算组件」 |
+
+**没动**：`src/core/locate/*`、解析器的抽取规则、`requirements`（814 活行）、既有迁移
+（**没有新迁移**——阈值不需要存储）、镜像（一个都没删）、`repo_coverage` 的历史行
+（7 个孤儿行原样保留）、cron 时间。
+
+### 9.7 用例与验证
+
+```bash
+npx vitest run                     # 78 个文件 / 1630 passed + 1 skipped（本轮 +4 条：这三个文件 44 → 48）
+npx tsc --noEmit -p tsconfig.json   # 干净
+npx tsx scripts/repos-apply.ts --dry-run   # diff：+5 / −7
+npx tsx scripts/onboard-repos.ts --retries 3            # 测量 5、跳过 16、失败 0
+npx tsx scripts/onboard-repos.ts --file /tmp/two.txt --force --no-clone  # 两个覆盖率洞重测
+scripts/install-cron.sh --server                        # 脚本 + 清单各打两边 sha256，一致
+ssh dogyun 'SYNC_FLOWERS_LOG=/tmp/s.log /opt/123pan/tools/_ro/sync-flowers-mirror.sh; echo $?'
+```
+
+### 9.8 剩下的告警噪音面（下一步该看什么）
+
+1. **今晚会亮 3 条 `mirror.stale`**（模拟 `judgeMirror` 跑出来的，不是猜）：
+   `usercenter` 1112 天、`osssrv` 52 天、`contentTreeSrv` 21 天。前两个是**新信息**
+   （一个仓是 2023 年的、一个 52 天没动），按「上游死了 ≠ 我们抓不到」的口径它们该亮。
+   要不要给它们第三格，是 owner 的决定——**本轮没有替 owner 静音**。
+   上一轮那 6 条（1254/364/339/161/73/50 天）已经不再出现。
+2. **`sync-mirrors.sh` 的失败仍然靠日志**：镜像 fetch 失败一行都不进库（`mirror_health`
+   只由 `index-nightly` 的 `head()` / `index-sync` 写）。所以「fetch 一直失败、但镜像还能读」
+   这种坏法只有日志与 rc 知道。下一步最小的一步：让 `sync-mirrors.sh` 把每仓的结果
+   （ok/rc/耗时）写成一行 JSON，交给 `index-nightly` 并进 `mirror_health.ok`——那之后
+   rc 与铃铛才是同一个事实。
+3. **`never` 的代价**：`123pan-virtuallist-antd` 那条「cron 悄悄停了」也不再报（HEAD 不变、
+   `ok=true`）。上游已归档的仓可以接受；**别把这个写法用到「只是慢」的仓上**。
+4. **8 分钟 vs 5 分钟窗口没变**：21 个仓在坏网络下 114–155 s（本轮实测），最好的一轮仍是
+   6–7 s。仓数到 79 个 Go 仓时，坏网络下的重试睡眠本身就能吃掉 300 s 窗口——那时该做的
+   不是再调 `RETRY_BACKOFF`，是 `xargs -P` 并行（§8.6 第 2 条，仍未做）。
+5. **`repo_coverage` 里 7 个孤儿行**：它们不在清单里，读侧不遍历表，所以不影响判断；
+   但「表里有 28 行、清单 21 个仓」这个差会被下一个人当成 bug 问一次。答案在 §9.1。
