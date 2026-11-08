@@ -422,6 +422,8 @@ const indexOf = (repo: string, paths: string[]): CodeIndex => ({
   sha: SHA,
   files: Object.fromEntries(paths.map((p) => [p, file('page' as FileKind)])),
   imports: {},
+  // Task 3 新增的那一列：这份用例钉的是接线，反向图留空。
+  importedBy: {},
   routes: [],
   // Task 1/2 新增的两列：这份用例钉的是接线，不是页面清单。
   pages: [],

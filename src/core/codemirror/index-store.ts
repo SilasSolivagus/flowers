@@ -321,6 +321,9 @@ export async function assembleFor(
     if (Number.isFinite(at) && at > newest) newest = at;
   }
 
+  // `importedBy` 不在这里算、也不落库：它是 `assembleIndex` 用**这一棵树**的 `imports`
+  // 现翻出来的一层（见 `reverse-imports.ts`）。`blob_index` 一行都没变——反向图不是
+  // 「这块内容说了什么」，而是「这棵树怎么连的」，属于装配，不属于内容。
   const index = assembleIndex({
     repo,
     sha: clean,

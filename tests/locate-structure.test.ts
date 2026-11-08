@@ -35,6 +35,8 @@ const index = (
   sha: 'f9714f6f9714f6f9714f6f9714f6f9714f6f9714',
   files,
   imports,
+  // Task 3 新增的那一列：这份用例只关心打分，反向图留空。
+  importedBy: {},
   routes,
   // Task 1/2 新增的两列：这份用例只关心打分，页面清单与组件轮廓留空。
   pages: [],

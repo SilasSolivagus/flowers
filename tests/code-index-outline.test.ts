@@ -88,8 +88,8 @@ describe('outlineOf', () => {
     expect(names).not.toContain('li');
   });
 
-  it('非 vue 文件返回空数组（这一层只做 vue）', () => {
-    // 内容里就是有 template 也不算：这一层只对 `.vue` 有承诺。
+  it('.ts 不看 template 标签（`.ts` 只有导出符号这一条路）', () => {
+    // 内容里就是有 template 也不算：`.ts` 编译不过 JSX，那里的大写标签只是字符串。
     expect(outlineOf('src/util.ts', VUE)).toEqual([]);
   });
 
@@ -121,8 +121,89 @@ describe('outlineOf', () => {
   });
 });
 
+// ─── Task 2b：`.tsx` / `.jsx` 的 JSX 标签 ＋ `.ts` 的导出符号 ────────────────
+
+/**
+ * 实测根据：`.vue` 那一半只有 uni-app 的 59 个文件，而 `123pan-pc`（184 个 `.ts`）与
+ * `123pan-cross-frontend`（50 `.ts` + 29 `.tsx`）的 outline 是 **0 个文件**——产品的一大半
+ * 对评估没有任何信息。owner 裁决：`.tsx` / `.jsx` 照 `.vue` 的规矩办（只取大写开头的标签），
+ * `.ts` 没有 JSX，取 `export` 出来的符号，kind 记 `'symbol'`。
+ */
+describe('outlineOf 扩展到 tsx / jsx / ts（Task 2b）', () => {
+  it('tsx 里取 JSX 大写标签', () => {
+    const tsx = `export function Page(){ return (<div><HeaderBar /><FileList items={xs} /></div>); }`;
+    expect(outlineOf('pages/page.tsx', tsx).map((n) => n.name)).toEqual(['HeaderBar', 'FileList']);
+  });
+
+  it('jsx 与 tsx 同一套规则（同一个仓里两种扩展名混用）', () => {
+    const jsx = ['export default function Page() {', '  return <Panel><RowBar /></Panel>;', '}'].join('\n');
+    expect(outlineOf('src/panel.jsx', jsx).map((n) => n.name)).toEqual(['Panel', 'RowBar']);
+  });
+
+  it('tsx 里注释与字符串中的标签不算（一行注释不能造出一个不存在的组件）', () => {
+    const tsx = [
+      '// 旧的写法：<OldHeader />',
+      '/* <LegacyPanel /> 已删 */',
+      "const hint = '<LegacyBar />';",
+      'export function Page(){ return (<div><HeaderBar /></div>); }',
+    ].join('\n');
+    expect(outlineOf('pages/page.tsx', tsx).map((n) => n.name)).toEqual(['HeaderBar']);
+  });
+
+  it('tsx 的行号是全文行号（先剥注释也不能把偏移挪掉）', () => {
+    const tsx = [
+      '// 组件清单',
+      '',
+      'export function Page() {',
+      '  return (',
+      '    <HeaderBar />',
+      '  );',
+      '}',
+    ].join('\n');
+    expect(outlineOf('pages/page.tsx', tsx)).toEqual([
+      { kind: 'component-use', name: 'HeaderBar', line: 5 },
+    ]);
+  });
+
+  it('多行字符串里的换行照样算行号（内容被抹掉，但行数不能被抹掉）', () => {
+    const tsx = [
+      'const tpl = `',
+      '  <NotAComponent />',
+      '`;',
+      'export function Page() { return <HeaderBar />; }',
+    ].join('\n');
+    // 模板字符串里的那个标签是字符串，不算组件；但它占了 2 行，后面的行号要跟着走。
+    expect(outlineOf('pages/tpl.tsx', tsx)).toEqual([
+      { kind: 'component-use', name: 'HeaderBar', line: 4 },
+    ]);
+  });
+
+  it('ts 里取导出符号（PC 仓没有 JSX）', () => {
+    const ts = `export function loadMore(){}\nexport const useShare = () => {};`;
+    const out = outlineOf('src/share.ts', ts);
+    expect(out.map((n) => [n.kind, n.name])).toEqual([['symbol', 'loadMore'], ['symbol', 'useShare']]);
+  });
+
+  it('ts 里不把普通局部变量当符号', () => {
+    expect(outlineOf('a.ts', 'const local = 1;')).toEqual([]);
+  });
+
+  it('ts 的符号按出现顺序（不是「先函数后 const」）', () => {
+    const ts = ['export const useA = 1;', 'export async function b(){}'].join('\n');
+    expect(outlineOf('a.ts', ts).map((n) => [n.name, n.line])).toEqual([['useA', 1], ['b', 2]]);
+  });
+
+  it('vue 行为不变（回归）：只取 template 里的大写标签', () => {
+    const names = outlineOf('pages/share/index.vue', VUE);
+    expect(names).toEqual([
+      { kind: 'component-use', name: 'ShareHeader', line: 3 },
+      { kind: 'component-use', name: 'SearchBar', line: 4 },
+    ]);
+  });
+});
+
 describe('装配：outline 按路径挂到索引上', () => {
-  it('只收有组件使用的 .vue 文件，.ts 不会出现在 outline 里', () => {
+  it('每一类节点按路径挂上（.vue 给组件、.ts 给导出符号）', () => {
     const index = indexOf({
       'src/pages/share/index.vue': '<template>\n  <ShareHeader />\n  <SearchBar />\n</template>\n',
       'src/services/share.ts': 'export const a = 1;\n',
@@ -131,7 +212,9 @@ describe('装配：outline 按路径挂到索引上', () => {
       { kind: 'component-use', name: 'ShareHeader', line: 2 },
       { kind: 'component-use', name: 'SearchBar', line: 3 },
     ]);
-    expect(Object.keys(index.outline)).toEqual(['src/pages/share/index.vue']);
+    // Task 2b 之后 `.ts` 也进 outline：它给的是导出符号，不是组件使用。
+    expect(index.outline['src/services/share.ts']).toEqual([{ kind: 'symbol', name: 'a', line: 1 }]);
+    expect(Object.keys(index.outline)).toEqual(['src/pages/share/index.vue', 'src/services/share.ts']);
   });
 });
 

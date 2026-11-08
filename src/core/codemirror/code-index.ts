@@ -1,3 +1,4 @@
+import { reverseImports } from './reverse-imports.js';
 import { expandTerms, isGenericWord, type Term } from './terms.js';
 
 /**
@@ -66,14 +67,16 @@ export type IndexPage = {
 };
 
 /**
- * 一页里用到的一个组件（Task 2 的 outline 第一层）。
+ * 一页里用到的一个组件（Task 2 的 outline 第一层），或一个文件对外提供的符号（Task 2b）。
  *
- * 只排到「template 里的标签」这一层是刻意的：评估要回答的是「这页里已经有搜索框了吗」，
- * 而那个答案就是标签名本身。`kind` 现在只产出 `component-use`；留 `tag` 是为了将来
- * 把「原生标签」也记下来时不改形状（`div` / `li` 这类现在**不进** outline）。
+ * 只排到「template / JSX 里的标签」这一层是刻意的：评估要回答的是「这页里已经有搜索框了
+ * 吗」，而那个答案就是标签名本身。`kind` 现在产两种：
+ * - `component-use`：`.vue` 的 template 与 `.tsx` / `.jsx` 的 JSX 里**大写开头**的标签；
+ * - `symbol`：`.ts` / `.tsx` 没有 JSX 可言时，文件 `export` 出来的那些名字。
+ * 留 `tag` 是为了将来把「原生标签」也记下来时不改形状（`div` / `li` 这类现在**不进** outline）。
  */
 export type OutlineNode = {
-  kind: 'component-use' | 'tag';
+  kind: 'component-use' | 'tag' | 'symbol';
   name: string;
   /** 1 起算的全文行号（`grep -n` 对得上）。 */
   line: number;
@@ -86,10 +89,21 @@ export type CodeIndex = {
   files: Record<string, IndexFile>;
   /** path → 被它 import 的仓内路径（外部包不进来）。 */
   imports: Record<string, string[]>;
+  /**
+   * path → 引用了它的文件路径（Task 3）。**装配期由 `imports` 现算**，不落库。
+   *
+   * 为什么需要它：`imports` 只能回答「这个文件用了谁」，而评审要回答的是「改它会波及
+   * 几个页面」。方向必须反过来一次——见 `reverse-imports.ts`。没有入边的文件不占键
+   * （不制造空数组噪音）。
+   */
+  importedBy: Record<string, string[]>;
   routes: IndexRoute[];
   /** 页面清单：`pages.json` 自己说的 ＋ 目录约定补的（同一条 route 时前者胜出）。 */
   pages: IndexPage[];
-  /** path → 这一页 template 里用到的组件（只做 `.vue`；没有组件的那一页不占一个键）。 */
+  /**
+   * path → 这个文件的结构轮廓（Task 2 / 2b：`.vue` 的 template 组件、`.tsx` / `.jsx`
+   * 的 JSX 标签、`.ts` 的导出符号；一个都没有的文件不占键）。
+   */
   outline: Record<string, OutlineNode[]>;
   /** 建索引的时刻（ISO）。第二次读到同一个 `(repo, sha)` 时，这个值不该变。 */
   builtAt: string;
@@ -682,19 +696,83 @@ const TEMPLATE_OPEN = /<template(?:\s[^>]*)?>/i;
 /** 组件标签：**大写开头**。`div` / `ul` / `li` 不是我们维护的东西，不进 outline。 */
 const COMPONENT_TAG = /<([A-Z][A-Za-z0-9_]*)\b/g;
 
+/** `.ts` 的导出函数（含 `export async function` 与 `export function*`）。 */
+const TS_EXPORT_FN = /\bexport\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/g;
+/** `.ts` 的导出常量（hook、配置对象、单例都在这里）。 */
+const TS_EXPORT_CONST = /\bexport\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+
+/** 偏移 → 1 起算的行号（`grep -n` 对得上）。 */
+function lineAt(text: string, index: number): number {
+  return text.slice(0, index).split('\n').length;
+}
+
 /**
- * 一页 template 里用到的组件（Task 2 的第一层）。
+ * 把注释与引号字符串抹成空格（换行保留）。
  *
- * 为什么只做 template、只做 vue：评估要回答的是「这页里已经有什么组件」，template 里的
- * 标签名就是答案，不需要进 script 解析 AST。而修 script 里的函数与 props 是 Phase 3 的
- * 事——那时才需要 tree-sitter。
+ * 为什么必须抹：`.tsx` 里 `// <OldHeader /> 已删` 与 `const hint = '<LegacyBar />'`
+ * 会让正则凭空造出两个不存在的组件，而评估材料会拿它们说「这页已经有这个组件了」。
+ * 为什么抹成空格而不是删掉：**偏移与行号必须留在原地**——删字符会让后面每一个节点的
+ * 行号都往前挪，而 outline 的 `line` 是要和 `grep -n` 对账的。
  *
- * 为什么闭合取**最后一个** `</template>`：template 里还有 `<template v-if>` / `<template
- * #slot>` 这种嵌套写法，用第一个闭合会被内层截断，后面的组件全部消失（这正是
- * 「这页缺一个 X」类错误结论的来源）。行号给全文行号（`grep -n` 对得上），不是块内偏移。
+ * 代价两处，都写在这里免得下次有人以为是 bug：模板字符串里的 `${…}` 会连插值一起被
+ * 抹掉（JSX 写在插值里的情况不存在）；正则字面量（`/<[A-Z]/`）仍可能误命中——它没有
+ * 「引号」可依，扫不出来。
  */
-export function outlineOf(path: string, text: string): OutlineNode[] {
-  if (!/\.vue$/i.test(path)) return [];
+function maskCode(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i] ?? '';
+    const next = text[i + 1] ?? '';
+    if (ch === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') {
+        out += ' ';
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
+        out += text[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      if (i < text.length) {
+        out += '  ';
+        i += 2;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      out += ' ';
+      i += 1;
+      while (i < text.length) {
+        const inner = text[i] ?? '';
+        if (inner === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
+        if (inner === quote) {
+          out += ' ';
+          i += 1;
+          break;
+        }
+        out += inner === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+/** `.vue`：template 里的组件（Task 2 的原始口径，**一行都没动**）。 */
+function vueOutline(text: string): OutlineNode[] {
   const open = TEMPLATE_OPEN.exec(text);
   if (open === null) return [];
   const bodyStart = open.index + open[0].length;
@@ -712,6 +790,67 @@ export function outlineOf(path: string, text: string): OutlineNode[] {
     });
   }
   return out.filter((node) => node.name !== '');
+}
+
+/**
+ * `.tsx` / `.jsx`：JSX 里**大写开头**的标签，与 `.vue` 的 template 同一条规矩。
+ *
+ * 为什么整份匹配而不是先找 `return (`：React 组件可以写成 `const Page = () => <div/>`、
+ * 也可以 `return <A/>` 多行、还可以在 `?.` / `&&` 后面直接跟 JSX。找「起点」的规则一多
+ * 就会漏，而「大写开头的标签」在这个文件类型里几乎没有别的含义（内置类型 `React.FC`、
+ * 泛型 `<T,>` 都是小写或带逗号/冒号的写法）。
+ */
+function jsxOutline(text: string): OutlineNode[] {
+  const masked = maskCode(text);
+  const out: OutlineNode[] = [];
+  COMPONENT_TAG.lastIndex = 0;
+  for (let m = COMPONENT_TAG.exec(masked); m !== null; m = COMPONENT_TAG.exec(masked)) {
+    out.push({ kind: 'component-use', name: m[1] ?? '', line: lineAt(masked, m.index) });
+  }
+  return out.filter((node) => node.name !== '');
+}
+
+/**
+ * `.ts`：`export` 出来的符号（PC 仓 184 个 `.ts` 没有 JSX，但有导出符号）。
+ *
+ * 为什么只认导出的、不认文件内的局部声明：`const local = 1` 满地都是，把它们记进
+ * outline 等于给每个文件造几十行噪音；而「这一页/这个服务对外提供了什么」正是导出名。
+ * 为什么两类合在一起按位置排序：`export const useA` 写在 `export function b` 前面时，
+ * outline 的顺序必须与文件一致，否则同一份内容两次读出来的顺序会不一样。
+ */
+function symbolOutline(text: string): OutlineNode[] {
+  const hits: Array<{ index: number; name: string }> = [];
+  for (const re of [TS_EXPORT_FN, TS_EXPORT_CONST]) {
+    re.lastIndex = 0;
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      const name = (m[1] ?? '').trim();
+      if (name !== '') hits.push({ index: m.index, name });
+    }
+  }
+  hits.sort((a, b) => a.index - b.index);
+  return hits.map((hit) => ({ kind: 'symbol', name: hit.name, line: lineAt(text, hit.index) }));
+}
+
+/**
+ * 一个文件的结构轮廓（Task 2 / 2b）。
+ *
+ * 为什么最早只做 template、只做 `.vue`：评估要回答的是「这页里已经有什么组件」，template
+ * 里的标签名就是答案，不需要进 script 解析 AST。**但实测把这条路走窄了**：`.vue` 那一半
+ * 只有 uni-app 的 59 个文件，`123pan-pc`（184 个 `.ts`）与 `123pan-cross-frontend`
+ * （50 `.ts` + 29 `.tsx`）的 outline 一个文件都没有——产品的一大半对评估没有任何信息。
+ * owner 裁决后按扩展名分三条路：
+ * - `.vue`：template 里的大写标签（闭合取**最后一个** `</template>`：template 里还有
+ *   嵌套的 `<template v-if>` / `<template #slot>`，用第一个闭合会被内层截断，后面的组件
+ *   全部消失——那正是「这页缺一个 X」类错误结论的来源）；
+ * - `.tsx` / `.jsx`：JSX 里的大写标签（先剥注释与字符串，见 `maskCode`）；
+ * - `.ts`：`export` 出来的函数与常量，kind 记 `symbol`（`.ts` 编译不过 JSX）。
+ * 行号一律给全文行号（`grep -n` 对得上），不是块内偏移。
+ */
+export function outlineOf(path: string, text: string): OutlineNode[] {
+  if (/\.vue$/i.test(path)) return vueOutline(text);
+  if (/\.[jt]sx$/i.test(path)) return jsxOutline(text);
+  if (/\.ts$/i.test(path)) return symbolOutline(text);
+  return [];
 }
 
 // ─── 装配 ────────────────────────────────────────────────────────────────────
@@ -914,7 +1053,7 @@ export function assembleIndex(input: AssembleInput): CodeIndex {
     pages.push({ route, title: null, source: 'convention' });
   }
 
-  // 组件轮廓：按路径挂上每一页 template 里的组件（没有组件的那一页不占一个键）。
+  // 组件轮廓 / 导出符号：按路径挂上（一个都没有的文件不占键）。
   const outline: Record<string, OutlineNode[]> = {};
   for (const source of input.sources) {
     if (source.outline.length === 0) continue;
@@ -926,6 +1065,9 @@ export function assembleIndex(input: AssembleInput): CodeIndex {
     sha: input.sha,
     files,
     imports,
+    // 反向图在这里一次算完：它只由上面的 `imports` 决定，而 `imports` 是用**这一棵树**
+    // 解析出来的。存进库里就等于存一个会过期的副本（见 `reverse-imports.ts`）。
+    importedBy: reverseImports(imports),
     routes,
     pages,
     outline,
