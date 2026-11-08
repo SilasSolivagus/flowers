@@ -658,6 +658,43 @@ export const blobIndex = pgTable('blob_index', {
 });
 
 /**
+ * 每个镜像仓最后一次检查的结果（迁移 0031）。**夜间索引写，读侧只读。**
+ *
+ * 存在的理由是一条真实的失败链：新鲜度是「服务器 cron 抓 → Mac 索引 → 材料写快照」，
+ * 2026-11-08 第一环坏了（服务器的 `codeup.aliyun.com` 解析得出、HTTPS 连不上），三个仓
+ * 全部 `rc=128`，唯一的痕迹是一份没人读的服务器日志；而材料上那句「代码快照较旧」
+ * 只有**下次生成**时才出现——被动兜底。这张表把索引器**本来就知道**的那件事
+ * （每个仓的 HEAD 是哪一天、这轮成不成、为什么不成）落成一行一仓，让
+ * `core/codemirror/health.ts` 能把它变成一条主动通知（`mirror.stale`）。
+ *
+ * 两条容易写错的语义（迁移 0031 里也写了同一段）：
+ *
+ * 1. **`head_date` 是提交日期，不是检查时刻。** `checked_at` 每次覆盖，`head_date` 只在
+ *    真的前进时变。「跑过了、但拉到的代码和上周一样」必须看起来像**旧**，否则这一层
+ *    就白建了。
+ * 2. **失败不清空 `head_sha` / `head_date`。** 一次 ssh 连不上的夜里读者仍要能说出
+ *    「它停在 2026-10-21」——那是通知正文里最有用的一半。写入口用 coalesce 保留旧值。
+ *
+ * 故意不在 `src/db/reset.ts` 的 `RESET_TABLES` 里（与 `blob_index` 同一个理由：没有外键、
+ * 存的是 ssh 镜像里真实提交的状态，重建要重跑一次夜间同步）。泄漏由用例自己收口：
+ * `tests/mirror-health.test.ts` 用 `fixture-` 前缀的仓名，跑完删掉自己那几行。
+ */
+export const mirrorHealth = pgTable('mirror_health', {
+  /** 配置里的仓名（`app_settings.code.mirror.repos` 的 `id`），一仓一行。 */
+  repo: text('repo').primaryKey(),
+  /** 上一次读到的 HEAD 完整 sha；一次都没读到过时是 null。 */
+  headSha: text('head_sha'),
+  /** 那个提交的**提交时间**（不是检查时刻）。 */
+  headDate: timestamp('head_date', { withTimezone: true }),
+  /** 这一轮检查的时刻（每次覆盖）：它变而 `head_date` 不变 = 跑过了但代码没前进。 */
+  checkedAt: timestamp('checked_at', { withTimezone: true }).notNull().defaultNow(),
+  /** 这一轮成不成：读 HEAD 失败 / 仓是空仓 / 索引同步失败，都是 false。 */
+  ok: boolean('ok').notNull(),
+  /** `ok = false` 时的一句中文原因（直接进通知正文）。 */
+  error: text('error'),
+});
+
+/**
  * 一次合并 = 一个功能落地。
  *
  * 粒度故意不是「一次提交」：一条特性分支里会有十几次提交（`fix: 改个字母` 也算），

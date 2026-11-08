@@ -232,6 +232,13 @@
       "when": 1794102600000,
       "tag": "0030_drop_tree_entry",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794104300000,
+      "tag": "0031_mirror_health",
+      "breakpoints": true
     }
   ]
 }

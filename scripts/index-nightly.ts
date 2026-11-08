@@ -15,16 +15,24 @@
  * 用法：
  *   tsx scripts/index-nightly.ts --log <path> [--help]
  *
+ * 每个仓处理完就写一行 `mirror_health`（迁移 0031），循环结束再判一次新鲜度：
+ * 「这个仓的代码停在哪天」必须落库，否则它只活在这份日志里，而日志没人读
+ * （2026-11-08 第一环失败那天就是这样，`123pan-cross-frontend` 停在 10-21 十几天）。
+ * 判完变旧的仓会写一条 `mirror.stale` 事件（超管在铃铛里看到），所以这里不需要
+ * 第二个 scheduler——检查住在**已经每天在跑的那件事**里。
+ *
  * 退出码：0 = 每个仓都成功（含「0 块新内容」，日志里能分辨）；3 = 至少一个仓失败
- *         （镜像连不上 / 仓没提交 / 索引失败）；2 = 读不到配置（设置或库）。
+ *         （镜像连不上 / 仓没提交 / 索引失败 / 新鲜度检查本身出错）；2 = 读不到配置
+ *         （设置或库）。
  */
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
-import { pool } from '../src/db/client.js';
+import { db, pool } from '../src/db/client.js';
 import { head } from '../src/core/codemirror/mirror.js';
 import { resolveMirrorConfig } from '../src/core/codemirror/mirror.js';
+import { checkMirrorFreshness, recordMirrorHealth } from '../src/core/codemirror/health.js';
 import { REPO_ROOT, dataLayout } from '../src/core/runtime-dir.js';
 
 const TSX = path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
@@ -110,6 +118,11 @@ async function main(): Promise<number> {
         ts: new Date().toISOString(), repo: repo.id, sha: null, newBlobs: null,
         ms: Date.now() - headStarted, error: h.message,
       });
+      // sha / date 传 null：**不抹掉**上一次已知的 HEAD（`recordMirrorHealth` 用
+      // coalesce 保留）。读者仍要能说出「它停在 2026-10-21」，那是通知正文里最有用的一半。
+      await recordMirrorHealth(db, {
+        repo: repo.id, headSha: null, headDate: null, ok: false, error: h.message,
+      });
       console.error(`[${repo.id}] 读 HEAD 失败：${h.message}`);
       failed += 1;
       continue;
@@ -118,6 +131,10 @@ async function main(): Promise<number> {
       writeRow(log, {
         ts: new Date().toISOString(), repo: repo.id, sha: null, newBlobs: null,
         ms: Date.now() - headStarted, error: '镜像仓库还没有任何提交',
+      });
+      await recordMirrorHealth(db, {
+        repo: repo.id, headSha: null, headDate: null, ok: false,
+        error: '镜像仓库还没有任何提交',
       });
       console.error(`[${repo.id}] 镜像仓库还没有任何提交`);
       failed += 1;
@@ -142,6 +159,12 @@ async function main(): Promise<number> {
         ts: new Date().toISOString(), repo: repo.id, sha: h.data.sha, newBlobs: null, ms,
         error: detail === '' ? `index-sync 退出码 ${String(child.status)}` : detail,
       });
+      // HEAD 读到了（sha / date 是这一轮的），但索引没跟上：`ok = false` 且**带上**
+      // 它读到的那一天——下一轮判新鲜度时，这行说的是「代码到 10-21，索引失败」。
+      await recordMirrorHealth(db, {
+        repo: repo.id, headSha: h.data.sha, headDate: h.data.date, ok: false,
+        error: detail === '' ? `index-sync 退出码 ${String(child.status)}` : detail,
+      });
       console.error(`[${repo.id}] 索引失败（${ms} ms）：${detail}`);
       failed += 1;
       continue;
@@ -151,7 +174,37 @@ async function main(): Promise<number> {
     writeRow(log, {
       ts: new Date().toISOString(), repo: repo.id, sha: h.data.sha, newBlobs: blobs, ms,
     });
+    await recordMirrorHealth(db, {
+      repo: repo.id, headSha: h.data.sha, headDate: h.data.date, ok: true, error: null,
+    });
     console.log(`[${repo.id}] ${h.data.sha.slice(0, 8)} 新内容 ${blobs} 块（${ms} ms）`);
+  }
+
+  // 新鲜度：判的是**刚才写下的那些行**，所以只能在循环之后。判的仓列表来自配置
+  // （不是表），理由见 `health.ts` 文件头第 4 条。它自己出错也算这一轮失败：一条
+  // 「检查坏了」的静默，等于把这一项又变回日志里的一句话。
+  try {
+    const healthStarted = Date.now();
+    const alerts = await checkMirrorFreshness(db, {
+      repos: config.data.repos.map((repo) => repo.id),
+      now: new Date(),
+    });
+    for (const alert of alerts) {
+      console.log(`[${alert.repo}] 镜像变旧：${alert.reason === 'failed' ? alert.error : `${alert.days} 天前`}`);
+    }
+    writeRow(log, {
+      ts: new Date().toISOString(), repo: '(health)', sha: null, newBlobs: null,
+      ms: Date.now() - healthStarted,
+      ...(alerts.length === 0 ? {} : { error: `已提醒 ${alerts.map((a) => a.repo).join('、')}` }),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    writeRow(log, {
+      ts: new Date().toISOString(), repo: '(health)', sha: null, newBlobs: null, ms: 0,
+      error: `新鲜度检查失败：${detail}`,
+    });
+    console.error(`新鲜度检查失败：${detail}`);
+    failed += 1;
   }
 
   // 收尾一行：把「这一轮算不算成功」写进日志本体——夜里的失败不该只靠退出码被发现

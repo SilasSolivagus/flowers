@@ -76,6 +76,17 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
    */
   'clock.tick_skipped': 'action',
 
+  /**
+   * 镜像变旧（0031 的 `mirror_health` → 每晚一条）：某个仓的 HEAD 停在 7 天以前，
+   * 或上一轮同步失败，超管要去把那条链修好（服务器 cron / ssh / 上游权限）。
+   *
+   * 为什么是 `action` 而不是 `change`：它要有人去修，而且修的入口在服务器上，不是
+   * 「知道就好」。更重要的是——材料上那句「代码快照较旧」只有**下一次生成**时才看得见，
+   * 这一条是它的主动版；归到 `change` 会让默认档 `key` 的超管在铃铛里看不到它（`key`
+   * = 动手 + 结果），等于又退回「靠人碰巧发现」。
+   */
+  'mirror.stale': 'action',
+
   // ── outcome：有结果 ─────────────────────────────────────────────────────
   'requirement.review_passed': 'outcome',   // 评审通过
   'requirement.review_rejected': 'outcome', // 评审打回

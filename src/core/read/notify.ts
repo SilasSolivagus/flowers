@@ -87,12 +87,14 @@ export type Notice = {
   type: string;
   /**
    * 这条通知指向的需求；`null` = **成员级 / 全局级**提醒（P2 的企微绑定自愈，
-   * 2026-11-08 起再加 `clock.tick_skipped`）。
+   * 2026-11-08 起再加 `clock.tick_skipped` 与 `mirror.stale`）。
    *
    * 三列一起可空，因为它们回答的是同一件事（「打开哪一条」）。一条
    * `member.wecom_unlinked` 没有需求可挂——它的动作是「去设置里点查一下」，给它编一个
    * PAN 编号或者挂到某条需求上都会点开一个无关的抽屉。一条 `clock.tick_skipped` 说的是
-   * 「这一轮有 N 条钟推不动」，挂到其中一条上只会点开那一行，而要看的是那一批。
+   * 「这一轮有 N 条钟推不动」，挂到其中一条上只会点开那一行，而要看的是那一批。一条
+   * `mirror.stale` 说的是「某个镜像仓的代码停在 N 天前」——它跟任何一条需求都没有关系，
+   * 修它的入口在服务器上（`sync-flowers-mirror.log` / ssh / 上游权限）。
    */
   requirementId: string | null;
   number: number | null;
@@ -218,6 +220,26 @@ export function memberLineOf(type: string, payload: Payload): string {
     const tail = reasons === null ? '' : `：${reasons}`;
     return `时钟跳过 ${count} 条需求${range === '' ? '' : `（${range}）`}${tail}——这几行的日期或排期版本坏了，不补就永远不会自己往前走`;
   }
+  if (type === 'mirror.stale') {
+    // 一行说清三件事：哪个仓、停在哪天（几天前）、为什么。**两半的措辞不同**：
+    // 同步失败才写「上次同步失败：」这一截；健康但旧（cron 好好跑着、上游就是没有
+    // 新提交）写「上游这段时间没有新提交」——把一次成功的同步说成失败，会让人去修
+    // 一个没坏的东西，而真正该做的是去问上游/研发「这个仓两周没提交，对劲吗」。
+    const repo = text(payload, 'repo') ?? '某个仓';
+    const head = text(payload, 'head_date');
+    const days = typeof payload.days === 'number' ? payload.days : null;
+    const error = text(payload, 'error');
+    if (head === null || days === null) {
+      // 从来没有成功读到过 HEAD：没有「停在哪天」可说，只剩原因。
+      return error === null
+        ? `${repo} 的镜像还没有同步记录——夜间索引可能一次都没跑成`
+        : `${repo} 的镜像从来没有同步成功过，上次同步失败：${clip(error, 40)}`;
+    }
+    const where = `${repo} 的镜像停在 ${head}（${days} 天前）`;
+    return error === null
+      ? `${where}，上游这段时间没有新提交`
+      : `${where}，上次同步失败：${clip(error, 40)}`;
+  }
   return '有一条成员提醒';
 }
 
@@ -244,6 +266,7 @@ function reasonSummary(raw: unknown): string | null {
  */
 export function memberHeadlineOf(type: string): string {
   if (type === 'clock.tick_skipped') return '时钟推进提醒';
+  if (type === 'mirror.stale') return '镜像新鲜度提醒';
   return '企微绑定提醒';
 }
 
@@ -335,13 +358,14 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
     ? sql`(e.requirement_id is not null and e.actor <> ${member.name}${inMyLine})`
     : sql`false`;
 
-  // 成员级 / 全局级提醒（P2「企微绑定自愈」，2026-11-08 起再加时钟跳过）：**只有超管收**。
-  // 它们没有「谁的线」可锚——绑不上的人属于名册、推不动的行属于数据，都不属于某条需求；
-  // 而能修它们的人都是超管（设置页的「查一下」/ 排期里的日期与版本）。
+  // 成员级 / 全局级提醒（P2「企微绑定自愈」，2026-11-08 起再加时钟跳过、镜像变旧）：
+  // **只有超管收**。它们没有「谁的线」可锚——绑不上的人属于名册、推不动的行属于数据、
+  // 停住的镜像属于运维，都不属于某条需求；而能修它们的人都是超管（设置页的「查一下」/
+  // 排期里的日期与版本 / 服务器上的同步 cron）。
   // 并且刻意**不**排除自己做的动作：这一条是 `actor = 'system'` 写下的，不属于任何人。
   const memberAlert = admin
     ? sql`(e.requirement_id is null
-           and e.type in ('member.wecom_unlinked', 'clock.tick_skipped'))`
+           and e.type in ('member.wecom_unlinked', 'clock.tick_skipped', 'mirror.stale'))`
     : sql`false`;
 
   /**
