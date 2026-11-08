@@ -710,6 +710,47 @@ export const mirrorHealth = pgTable('mirror_health', {
 });
 
 /**
+ * 每个镜像仓**接入时**的覆盖率快照（迁移 0033）。批量接入写，读侧只读。
+ *
+ * 「这个仓接进来了」有两层意思：服务器上有 bare 镜像（`git ls-tree` 能列文件），
+ * 与那些文件**真的进了索引**（symbols / imports / pages / outline 都抽出来了）。
+ * 两层之间会断，而断开时镜像「同步成功」、`mirror_health` 一片绿、材料上写着
+ * 「没找到相关代码」——所以每仓落一行，把「树里多少文件 / 索引吃进多少 / 出几张页面」
+ * 摆在一起，让「仓里没代码」与「解析器没认出它」这两种坏法可分辨。
+ *
+ * 与 `mirror_health` 分开的理由是**写入节奏**：那张是每晚覆盖的心跳，这里是接入时的
+ * 基线快照（139 个仓接一次），合成一张会让「昨晚跑过了」把基线刷掉。
+ *
+ * 故意不在 `src/db/reset.ts` 的 `RESET_TABLES` 里（与 `blob_index` / `mirror_health`
+ * 同一个理由：没有外键、存的是镜像里真实提交的状态，重建要重跑一次批量接入）。
+ * 用例用 `fixture-` 前缀的仓名，跑完删掉自己那几行。
+ */
+export const repoCoverage = pgTable('repo_coverage', {
+  /** 仓名（`config/repos.txt` 的仓名 = `code.mirror.repos` 的 `id`），一仓一行。 */
+  repo: text('repo').primaryKey(),
+  /** 测量时镜像 HEAD 的完整 sha；续跑的判据（同 sha 且 ok 就不重测）。 */
+  headSha: text('head_sha'),
+  /** 那个提交的**提交时间**（不是测量时刻）。 */
+  headDate: timestamp('head_date', { withTimezone: true }),
+  /** HEAD 树里的文件数（去噪音后）。 */
+  filesTotal: integer('files_total').notNull().default(0),
+  /** 索引里有内容的文件数——**结果**，不是「可索引文件数」那个上限。 */
+  filesIndexed: integer('files_indexed').notNull().default(0),
+  /** 页面清单条数（`pages.json` + 目录约定）。 */
+  pages: integer('pages').notNull().default(0),
+  /** 有结构轮廓的文件数（`.vue` template / `.tsx` JSX / `.ts` 导出符号）。 */
+  outlineFiles: integer('outline_files').notNull().default(0),
+  /** 仓内 import 边数。 */
+  imports: integer('imports').notNull().default(0),
+  /** 这一轮成不成。 */
+  ok: boolean('ok').notNull(),
+  /** `ok = false` 时的一句中文原因。 */
+  error: text('error'),
+  /** 本轮测量时刻（每次覆盖）；它变而 `head_sha` 不变 = 重测了同一个提交。 */
+  measuredAt: timestamp('measured_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * 一次合并 = 一个功能落地。
  *
  * 粒度故意不是「一次提交」：一条特性分支里会有十几次提交（`fix: 改个字母` 也算），

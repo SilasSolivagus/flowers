@@ -246,6 +246,13 @@
       "when": 1794106000000,
       "tag": "0032_blob_outline",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794108000000,
+      "tag": "0033_repo_coverage",
+      "breakpoints": true
     }
   ]
 }
