@@ -5,28 +5,37 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { db } from '../src/db/client.js';
+import { existingBlobShas, readBlobRows } from '../src/core/codemirror/blob-index.js';
 import {
-  existingBlobShas, forgetBlobs, readBlobRows,
-} from '../src/core/codemirror/blob-index.js';
-import {
-  LIVE_INDEX_DEPS, buildIndex, dropIndex, readIndex, repoIndex, syncRepoIndex,
+  LIVE_INDEX_DEPS, assembleFor, buildIndex, clearAssembleCache, forgetBlobs, readIndex,
+  repoIndex, syncRepoIndex,
 } from '../src/core/codemirror/index-store.js';
-import { DEFAULT_SSH_HOST, head, lsTreeEntries } from '../src/core/codemirror/mirror.js';
+import { DEFAULT_SSH_HOST, lsTreeEntries } from '../src/core/codemirror/mirror.js';
 
 /**
- * P4-11：索引**按内容**做一次，之后永远增量。
+ * P4-11（第二版）：索引**按内容**做一次，树**每次现读**。
  *
- * 这个文件只钉一件事的五个侧面：**同一块内容不会被解析第二次**，而树的差异仍然
- * 一字不差地还原得出来。全部用当场 `git init` 出来的真仓（与 `index.test.ts`
- * 同一个做法）——`ls-tree -l` 的 oid 列、`cat-file --batch` 的长度前缀都是真格式。
+ * 第一版还建了一张 `tree_entry`（按提交的 `path → blob` 映射），被实测判了死刑：
+ * 一个提交就是一整棵树（638 / 575 行），按 `文件 × 提交` 增长。迁移 0030 把它删了，
+ * 装配改成「现读 `git ls-tree -r <sha>` + join `blob_index`」。这个文件钉的是：
  *
- * 变异表（把每条实现改坏，看哪条用例变红）：
+ * 1. **同一块内容只解析一次**（`parsed_at` 不变、读口不再请求它）；
+ * 2. 同一个提交同步两次 → 0 块新内容；
+ * 3. 旧提交装配出来是**那一棵树**（不是 HEAD 的）——`tree_entry` 删掉之后这条性质还在；
+ * 4. 库里缺一块内容时**当场解析并写回**（自愈），第二次不再解析；
+ * 5. 装配两次不会重复插内容行；同一块内容在两个仓里也只解析一次。
+ *
+ * 全部用当场 `git init` 出来的真仓（与 `index.test.ts` 同一个做法）：`ls-tree -l` 的
+ * oid 列、`cat-file --batch` 的长度前缀都是真格式。
+ *
+ * 变异表：
  * | 变异 | 变红的用例 |
  * |---|---|
- * | `blob_index` 主键改成 `(repo, path)` | 「两个仓共享的内容只解析一次」 |
- * | `repoIndex` 不查 `hasTree` 就重建 | 「同一个提交同步两次：0 块新内容」 |
- * | 装配时用 HEAD 的树而不是请求的 sha | 「旧提交的文件集不是 HEAD 的」 |
- * | 解析结果里存解析后的仓内路径（而不是说明符） | 「导入关系与全量解析逐字相同」 |
+ * | 装配时不查 `blob_index`、每次都重解析 | 「两个提交共享一个没变过的文件」 |
+ * | 装配时按 HEAD 的树拼（而不是请求的 sha） | 「旧提交的文件集不是 HEAD 的」 |
+ * | 缺一块内容时跳过（不自愈） | 「库里缺一块 → 当场解析并写回」 |
+ * | `blob_index` 主键带 repo / path | 「两个仓共享一块内容」 |
+ * | 解析结果里存解析后的仓内路径 | 「装配与全量解析逐字相同」（`tests/index.test.ts` 也钉） |
  */
 
 // ─── 夹具 ────────────────────────────────────────────────────────────────────
@@ -95,6 +104,7 @@ const SHARED_SOURCE_V2 = [
 type Fixture = { root: string; one: string; two: string; oneC1: string; oneC2: string; twoC1: string };
 
 const REPO_ENV = ['FLOWERS_MIRROR_TRANSPORT', 'FLOWERS_MIRROR_REPOS', 'FLOWERS_MIRROR_SSH_HOST'] as const;
+const REPOS = ['fixture-blob-one', 'fixture-blob-two'] as const;
 const savedEnv = new Map<string, string | undefined>();
 let fixture: Fixture;
 
@@ -119,6 +129,19 @@ async function initRepo(root: string, name: string): Promise<{ work: string; bar
   return { work, bare };
 }
 
+/** 夹具里所有提交用到的全部 blob id（收口用）。 */
+async function allFixtureShas(): Promise<string[]> {
+  if (fixture === undefined) return [];
+  const shas = new Set<string>();
+  for (const repo of REPOS) {
+    for (const sha of [fixture.oneC1, fixture.oneC2, fixture.twoC1]) {
+      const tree = await lsTreeEntries(repo, { ref: sha });
+      if (tree.ok) for (const entry of tree.data) shas.add(entry.oid);
+    }
+  }
+  return [...shas];
+}
+
 beforeAll(async () => {
   for (const key of REPO_ENV) savedEnv.set(key, process.env[key]);
   const root = await mkdtemp(path.join(tmpdir(), 'flowers-blob-'));
@@ -138,11 +161,11 @@ beforeAll(async () => {
   }, 'c2');
   await gitCmd(one.work, ['push', '-q', one.bare, 'HEAD:refs/heads/master']);
 
-  // 仓二：**另一条历史**，但有一块内容与仓一逐字节相同（不同路径、不同目录布局）。
+  // 仓二：**另一条历史**，但有两块内容与仓一逐字节相同（不同路径、不同目录布局）。
   const twoC1 = await commitInto(two.work, {
     'app/services/share.ts': SHARED_SOURCE,
     // 这块内容与仓一的 `src/pages/Search/Search.tsx` **逐字节相同**：它里面的
-    // `@/services/share` 在两个仓里必须解出不同的答案（仓二没有 `src/`）。
+    // `@/services/share` 在两个仓里必须解出不同的答案（仓一有 `src/`，仓二没有）。
     'app/pages/Search/Search.tsx': SEARCH_PAGE,
     'app/views/Home/Home.vue': "<template><view /></template>\n\n<script setup>\nconst home = 1\n</script>\n",
   }, 'two-c1');
@@ -158,19 +181,13 @@ beforeAll(async () => {
   ]);
 
   // `blob_index` 不参与 `resetDb` 的 truncate（见 `src/db/reset.ts`）：谁写谁收口。
-  for (const repo of ['fixture-blob-one', 'fixture-blob-two']) {
-    for (const sha of [fixture.oneC1, fixture.oneC2, fixture.twoC1]) await dropIndex(db, repo, sha);
-    const tree = await lsTreeEntries(repo);
-    if (tree.ok) await forgetBlobs(db, tree.data.map((entry) => entry.oid));
-  }
+  clearAssembleCache();
+  await forgetBlobs(db, await allFixtureShas());
 });
 
 afterAll(async () => {
-  for (const repo of ['fixture-blob-one', 'fixture-blob-two']) {
-    for (const sha of [fixture.oneC1, fixture.oneC2, fixture.twoC1]) await dropIndex(db, repo, sha);
-    const tree = await lsTreeEntries(repo);
-    if (tree.ok) await forgetBlobs(db, tree.data.map((entry) => entry.oid));
-  }
+  clearAssembleCache();
+  await forgetBlobs(db, await allFixtureShas());
   for (const key of REPO_ENV) {
     const value = savedEnv.get(key);
     if (value === undefined) delete process.env[key];
@@ -179,7 +196,7 @@ afterAll(async () => {
   if (fixture !== undefined) await rm(fixture.root, { recursive: true, force: true });
 });
 
-/** 某个提交用到的全部 blob id（去重，**问 git**——同步之前它也可能还没进库）。 */
+/** 某个提交用到的全部 blob id（去重，**问 git**——库里没有「这个提交」这种东西了）。 */
 async function shasOf(repo: string, sha: string): Promise<string[]> {
   const tree = await lsTreeEntries(repo, { ref: sha });
   if (!tree.ok) throw new Error(`读不到 ${repo}@${sha.slice(0, 8)} 的树：${tree.message}`);
@@ -195,7 +212,6 @@ describe('内容寻址：同一块内容只解析一次', () => {
     if (!first.ok) return;
     // 三个文件、三块内容：全量解析。
     expect(first.data.report.newBlobs).toBe(3);
-    expect(first.data.report.newEntries).toBe(3);
     expect(first.data.report.reusedBlobs).toBe(0);
 
     const before = await readBlobRows(db, await shasOf('fixture-blob-one', fixture.oneC1));
@@ -216,28 +232,28 @@ describe('内容寻址：同一块内容只解析一次', () => {
     // 新提交里只有两块内容库里没有：改过的 share.ts 与新增的组件。
     expect(second.data.report.newBlobs).toBe(2);
     expect(second.data.report.reusedBlobs).toBe(2);
-    // **没有被读回来**的正是那两块没变过的内容 —— 这就是「解析一次」的证据。
+    // 两个提交都用到的那两块（`Search.tsx` / `router.js`）**根本没有被请求**——这就是
+    // 「只解析一次」的证据；被改过的 share.ts 是**另一块内容**（新的 blob id），所以它
+    // 不在复用名单里。
     const c2Shas = await shasOf('fixture-blob-one', fixture.oneC2);
-    const after = await readBlobRows(db, c2Shas);
-    expect(after.size).toBe(4);
-    // 两个提交都用到的那两块内容：时间戳一字不动 = 没被重新解析。
     const shared = [...parsedAt.keys()].filter((sha) => c2Shas.includes(sha));
     expect(shared.length).toBe(2);
+    for (const sha of shared) expect(requested).not.toContain(sha);
+
+    const after = await readBlobRows(db, c2Shas);
+    expect(after.size).toBe(4);
     for (const sha of shared) expect(after.get(sha)?.parsedAt).toBe(parsedAt.get(sha));
   });
 
-  it('同一个提交同步两次：第二次 0 块新内容、0 行新映射', async () => {
+  it('同一个提交同步两次：第二次 0 块新内容', async () => {
     const again = await syncRepoIndex(db, 'fixture-blob-one', fixture.oneC1);
     expect(again.ok).toBe(true);
     if (!again.ok) return;
     expect(again.data.report.newBlobs).toBe(0);
-    expect(again.data.report.newEntries).toBe(0);
     expect(again.data.report.reusedBlobs).toBe(3);
   });
 
   it('两个仓共享一块内容 → 只解析一次（主键不按 repo/path 分）', async () => {
-    // 仓二有一条**完全不同**的历史：路径是 `app/services/share.ts`，内容与仓一的
-    // `src/services/share.ts` 逐字节相同。若主键里带 repo 或 path，这块就会被解析第二遍。
     const twoShas = await shasOf('fixture-blob-two', fixture.twoC1);
     // 三块内容里已经有两块在库里（仓一刚解析过），只剩 Home.vue 是新的。
     expect((await existingBlobShas(db, twoShas)).size).toBe(2);
@@ -245,7 +261,6 @@ describe('内容寻址：同一块内容只解析一次', () => {
     const synced = await syncRepoIndex(db, 'fixture-blob-two', fixture.twoC1);
     expect(synced.ok).toBe(true);
     if (!synced.ok) return;
-    // 三个文件，只有 Home.vue 是新内容；另外两块**在仓一已经解析过**。
     expect(synced.data.report.newBlobs).toBe(1);
     expect(synced.data.report.reusedBlobs).toBe(2);
 
@@ -256,31 +271,55 @@ describe('内容寻址：同一块内容只解析一次', () => {
   });
 });
 
-// ─── 2. 改一个文件 = 一行新内容 ─────────────────────────────────────────────
+// ─── 2. 自愈：库里缺一块就当场解析并写回 ────────────────────────────────────
 
-describe('增量：改一个文件只多一行 blob', () => {
-  it('新提交多 2 块内容、全量映射补齐、其余复用', async () => {
-    await dropIndex(db, 'fixture-blob-one', fixture.oneC1);
-    await dropIndex(db, 'fixture-blob-one', fixture.oneC2);
-    // 上面几条用例已经把这块内容解析过了；这一条要量「第一次见到它们时增量是多少」，
-    // 所以先忘掉 c2 用到的内容（等价于「这个仓从来没被索引过」）。
-    await forgetBlobs(db, await shasOf('fixture-blob-one', fixture.oneC2));
-    const c1 = await syncRepoIndex(db, 'fixture-blob-one', fixture.oneC1);
-    if (!c1.ok) return;
-    const c2 = await syncRepoIndex(db, 'fixture-blob-one', fixture.oneC2);
-    expect(c2.ok).toBe(true);
-    if (!c2.ok) return;
-    expect(c2.data.report.newBlobs).toBe(2);
-    // 每个提交都要有自己的整张映射（主键里有 commit_sha）；第二个提交的四个路径全是新行。
-    expect(c2.data.report.newEntries).toBe(4);
-    expect(c2.data.report.reusedBlobs).toBe(2);
+describe('自愈：树里有、库里没有的块', () => {
+  it('缺一块 → 这次装配解析它并写回；下一次不再解析', async () => {
+    const shas = await shasOf('fixture-blob-one', fixture.oneC2);
+    // 模拟「这个提交在完整同步之前就被读过」：手动删掉一块内容。
+    const victim = shas[0]!;
+    expect(await forgetBlobs(db, [victim])).toBe(1);
+    expect((await existingBlobShas(db, [victim])).size).toBe(0);
+
+    const healed = await assembleFor(db, 'fixture-blob-one', fixture.oneC2);
+    expect(healed.ok).toBe(true);
+    if (!healed.ok) return;
+    expect(healed.data.parsedBlobs).toBe(1);
+    // 自愈之后内容还在，而且装配出来的文件数不多不少（缺一块不会让整份索引残缺）。
+    expect((await existingBlobShas(db, [victim])).size).toBe(1);
+    expect(Object.keys(healed.data.index.files).length).toBe(4);
+
+    const again = await assembleFor(db, 'fixture-blob-one', fixture.oneC2);
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.data.parsedBlobs).toBe(0);
+    expect(again.data.reusedBlobs).toBe(4);
+  });
+
+  it('装配两次不会重复插内容行（行数不变）', async () => {
+    const before = (await readBlobRows(db, await shasOf('fixture-blob-one', fixture.oneC2))).size;
+    const a = await assembleFor(db, 'fixture-blob-one', fixture.oneC2);
+    const b = await assembleFor(db, 'fixture-blob-one', fixture.oneC2);
+    expect(a.ok && b.ok).toBe(true);
+    const after = (await readBlobRows(db, await shasOf('fixture-blob-one', fixture.oneC2))).size;
+    expect(after).toBe(before);
+    // 两个仓、三个提交用到的不重复内容一共 6 块：仓一 5 块（含被改掉的 share.ts 旧版
+    // 与新版各一块）+ 仓二的 Home.vue；仓二另外两块与仓一逐字节相同，一行都不多。
+    const all = new Set([
+      ...(await shasOf('fixture-blob-one', fixture.oneC1)),
+      ...(await shasOf('fixture-blob-one', fixture.oneC2)),
+      ...(await shasOf('fixture-blob-two', fixture.twoC1)),
+    ]);
+    expect(all.size).toBe(6);
+    expect((await readBlobRows(db, [...all])).size).toBe(6);
   });
 });
 
-// ─── 3. 旧提交仍然是旧提交 ──────────────────────────────────────────────────
+// ─── 3. 旧提交仍然是旧提交（tree_entry 删了，性质不变） ─────────────────────
 
-describe('装配：按请求的 sha 还原那一棵树', () => {
+describe('装配：按请求的 sha 现读那一棵树', () => {
   it('旧提交的文件集不是 HEAD 的（新文件不出现，符号是旧的那一版）', async () => {
+    clearAssembleCache();
     const old = await repoIndex(db, 'fixture-blob-one', fixture.oneC1);
     const fresh = await repoIndex(db, 'fixture-blob-one', fixture.oneC2);
     expect(old.ok).toBe(true);
@@ -300,9 +339,13 @@ describe('装配：按请求的 sha 还原那一棵树', () => {
     // 同一路径在两棵树上的内容不同 → 符号表也跟着不同（装配用的是各自那块 blob）。
     expect(old.data.index.files['src/services/share.ts']?.exports).not.toContain('shareStats');
     expect(fresh.data.index.files['src/services/share.ts']?.exports).toContain('shareStats');
-    // 第二次是命中（不再同步）。
-    expect(fresh.data.built).toBe(false);
-    expect(fresh.data.buildMs).toBe(0);
+    // 第二次读同一个 sha 命中进程内缓存（不再付一次 ls-tree）。
+    const cached = await repoIndex(db, 'fixture-blob-one', fixture.oneC2);
+    expect(cached.ok).toBe(true);
+    if (cached.ok) {
+      expect(cached.data.built).toBe(false);
+      expect(cached.data.buildMs).toBe(0);
+    }
   });
 });
 
@@ -320,16 +363,16 @@ describe('装配：导入与路由和「全量解析」逐字相同', () => {
     expect(stored.files).toEqual(full.data.index.files);
     expect(stored.imports).toEqual(full.data.index.imports);
     expect(stored.routes).toEqual(full.data.index.routes);
-    expect(stored.imports['src/pages/Search/Search.tsx']).toContain('src/services/share.ts');
+    expect(stored.imports['src/pages/Search/Search.tsx']).toEqual(['src/services/share.ts']);
     // 路由表里 `component: Search` 靠本地名映射落回文件。
     expect(stored.routes.find((route) => route.route === '/search')?.file)
       .toBe('src/pages/Search/Search.tsx');
+
     // 同一块内容（逐字节相同）、同一句 `@/services/share`，在两个仓里落到了**不同的文件**：
     // 仓一靠 `@/` → `src/` 直达 `src/services/share.ts`，仓二没有 `src/`，靠后缀兜底落到
     // `app/services/share.ts`。这就是「解析结果不能写进共享的 blob 行」的意义——存下来
     // 的那一份必然是其中一个仓的答案，另一个仓会读到错的文件。
     const twoIndex = await readIndex(db, 'fixture-blob-two', fixture.twoC1);
     expect(twoIndex?.imports['app/pages/Search/Search.tsx']).toEqual(['app/services/share.ts']);
-    expect(stored.imports['src/pages/Search/Search.tsx']).toEqual(['src/services/share.ts']);
   });
 });

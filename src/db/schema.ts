@@ -609,7 +609,7 @@ export const prdSnapshots = pgTable('prd_snapshots', {
  *   （203 条，一个标题一行）再装进来；应用代码**不读它**，它只被 0025 的
  *   `update ... from prd_url_backfill_seed` 读一次、以及被人查证时读。
  * - `title` 主键就是 0025 的判据之一：文档侧「同题唯一」由表的形状保证。
- * - 故意不在 `src/db/reset.ts` 的 `RESET_TABLES` 里（同 `code_index` 的理由）：
+ * - 故意不在 `src/db/reset.ts` 的 `RESET_TABLES` 里（同索引表的理由）：
  *   `cascade` 带不到它，重灌演示库之后仍在；重建的代价是 `npm run prd:backfill`
  *   一条命令。清掉它只会让 0025「看起来跑过、其实什么也没填」。
  *
@@ -625,46 +625,7 @@ export const prdUrlBackfillSeed = pgTable('prd_url_backfill_seed', {
 });
 
 /**
- * 静态索引（P4-10）：一个仓库在一个提交上的**结构**，不是正文。
- *
- * 存的是三张关系（`files` / `imports` / `routes`），由 `core/codemirror/code-index.ts`
- * 用正则与目录约定从「每个文件前 80 行」里抽出来。为什么不是 AST：先要证明
- * 「路由 + 导入」这一层够用来定位；不够再谈 tree-sitter 那种原生依赖。
- *
- * **主键 `(repo, sha)` 就是全部失效策略**：sha 一变，索引自然查不到，当场重建。
- * 没有 TTL、没有「过期标记」，也就不存在「拿旧索引解释新代码」这个失败模式。
- *
- * 为什么不存正文：正文会跟着 `git show` 的截断、编码、大小上限漂，而索引要的是
- * 稳定的关系。正文仍旧按需 `git show`（走查深读那一段），读多读少由提示词预算决定。
- *
- * 三列都是 `jsonb` 而不是拆成行：这一层只按 `(repo, sha)` 整份读、整份写，
- * 拆表只会多三张要 join 的表，换不来一次更快的查询。
- *
- * **2026-11-08（P4-11）起它只读不写，且没有任何代码再写它。** 新的形状是
- * `blob_index`（内容地址，一份内容只解析一次）+ `tree_entry`（按提交的路径映射），
- * 见本文件上面那两张表。这张表留着是因为演示库里那 32 行是上一版实测的对照数据，
- * 删表容易、重建对照要重扫镜像。`repoIndex()` 已经不读它了——**它是一份历史，不是
- * 缓存**，因此 `reset.ts` 里那条「故意留下」的结论不变（留着不花任何人的时间）。
- * 等新形状在 139 个仓的规模上站住，下一步的迁移就是 `drop table code_index`。
- */
-export const codeIndex = pgTable('code_index', {
-  repo: text('repo').notNull(),
-  sha: text('sha').notNull(),
-  /** path → { kind, exports[], size } */
-  files: jsonb('files').notNull(),
-  /** path → [被 import 的仓内路径] */
-  imports: jsonb('imports').notNull(),
-  /** [{ route, file, title }] */
-  routes: jsonb('routes').notNull(),
-  /** 建索引的时刻。同一个 `(repo, sha)` 第二次读到它时，这个值不该变。 */
-  builtAt: timestamp('built_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  pk: primaryKey({ columns: [t.repo, t.sha] }),
-  byBuiltAt: index('code_index_built_at').on(t.builtAt),
-}));
-
-/**
- * 静态索引的**内容层**（迁移 0029）：一块 git blob → 它说了什么。
+ * 静态索引（迁移 0029 建，0030 之后**它是这套索引唯一的表**）：一块 git blob → 它说了什么。
  *
  * 主键是 git 的 blob id —— **内容地址**，不是 `(repo, path)`。同一份内容出现在 40 个
  * 提交里、出现在两个仓里，都只有这一行。旧形状（`code_index`）按 `(repo, sha)` 存整棵
@@ -676,6 +637,11 @@ export const codeIndex = pgTable('code_index', {
  * 共享行，等于让另一个仓读错（详见 `core/codemirror/blob-index.ts` 与迁移 0029 的注释）。
  *
  * `parsed_at` 是「这块内容被解析的时刻」：它不变就是没被重新解析，用例靠它钉复用。
+ *
+ * **0030 删掉了 0029 里那张 `tree_entry`**（按提交的 `path → blob` 映射）：一个提交
+ * 就是一整棵树（638 / 575 行），4 个提交 2422 行，倒推 139 个仓 × 几千个提交是几百万行，
+ * 而它存的只是 git 用 0.3 秒就能重新列出来的东西。**解析内容是贵的，列树是便宜的**，
+ * 所以装配时现读 `git ls-tree -r <sha>`，只把「内容 → 说了什么」缓存下来。
  */
 export const blobIndex = pgTable('blob_index', {
   /** git blob id（`ls-tree -r -l` 的 oid 列）。**内容地址**：不按 repo、不按 path 分。 */
@@ -690,25 +656,6 @@ export const blobIndex = pgTable('blob_index', {
   imports: jsonb('imports').notNull(),
   parsedAt: timestamp('parsed_at', { withTimezone: true }).notNull().defaultNow(),
 });
-
-/**
- * 静态索引的**提交层**（迁移 0029）：`(repo, commit, path) → blob`。
- *
- * 这是唯一按提交存的数据，而且只是一张映射表——一个改了 600 个文件里 2 个的提交只多
- * 2 行。它不能省：`repoIndex(repo, sha)` 要还原「这个提交上这棵树长什么样」，而这段
- * 关系只有提交自己知道。
- *
- * 噪音路径（`dist/`、`node_modules/`、二进制）**不进这张表**：`lsTreeEntries` 已经滤过，
- * 而 `CodeIndex` 的解析文件集历来就是那份滤过的清单——把噪音放进来会改变后缀匹配的结果。
- */
-export const treeEntry = pgTable('tree_entry', {
-  repo: text('repo').notNull(),
-  commitSha: text('commit_sha').notNull(),
-  path: text('path').notNull(),
-  blobSha: text('blob_sha').notNull(),
-}, (t) => ({
-  pk: primaryKey({ name: 'tree_entry_repo_commit_path_pk', columns: [t.repo, t.commitSha, t.path] }),
-}));
 
 /**
  * 一次合并 = 一个功能落地。

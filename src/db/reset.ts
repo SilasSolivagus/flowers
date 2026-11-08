@@ -99,16 +99,15 @@ export type ResetOptions = {
  * 或者只 truncate `members` 不 truncate `requirements`，行就静默留下。写进来
  * 才是声明，而不是继承。
  *
- * **`code_index` 故意不在这里**（不是忘了）：
+ * **`blob_index` 故意不在这里**（不是忘了）：
  * - 它没有外键，`cascade` 带不到它，所以它真的会留下来——实测确认过；
- * - 演示库那 32 行是**结构索引**（`repo` + `sha` → 文件 / import / 路由三张关系），
- *   来源是 ssh 镜像里的真实提交（123pan-pc / 123pan-uni-app），重建要跑
- *   `scripts/index-repo.ts` 逐个 sha 扫镜像，一次演示重灌不该付这笔账；
- * - 泄漏由它的唯一用户自己收口：`tests/index.test.ts` 在 beforeAll / afterAll 里
- *   按 fixture 仓名 `dropIndex`，跑完不留痕（那里也写着「code_index 不参与 truncate」）。
- * 结论：它不是「忘了清」，是「清了更贵，且有明确的收口人」。要改这条结论，先给
- * 它一个能廉价重建的来源。迁移 0029 的 `blob_index` / `tree_entry` 走同一条判断，
- * 理由写在下面 `KEPT_TABLES` 的注释里。
+ * - 它存的是 ssh 镜像里真实提交的**解析结果**（一块内容 → 符号 / 引用 / 路由声明），
+ *   重建要逐个仓扫镜像再解析（两个仓 HEAD 合计 277 行，137 个文件的仓要 1.3 秒），
+ *   一次演示重灌不该付这笔账；
+ * - 泄漏由它的唯一用户自己收口：`tests/index.test.ts` 与 `tests/blob-index.test.ts`
+ *   在 beforeAll / afterAll 里按 fixture 的 blob id `forgetBlobs`，跑完不留痕。
+ * 结论：它不是「忘了清」，是「清了更贵，且有明确的收口人」。要改这条结论，先给它
+ * 一个能廉价重建的来源。
  *
  * restart identity 只重置「属于这些表的」序列：events_seq_seq / requirements_number_seq
  * 在迁移 0001 里被 `alter sequence ... owned by ...` 绑到了列上，所以编号会回到 1
@@ -138,22 +137,20 @@ export const RESET_TABLES = [
 /**
  * 故意**不**清的表。清单外的一切都该问一句「为什么」；这个是问过之后答「留下」的。
  *
- * `code_index`：没有外键指向任何人，`cascade` 带不到它，所以它是真的活下来；而它
- * 在演示库里是 32 行真实结构索引（来自 ssh 镜像里 123pan-pc / 123pan-uni-app 的提交），
- * 重建要跑 `scripts/index-repo.ts` 逐个 sha 扫镜像。一次「重灌演示数据」不该付这笔账。
- * 它的泄漏由唯一用户 `tests/index.test.ts` 自己收口（beforeAll / afterAll 按 fixture
- * 仓名 drop）。哪天有人给它加了一条廉价的重建路径，这条结论才值得重新评估。
- * （2026-11-08 起不再有代码写它，它只是一份历史——留着的成本是零，删掉的成本是一次重扫。）
+ * `blob_index`（迁移 0029，0030 之后是这套索引唯一的表）：没有外键指向任何人，
+ * `cascade` 带不到它，所以它是真的活下来；而它存的是 ssh 镜像里真实提交的解析结果，
+ * 重建要逐个仓扫镜像再解析——一次「重灌演示数据」不该付这笔账。
  *
- * `blob_index` / `tree_entry`（迁移 0029）**同一条理由，而且更强**：它们的重建路径是
- * 「逐个仓 ssh 扫镜像 + 解析」，一次演示重灌更不该付这笔账。但它们和 `code_index`
- * 有一个关键差别——**它们有明确的、写的一侧收口人**：`tests/index.test.ts` 与
- * `tests/blob-index.test.ts` 在 beforeAll / afterAll 里按 fixture 仓名
- * `dropIndex` / 删 `blob_index` 行，跑完不留痕迹。也就是说「不清」不会让下一轮用例
- * 看到上一轮的残留：会看残留的那几张表（需求/事件/派单）都在 `RESET_TABLES` 里，
- * 而索引表从来只有 fixture 自己读写。
+ * 它的泄漏由唯一用户自己收口：`tests/index.test.ts` 与 `tests/blob-index.test.ts` 在
+ * beforeAll / afterAll 里按 fixture 的 blob id `forgetBlobs`，跑完不留痕。也就是说
+ * 「不清」不会让下一轮用例看到上一轮的残留：会看残留的那几张表（需求/事件/派单）都在
+ * `RESET_TABLES` 里，而内容索引表从来只有 fixture 自己读写。
+ *
+ * （`code_index` 与 `tree_entry` 已经不在这个清单里了——它们被迁移 0030 删除。
+ * `code_index` 是整份快照，`tree_entry` 是「一个提交一整棵树」的映射：前者被内容寻址
+ * 取代，后者按 `文件 × 提交` 增长，139 个仓时是几百万行，而 git 列一棵树只要 0.3 秒。）
  */
-export const KEPT_TABLES = ['code_index', 'blob_index', 'tree_entry'] as const;
+export const KEPT_TABLES = ['blob_index'] as const;
 
 export async function resetDb(options: ResetOptions = {}): Promise<string> {
   const database = options.guardDatabase ?? await currentDatabase();

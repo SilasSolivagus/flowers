@@ -238,27 +238,29 @@ describe('Item 2：truncateMembersOnly 与 resetDb 同一道门', () => {
 });
 
 /**
- * Item 5：`resetDb` 清哪 15 张、为什么留下 `code_index`。
+ * Item 5：`resetDb` 清哪 15 张、为什么留下 `blob_index`。
  *
  * 这四条表以前只是「被 cascade 顺带清掉」（外键在 members / requirements 上），
- * 现在写进清单是**声明**；`code_index` 没有外键，它是真的活下来，留下是判断过的。
+ * 现在写进清单是**声明**；`blob_index` 没有外键，它是真的活下来，留下是判断过的。
+ * （2026-11-08：P4-11 的两次迁移之后，索引表只剩 `blob_index` —— `code_index` 与
+ * `tree_entry` 都被 0030 删掉了，所以这一条从「`code_index` 留下」改成「`blob_index` 留下」。）
  * 变异：把清单里那四张表删掉 → 断言仍绿（cascade 兜住了）——所以这条用例钉的是
  * 「行为」；要钉「声明」，下一波得靠注释与 review。这也是它写在这里的理由：
  * 至少行为是实测过的，不是推的。
  */
 describe('Item 5：五张以前没人管的表', () => {
-  it('清单本身就是声明：四张在清空清单里，code_index 在「故意留下」那一侧', () => {
+  it('清单本身就是声明：四张在清空清单里，blob_index 在「故意留下」那一侧', () => {
     // 这一条钉的不是行为而是**意图**：上面那条行为用例在「四张表被 cascade 顺带清掉」
     // 时也会绿（实测过：把四张从清单里删掉，cascade 照样清干净）。所以留表这件事必须
     // 由清单本身来说话——删掉清单里任意一张，这条立刻红。
     expect(RESET_TABLES).toEqual(expect.arrayContaining([
       'uemaster_artifacts', 'uemaster_jobs', 'uemaster_job_attempts', 'mcp_tokens',
     ]));
-    expect(RESET_TABLES).not.toContain('code_index');
-    expect(KEPT_TABLES).toContain('code_index');
+    expect(RESET_TABLES).not.toContain('blob_index');
+    expect(KEPT_TABLES).toContain('blob_index');
   });
 
-  it('四张随 resetDb 清空，code_index 按设计留下（没有外键，重建要扫镜像）', async () => {
+  it('四张随 resetDb 清空，blob_index 按设计留下（没有外键，重建要扫镜像+解析）', async () => {
     await resetDb();
     const member = await db.execute<{ id: string }>(sql`
       insert into members (name, email, role, line) values ('索引主人','idx@x.test','pm',null) returning id`);
@@ -279,9 +281,10 @@ describe('Item 5：五张以前没人管的表', () => {
     await db.execute(sql`
       insert into mcp_tokens (token_hash, member_id, label, scopes)
       values ('probe-hash', ${mid}, '探针', 'read')`);
+    // 索引数据的代表：`blob_index` 一行（内容地址 → 解析结果）。
     await db.execute(sql`
-      insert into code_index (repo, sha, files, imports, routes)
-      values ('probe-repo', 'probe-sha', '{}', '{}', '[]')`);
+      insert into blob_index (blob_sha, lang, size, symbols, imports)
+      values ('probe-blob-sha', 'ts', 1, '[]', '{}')`);
 
     await resetDb();
 
@@ -290,17 +293,17 @@ describe('Item 5：五张以前没人管的表', () => {
       union all select 'uemaster_jobs', count(*)::int from uemaster_jobs
       union all select 'uemaster_job_attempts', count(*)::int from uemaster_job_attempts
       union all select 'mcp_tokens', count(*)::int from mcp_tokens
-      union all select 'code_index', count(*)::int from code_index where repo = 'probe-repo'`);
+      union all select 'blob_index', count(*)::int from blob_index where blob_sha = 'probe-blob-sha'`);
     const byName = Object.fromEntries(left.rows.map((row) => [row.t, Number(row.n)]));
     expect(byName).toEqual({
       uemaster_artifacts: 0,
       uemaster_jobs: 0,
       uemaster_job_attempts: 0,
       mcp_tokens: 0,
-      code_index: 1,
+      blob_index: 1,
     });
 
-    // 收口：code_index 不参与 truncate，所以谁写谁删。
-    await db.execute(sql`delete from code_index where repo = 'probe-repo'`);
+    // 收口：blob_index 不参与 truncate，所以谁写谁删。
+    await db.execute(sql`delete from blob_index where blob_sha = 'probe-blob-sha'`);
   });
 });

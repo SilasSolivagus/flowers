@@ -20,7 +20,7 @@ import { sql } from 'drizzle-orm';
 
 import { db, pool } from '../src/db/client.js';
 import { locate, summarize, type CodeIndex } from '../src/core/codemirror/code-index.js';
-import { buildIndex, readIndex, repoIndex } from '../src/core/codemirror/index-store.js';
+import { buildIndex, repoIndex } from '../src/core/codemirror/index-store.js';
 import { head } from '../src/core/codemirror/mirror.js';
 
 type Args = {
@@ -118,7 +118,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const cached = await readIndex(db, args.repo, sha);
+  // 2026-11-08（P4-11 第二版）：库里不再有「这个提交的索引」这一行——装配是现读
+  // `git ls-tree` + join `blob_index`。所以这里不再先探一次「库里有没有」。
   const started = Date.now();
   const resolved = await repoIndex(db, args.repo, sha, { rebuild: args.rebuild });
   const totalMs = Date.now() - started;
@@ -135,8 +136,8 @@ async function main(): Promise<void> {
     console.log(`关键词    ${args.keywords.join('、')}`);
     probes.forEach((probe, i) => console.log(`  ${i + 1}. [${probe.score}] ${probe.path}  —— ${probe.why}`));
   }
-  console.log(`本轮      ${resolved.data.built ? `刚建（${resolved.data.buildMs} ms）` : '命中已有索引'}`
-    + `，走完 ${totalMs} ms${cached === null ? '' : '（库里本来就有）'}`);
+  console.log(`本轮      ${resolved.data.built ? `刚解析新内容（${resolved.data.buildMs} ms）` : '全部复用（0 块新内容）'}`
+    + `，走完 ${totalMs} ms`);
   printSummary(resolved.data.index, resolved.data.buildMs, locateMs);
 
   // 2026-11-08（P4-11）：索引的规模看的是 `blob_index` 的**行数**（内容地址，跨仓共享），

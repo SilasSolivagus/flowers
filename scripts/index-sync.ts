@@ -13,11 +13,9 @@
  *   npx tsx scripts/index-sync.ts --repo 123pan-pc --sha <sha> --json
  *   npx tsx scripts/index-sync.ts --repo 123pan-pc --sha <sha> --rebuild
  *
- * `--rebuild` 只删这个提交的 `tree_entry` 行（**不动 blob 行**）：于是它量的是
- * 「映射重建 + 内容全复用」，与「内容也是新的」区分得开。
+ * `--rebuild` 只清掉这个 `(repo, sha)` 的装配缓存（**不动 blob 行**）：内容地址是跨仓
+ * 共享的，删它会让别的仓一起掉内容。要重解析内容请用 `forgetBlobs()`（用例那么干）。
  */
-import { sql } from 'drizzle-orm';
-
 import { db, pool } from '../src/db/client.js';
 import { blobIndexStats } from '../src/core/codemirror/blob-index.js';
 import { summarize, type CodeIndex } from '../src/core/codemirror/code-index.js';
@@ -49,12 +47,6 @@ function parseArgs(argv: readonly string[]): Args {
     process.exit(2);
   }
   return args;
-}
-
-async function treeRows(repo: string): Promise<number> {
-  const res = await db.execute<{ n: number }>(sql`
-    select count(*)::int as n from tree_entry where repo = ${repo}`);
-  return Number(res.rows[0]?.n ?? 0);
 }
 
 function printSummary(index: CodeIndex): void {
@@ -89,7 +81,7 @@ async function main(): Promise<void> {
     headSubject = headRes.data.subject;
   }
 
-  if (args.rebuild) await dropIndex(db, args.repo, sha);
+  if (args.rebuild) dropIndex(args.repo, sha);
 
   const started = Date.now();
   const synced = await syncRepoIndex(db, args.repo, sha);
@@ -107,7 +99,6 @@ async function main(): Promise<void> {
     ? tree.data.filter((entry) => /\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/i.test(entry.path)).length
     : 0;
   const stats = await blobIndexStats(db);
-  const entries = await treeRows(args.repo);
   const report = synced.data.report;
 
   if (args.json) {
@@ -122,7 +113,6 @@ async function main(): Promise<void> {
       totalMs,
       blobRows: stats.rows,
       blobBytes: stats.bytes,
-      treeRows: entries,
       index: summarize(synced.data.index),
     }, null, 2));
     return;
@@ -130,12 +120,12 @@ async function main(): Promise<void> {
 
   console.log(`仓库      ${args.repo}@${sha.slice(0, 8)}${headDate === '' ? '' : `（${headDate}）${headSubject}`}`);
   console.log(`树        ${treeFiles} 个文件（其中 ${indexable} 个是可索引的源码）`);
-  console.log(`本轮      新内容 ${report.newBlobs} 块、新映射 ${report.newEntries} 行、`
-    + `复用 ${report.reusedBlobs} 块、耗时 ${report.ms} ms（整条 ${totalMs} ms）`);
+  // 没有「新映射」这个数了：0030 删掉 tree_entry 之后，装配是现读 `ls-tree`，一行都不写。
+  console.log(`本轮      新内容 ${report.newBlobs} 块、复用 ${report.reusedBlobs} 块、`
+    + `耗时 ${report.ms} ms（整条 ${totalMs} ms，含一次 ls-tree）`);
   console.log(`去重      ${indexable} 个源码文件 → ${report.newBlobs + report.reusedBlobs} 块内容`);
   printSummary(synced.data.index);
-  console.log(`库里      blob_index ${stats.rows} 行（${stats.bytes} 字节）／`
-    + `tree_entry ${entries} 行（本仓全部提交）`);
+  console.log(`库里      blob_index ${stats.rows} 行（${stats.bytes} 字节）——这套索引只有这一张表`);
 }
 
 await main();

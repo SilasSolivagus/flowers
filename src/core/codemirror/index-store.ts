@@ -4,8 +4,7 @@ import {
   type CodeIndex, type IndexSummary, type KindCounts,
 } from './code-index.js';
 import {
-  assembleStored, dropTree, existingBlobShas, hasTree, readBlobRows, readTreeRows,
-  writeBlobRows, writeTreeRows,
+  existingBlobShas, forgetBlobs as forgetBlobRows, readBlobRows, writeBlobRows,
   type BlobFacts, type SyncReport,
 } from './blob-index.js';
 import {
@@ -14,26 +13,27 @@ import {
 } from './mirror.js';
 
 /**
- * `repoIndex(repo, sha)` 的读写口 —— **索引一次，之后只做增量**（P4-11）。
+ * `repoIndex(repo, sha)` 的读写口 —— **解析一次，永远复用**（P4-11，第二版）。
  *
- * ── 旧形状为什么撑不住
+ * ── 两版之间最重要的一次自我推翻
  *
- * 旧路径的主键是 `(repo, sha)`，值是整棵树的 JSON 快照；新提交来了就整份重建。实测
- * 重建一次 1017–1095 ms（uni-app，141 个文件）/ 1330 ms（pc，137 个文件）——其中绝大
- * 多数时间花在「重新读、重新解析那些**没有变**的文件」。两个仓能忍，139 个仓不能：
- * 那是 139 秒起，且每次提交再来一遍。
+ * 第一版（迁移 0029）除了 `blob_index` 还建了一张 `tree_entry`（按提交的 `path → blob`
+ * 映射）。它被实测判了死刑：**一个提交就是一整棵树**（638 行 uni-app / 575 行 pc），
+ * 4 个提交 2422 行，按 `文件 × 提交` 增长，139 个仓时是几百万行——而它存的只是 git
+ * 用 0.3 秒就能重新列出来的东西。真正的账单是**解析**（一块内容的符号与引用），不是
+ * 列树。所以迁移 0030 把 `tree_entry` 整张删掉：
  *
- * ── 新形状
+ * - 装配 `(repo, sha)` 的索引 = **现读** `git ls-tree -r <sha>`（一次 ssh 往返，实测
+ *   238–306 ms）+ 按 `blob_sha` join `blob_index`（一次 `in (…)` 查询）+ 在内存里装配；
+ * - 树里某块内容**不在** `blob_index`（这个提交在完整同步之前就被读过）→ **当场解析并
+ *   写回**，自愈，见 `assembleFor()`；
+ * - 导入解析仍然在装配时对着**这棵树**做（说明符没有解析结果落库，理由见 `blob-index.ts`）。
  *
- * 解析按 **git blob id（内容地址）** 落一行（`blob_index`），提交只多一张
- * `path → blob` 的映射（`tree_entry`）。于是：
- * - 同一份内容在 40 个提交里 → 只解析一次；
- * - 一个改了 600 个文件里 2 个的提交 → 只多 2 行映射、最多 2 块新内容；
- * - 第二个仓与第一个仓共享的文件（README、配置、复制过去的组件）→ 一块都不重解析。
- *
- * `repoIndex()` 的**返回类型没变**（还是 `CodeIndex`）：`src/core/locate/structure.ts`
- * 与评审路径消费的是 `{ files, imports, routes }`，它们不该知道存储换过形状。
- * 装配由 `assembleStored()` 做——每次读现算（实测 3–8 ms），因为它必须看着**这一棵树**。
+ * 代价是**每次读都付一次 `ls-tree`**：旧路径读一行 jsonb 只要 1–3 ms，现读装配要
+ * 200–400 ms。这是这笔交易的正面——用「每次几百毫秒」换「表不随提交数增长」。
+ * 因为同一轮走查/评审里同一个 `(repo, sha)` 经常被问好几次，这里另加一个**有界的
+ * 进程内缓存**（只留最近 8 个 `(repo, sha)`，不做任何持久化）；它不是 0029 那张表，
+ * 进程退出就没了，也不会随提交数增长。
  */
 
 // ─── 依赖（测试注入用：一次 ssh 都不发） ─────────────────────────────────────
@@ -105,15 +105,26 @@ function readBlobsOf(deps: IndexDeps): ReadBlobsFn {
 
 export type BuiltIndex = {
   index: CodeIndex;
-  /** `true` = 这一轮刚建；`false` = 命中已落库的那一份（`builtAt` 是旧的）。 */
+  /** `true` = 这一轮真的解析了内容（库里原本没有）；`false` = 全部复用 / 命中缓存。 */
   built: boolean;
-  /** 建索引花掉的毫秒（命中时恒为 0）。 */
+  /** 这一轮花掉的毫秒（命中进程内缓存时恒为 0）。 */
   buildMs: number;
+};
+
+/** 一次装配的账。`parsedBlobs` > 0 就是「这次真的解析了新内容」。 */
+export type AssembleResult = {
+  index: CodeIndex;
+  /** 这一轮现解析并写回的块数（自愈或首次接触）。 */
+  parsedBlobs: number;
+  /** 直接复用的块数。 */
+  reusedBlobs: number;
+  /** 装配耗时（含 `ls-tree` 的 ssh 往返）。 */
+  assembleMs: number;
 };
 
 // ─── 解析一块内容（内容地址的落点） ─────────────────────────────────────────
 
-/** 内存里「sha → 已解析」的缓存：一次同步里同一块内容被多个路径引用时只解析一次。 */
+/** 内存里「sha → 已解析」的缓存：同一轮里同一块内容被多个路径引用时只解析一次。 */
 type ParseCache = Map<string, BlobFacts>;
 
 function parseInto(
@@ -137,22 +148,196 @@ function parseInto(
   return facts;
 }
 
+/** 每个 blob 取第一次出现的那个路径（`lang` 只从它取，读取按 id 去重）。 */
+function firstPerBlob(entries: readonly { path: string; oid: string; size: number }[]): BlobReadRef[] {
+  const seen = new Map<string, BlobReadRef>();
+  for (const entry of entries) {
+    if (seen.has(entry.oid)) continue;
+    seen.set(entry.oid, { blobSha: entry.oid, path: entry.path, size: entry.size });
+  }
+  return [...seen.values()];
+}
+
+/** 进了索引的那一批（扩展名对、类别不是 `other`）：只有它们的**内容**需要读。 */
+function indexable<T extends { path: string }>(entries: readonly T[]): T[] {
+  return entries.filter((entry) => CODE_EXT.test(entry.path) && classifyKind(entry.path) !== 'other');
+}
+
+// ─── 有界的进程内缓存 ───────────────────────────────────────────────────────
+
+/**
+ * 只留最近 `ASSEMBLE_CACHE_MAX` 个 `(repo, sha)` 的**装配结果**。
+ *
+ * 为什么需要它：装配要付一次 `ls-tree`（200–400 ms），而同一轮走查/评审里
+ * `repoIndex()` 经常被同一个 sha 连问好几次（`inspect` 与 `review` 各自收一轮）。
+ * 旧路径读一行 jsonb 只要 1–3 ms，这里靠一个小缓存把那几次拉回毫秒级。
+ *
+ * 为什么它不是 0029 那张 `tree_entry` 的还魂：它只在进程内、只留装配结果、上限 8 条、
+ * 进程退出即消失，**不随提交数增长**。凡是改动了 `blob_index`（`forgetBlobs` /
+ * `--rebuild`）的路径都会清掉它，所以它不会把旧内容喂给新请求。
+ */
+const ASSEMBLE_CACHE_MAX = 8;
+const assembleCache = new Map<string, CodeIndex>();
+
+function cacheKey(repo: string, sha: string): string {
+  return `${repo}\u0000${sha}`;
+}
+
+/** 清缓存（不传就清空）。`forgetBlobs`、`dropIndex`、用例都走它。 */
+export function clearAssembleCache(repo?: string, sha?: string): void {
+  if (repo === undefined) {
+    assembleCache.clear();
+    return;
+  }
+  if (sha === undefined) {
+    for (const key of [...assembleCache.keys()]) {
+      if (key.startsWith(`${repo}\u0000`)) assembleCache.delete(key);
+    }
+    return;
+  }
+  assembleCache.delete(cacheKey(repo, sha));
+}
+
+function cacheGet(repo: string, sha: string): CodeIndex | null {
+  return assembleCache.get(cacheKey(repo, sha)) ?? null;
+}
+
+function cacheSet(repo: string, sha: string, index: CodeIndex): void {
+  const key = cacheKey(repo, sha);
+  assembleCache.delete(key);
+  assembleCache.set(key, index);
+  while (assembleCache.size > ASSEMBLE_CACHE_MAX) {
+    const oldest = assembleCache.keys().next().value;
+    if (oldest === undefined) break;
+    assembleCache.delete(oldest);
+  }
+}
+
+// ─── 装配（生产路径的核心） ─────────────────────────────────────────────────
+
+/**
+ * 现读一棵树 + join `blob_index` → `CodeIndex`。
+ *
+ * 三步，最多两次 ssh 往返：
+ * 1. `git ls-tree -r -l -z <sha>`（一次）：这一棵树的 `path / blob id / size`。
+ *    **这就是 `tree_entry` 被删掉之后替代它的东西**——同一份信息，git 每次现给，
+ *    不占我们一行存储；
+ * 2. `select … from blob_index where blob_sha in (…)`：库里已有的解析结果；
+ * 3. 树里有、库里没有的块 → **一次 `git cat-file --batch` 读回来、解析、写回库**
+ *    （自愈：一个提交在完整同步之前被读过、或有人手动删过几行，下一次装配就补齐；
+ *    写回用 `on conflict do nothing`，所以两个请求同时自愈同一块内容也不会互相覆盖）。
+ *
+ * 返回的 `index.builtAt` 取「这份索引里最新的那块内容的解析时刻」——跨读稳定
+ * （同一个 sha 读两次得到同一个值），而且比「刚才」更有信息量。
+ */
+export async function assembleFor(
+  db: Db,
+  repo: string,
+  sha: string,
+  deps: IndexDeps = LIVE_INDEX_DEPS,
+): Promise<MirrorResult<AssembleResult>> {
+  const started = Date.now();
+  const clean = sha.trim();
+  if (clean === '') {
+    return { ok: false, code: 'bad_path', message: '建索引需要提交 sha（HEAD 那一行里的那个）' };
+  }
+
+  const tree = await deps.lsTreeEntries(repo, { ref: clean });
+  if (!tree.ok) return tree;
+
+  const wanted = firstPerBlob(indexable(tree.data));
+  const stored = await readBlobRows(db, wanted.map((ref) => ref.blobSha));
+  const missing = wanted.filter((ref) => !stored.has(ref.blobSha));
+  let parsedBlobs = 0;
+
+  if (missing.length > 0) {
+    const got = await readBlobsOf(deps)(repo, missing, { maxLines: HEAD_LINES });
+    if (!got.ok) return got;
+    const cache: ParseCache = new Map();
+    for (const ref of missing) {
+      const text = got.data.get(ref.blobSha);
+      // 读不回来的块不进索引（少一个文件比编一个空文件好）；它下一轮还会被当成缺失再试。
+      if (text === undefined) continue;
+      parseInto(cache, ref.blobSha, ref.path, ref.size, text);
+    }
+    parsedBlobs = await writeBlobRows(db, [...cache.values()]);
+    if (parsedBlobs > 0) {
+      // 刚写进去的 parsed_at 由库给（now()），重新读一遍拿到确切值：`builtAt` 要用它。
+      for (const [blobSha, row] of await readBlobRows(db, [...cache.keys()])) stored.set(blobSha, row);
+    }
+  }
+
+  const sources = [];
+  let newest = 0;
+  for (const entry of tree.data) {
+    if (!CODE_EXT.test(entry.path) || classifyKind(entry.path) === 'other') continue;
+    const blob = stored.get(entry.oid);
+    // 树里有、库里也没有、这次也没读回来：跳过（见上面那条注释）。
+    if (blob === undefined) continue;
+    sources.push({
+      path: entry.path,
+      size: blob.size,
+      lang: blob.lang,
+      symbols: blob.symbols,
+      refs: blob.refs,
+    });
+    const at = Date.parse(blob.parsedAt);
+    if (Number.isFinite(at) && at > newest) newest = at;
+  }
+
+  const index = assembleIndex({
+    repo,
+    sha: clean,
+    all: tree.data.map((entry) => entry.path),
+    sources,
+    builtAt: newest > 0 ? new Date(newest).toISOString() : undefined,
+  });
+  return {
+    ok: true,
+    data: {
+      index,
+      parsedBlobs,
+      reusedBlobs: Math.max(0, wanted.length - parsedBlobs),
+      assembleMs: Date.now() - started,
+    },
+  };
+}
+
 // ─── 读 ──────────────────────────────────────────────────────────────────────
 
 /**
- * 读一份已索引的 `(repo, sha)`。没有就是 `null`（「还没建」不是错误）。
+ * 读一份索引（先看进程内缓存，再看镜像 + 库）。读不到镜像就是 `null`——调用方据此
+ * 退回 grep（与旧版「没有索引」同一个出口）。
  *
- * 它现在是一次**装配**：`tree_entry` 给出这个提交的 `path → blob`，`blob_index` 给出
- * 每块内容说了什么，`assembleIndex()` 用这棵树把说明符解析成仓内路径。`builtAt` 取
- * 最新的 `parsed_at`，所以同一个 sha 读两次得到同一个值（旧版靠 `code_index.built_at`）。
+ * 注意它**不再是「查库有没有」**：库里只有内容，没有「这个提交的索引」这种东西。
+ * 「有没有索引」这个问题的答案现在是「镜像读得到吗」。
  */
-export async function readIndex(db: Db, repo: string, sha: string): Promise<CodeIndex | null> {
-  return assembleStored(db, repo, sha);
+export async function readIndex(
+  db: Db,
+  repo: string,
+  sha: string,
+  deps: IndexDeps = LIVE_INDEX_DEPS,
+): Promise<CodeIndex | null> {
+  const cached = cacheGet(repo, sha.trim());
+  if (cached !== null) return cached;
+  const assembled = await assembleFor(db, repo, sha, deps);
+  if (!assembled.ok) return null;
+  cacheSet(repo, sha.trim(), assembled.data.index);
+  return assembled.data.index;
 }
 
-/** 删一个提交的索引（重跑用：CLI 的 `--rebuild` 与用例）。**blob 行不删**（跨仓共享）。 */
-export async function dropIndex(db: Db, repo: string, sha: string): Promise<void> {
-  await dropTree(db, repo, sha);
+/**
+ * 忘掉一个 `(repo, sha)` 的装配结果（缓存）。**不删任何内容行**：`blob_index` 是跨仓
+ * 共享的内容地址，删它会让别的仓、别的提交一起掉内容。重跑用 `--rebuild`。
+ */
+export function dropIndex(repo: string, sha: string): void {
+  clearAssembleCache(repo, sha);
+}
+
+/** 删内容行 + 清缓存（用例收口、`--forget` 用）。缓存必须一起清，否则会读到旧结果。 */
+export async function forgetBlobs(db: Db, shas: readonly string[]): Promise<number> {
+  clearAssembleCache();
+  return forgetBlobRows(db, shas);
 }
 
 // ─── 全量建（不写库；`--dry-run` 与纯函数用例走它） ─────────────────────────
@@ -173,8 +358,7 @@ export async function buildIndex(
   const tree = await deps.lsTreeEntries(repo, { ref: sha });
   if (!tree.ok) return tree;
 
-  const sources = tree.data.filter((entry) => CODE_EXT.test(entry.path)
-    && classifyKind(entry.path) !== 'other');
+  const sources = indexable(tree.data);
   // 后端仓（只有 .go/.java）就是这一支：索引为空，调用方据此退回 grep。
   if (sources.length === 0) {
     return {
@@ -197,8 +381,7 @@ export async function buildIndex(
     parseInto(cache, ref.blobSha, ref.path, ref.size, text);
   }
 
-  const assembled = [...cache.values()];
-  const bySha = new Map(assembled.map((facts) => [facts.blobSha, facts]));
+  const bySha = new Map([...cache.values()].map((facts) => [facts.blobSha, facts]));
   const index = assembleIndex({
     repo,
     sha,
@@ -218,17 +401,7 @@ export async function buildIndex(
   return { ok: true, data: { index, buildMs: Date.now() - started } };
 }
 
-/** 每个 blob 取第一次出现的那个路径（`lang` 只从它取，读取按 id 去重）。 */
-function firstPerBlob(entries: readonly { path: string; oid: string; size: number }[]): BlobReadRef[] {
-  const seen = new Map<string, BlobReadRef>();
-  for (const entry of entries) {
-    if (seen.has(entry.oid)) continue;
-    seen.set(entry.oid, { blobSha: entry.oid, path: entry.path, size: entry.size });
-  }
-  return [...seen.values()];
-}
-
-// ─── 增量同步 ────────────────────────────────────────────────────────────────
+// ─── 增量同步入口 ────────────────────────────────────────────────────────────
 
 export type SyncResult = {
   index: CodeIndex;
@@ -236,18 +409,13 @@ export type SyncResult = {
 };
 
 /**
- * 把 `(repo, sha)` 同步进库里，**只做缺的那部分**。
+ * 把一个 `(repo, sha)` 同步进库，顺带给出 `{ newBlobs, reusedBlobs, ms }`。
  *
- * 四步，一次同步最多两次 ssh 往返：
- * 1. `git ls-tree -r -l -z <sha>`（一次）——整棵树的 `path / oid / size`；
- * 2. 只插库里没有的 `tree_entry` 行（`on conflict do nothing`，回来几行就是几行）；
- * 3. 收集这个提交用到、而 `blob_index` 里没有的 blob id，用**一次**
- *    `git cat-file --batch` 读回来，解析、落库；
- * 4. 从库里装配 `CodeIndex` 返回，顺带给出 `{ newBlobs, newEntries, reusedBlobs, ms }`。
+ * 它与 `assembleFor()` 是同一件事，差别只在「要不要那份账」：装配是读路径（读不到就
+ * 退回 grep），同步是**预热**路径（脚本用它把整棵树读进来、把账打出来）。
  *
- * 为什么第 2 步插的是**整棵树**（不只是进了索引的文件）：说明符解析要「谁的路径以它
- * 结尾」，那份路径集历来就是 `ls-tree` 去掉噪音后的全部文件（旧版 `all` 也是它）。
- * 存全树让解析行为一字不变；噪音（`dist/`、`node_modules/`、二进制）仍然不进表。
+ * 同一个提交跑第二次必须是 `newBlobs: 0` ——这是「只解析一次」的唯一可观察证据，
+ * 也是这轮 reshape 的验收口径。
  */
 export async function syncRepoIndex(
   db: Db,
@@ -255,64 +423,33 @@ export async function syncRepoIndex(
   sha: string,
   deps: IndexDeps = LIVE_INDEX_DEPS,
 ): Promise<MirrorResult<SyncResult>> {
-  const started = Date.now();
-  const clean = sha.trim();
-  if (clean === '') {
-    return { ok: false, code: 'bad_path', message: '建索引需要提交 sha（HEAD 那一行里的那个）' };
-  }
-
-  const tree = await deps.lsTreeEntries(repo, { ref: clean });
-  if (!tree.ok) return tree;
-
-  // 2) tree_entry：只插缺的。
-  const rows = tree.data.map((entry) => ({ path: entry.path, blobSha: entry.oid }));
-  const have = new Set((await readTreeRows(db, repo, clean)).map((row) => row.path));
-  const fresh = rows.filter((row) => !have.has(row.path));
-  const newEntries = await writeTreeRows(db, repo, clean, fresh);
-
-  // 3) 缺的内容：一次批量读。**只读进了索引的那一批**——`jsonb`/`md`/字体/图片也在
-  // `tree_entry` 里（说明符解析要那份路径集），但它们没有符号也没有导入，读回来只是把
-  // ssh 往返变贵（实测 uni-app 全树 638 块 ≈ 十几 MB，索引只要 141 块 ≈ 0.6 MB）。
-  const wanted = firstPerBlob(tree.data.filter((entry) => CODE_EXT.test(entry.path)
-    && classifyKind(entry.path) !== 'other'));
-  const known = await existingBlobShas(db, wanted.map((ref) => ref.blobSha));
-  const missing = wanted.filter((ref) => !known.has(ref.blobSha));
-  let newBlobs = 0;
-  if (missing.length > 0) {
-    const got = await readBlobsOf(deps)(repo, missing, { maxLines: HEAD_LINES });
-    if (!got.ok) return got;
-    const cache: ParseCache = new Map();
-    for (const ref of missing) {
-      const text = got.data.get(ref.blobSha);
-      if (text === undefined) continue;
-      parseInto(cache, ref.blobSha, ref.path, ref.size, text);
-    }
-    newBlobs = await writeBlobRows(db, [...cache.values()]);
-  }
-
-  // 4) 装配（从库里读，保证「返回的就是库里那份」）。
-  const stored = await assembleStored(db, repo, clean);
-  const index = stored ?? assembleIndex({
-    repo, sha: clean, all: tree.data.map((entry) => entry.path), sources: [],
-  });
-  const report: SyncReport = {
-    newBlobs,
-    newEntries,
-    reusedBlobs: Math.max(0, wanted.length - newBlobs),
-    ms: Date.now() - started,
+  clearAssembleCache(repo, sha.trim());
+  const assembled = await assembleFor(db, repo, sha, deps);
+  if (!assembled.ok) return assembled;
+  cacheSet(repo, sha.trim(), assembled.data.index);
+  return {
+    ok: true,
+    data: {
+      index: assembled.data.index,
+      report: {
+        newBlobs: assembled.data.parsedBlobs,
+        reusedBlobs: assembled.data.reusedBlobs,
+        ms: assembled.data.assembleMs,
+      },
+    },
   };
-  return { ok: true, data: { index, report } };
 }
 
 // ─── 懒建（生产路径） ────────────────────────────────────────────────────────
 
 /**
- * `repoIndex(repo, sha)`：拿这一份索引，没有就同步一次（只解析缺的内容）。
+ * `repoIndex(repo, sha)`：拿这一份索引（现读装配，命中缓存就零成本）。
  *
  * 失败一律是 `MirrorResult` 的中文失败（镜像读不到、仓库没配）：调用方按 §3.5 退回
- * grep，而不是让整条走查/评审失败。**同步到一半失败不写半份索引**——`tree_entry` 与
- * `blob_index` 各自 `on conflict do nothing`，重跑就是补齐，不会留下「看起来完整」的
- * 残树。
+ * grep，而不是让整条走查/评审失败。
+ *
+ * `rebuild: true` 绕过缓存并**重新解析**（它不删内容行——内容地址是跨仓共享的，
+ * 要重解析请用 `forgetBlobs`）。
  */
 export async function repoIndex(
   db: Db,
@@ -327,8 +464,8 @@ export async function repoIndex(
     return { ok: false, code: 'bad_path', message: '建索引需要提交 sha（HEAD 那一行里的那个）' };
   }
 
-  if (!opts.rebuild && await hasTree(db, repo, cleanSha)) {
-    const cached = await assembleStored(db, repo, cleanSha);
+  if (!opts.rebuild) {
+    const cached = cacheGet(repo, cleanSha);
     if (cached !== null) return { ok: true, data: { index: cached, built: false, buildMs: 0 } };
   }
 
@@ -339,11 +476,16 @@ export async function repoIndex(
     return { ok: true, data: { index: built.data.index, built: true, buildMs: built.data.buildMs } };
   }
 
-  const synced = await syncRepoIndex(db, repo, cleanSha, deps);
-  if (!synced.ok) return synced;
+  const assembled = await assembleFor(db, repo, cleanSha, deps);
+  if (!assembled.ok) return assembled;
+  cacheSet(repo, cleanSha, assembled.data.index);
   return {
     ok: true,
-    data: { index: synced.data.index, built: true, buildMs: Date.now() - started },
+    data: {
+      index: assembled.data.index,
+      built: assembled.data.parsedBlobs > 0,
+      buildMs: Date.now() - started,
+    },
   };
 }
 
@@ -357,5 +499,5 @@ export function indexSummary(index: CodeIndex): IndexSummary {
   return summarize(index);
 }
 
-export { readBlobRows };
+export { existingBlobShas, readBlobRows };
 export type { CodeIndex, IndexSummary, KindCounts, SyncReport };

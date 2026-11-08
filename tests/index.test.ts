@@ -10,10 +10,10 @@ import {
   resolveSpecifier, classifyKind as kindOf,
 } from '../src/core/codemirror/code-index.js';
 import {
-  LIVE_INDEX_DEPS, buildIndex, dropIndex, readIndex, repoIndex, type IndexDeps,
+  LIVE_INDEX_DEPS, buildIndex, clearAssembleCache, dropIndex, forgetBlobs, readIndex, repoIndex,
+  type IndexDeps,
 } from '../src/core/codemirror/index-store.js';
 import { DEFAULT_SSH_HOST, head, lsTreeEntries, showHeads } from '../src/core/codemirror/mirror.js';
-import { forgetBlobs } from '../src/core/codemirror/blob-index.js';
 
 /**
  * P4-10 第 1–2 步：静态索引 + 在索引上定位。
@@ -181,9 +181,13 @@ beforeAll(async () => {
     { id: 'fixture-files', path: files },
   ]);
 
-  // 库里可能留着上一轮的行（code_index 不参与 `resetDb` 的 truncate）：先删干净。
+  // 库里可能留着上一轮的内容（`blob_index` 不参与 `resetDb` 的 truncate）：先忘干净。
+  // 迁移 0030 之后「一个提交的索引」不再是库里的一行——库里只有按内容地址存的行，
+  // 所以收口的方式也变成「按 blob id 忘掉它」。
+  clearAssembleCache();
   for (const repo of ['fixture-react', 'fixture-go', 'fixture-files']) {
-    for (const sha of (await lsTreeShas(repo))) await dropIndex(db, repo, sha);
+    const tree = await lsTreeEntries(repo);
+    if (tree.ok) await forgetBlobs(db, tree.data.map((entry) => entry.oid));
   }
   const reactHead = await head('fixture-react');
   const goHead = await head('fixture-go');
@@ -194,22 +198,16 @@ beforeAll(async () => {
   reactSha = reactHead.data.sha;
   goSha = goHead.data.sha;
   filesSha = filesHead.data.sha;
-  await dropIndex(db, 'fixture-react', reactSha);
-  await dropIndex(db, 'fixture-go', goSha);
-  await dropIndex(db, 'fixture-files', filesSha);
+  clearAssembleCache();
 });
 
-/** 库里已有的 sha（清理用）：不依赖 head，直接问表。 */
-async function lsTreeShas(repo: string): Promise<string[]> {
-  const { sql } = await import('drizzle-orm');
-  const res = await db.execute<{ sha: string }>(sql`select sha from code_index where repo = ${repo}`);
-  return res.rows.map((row) => row.sha);
-}
-
 afterAll(async () => {
-  await dropIndex(db, 'fixture-react', reactSha);
-  await dropIndex(db, 'fixture-go', goSha);
-  await dropIndex(db, 'fixture-files', filesSha);
+  // 收口：`blob_index` 不参与 truncate，谁写谁忘。
+  clearAssembleCache();
+  for (const repo of ['fixture-react', 'fixture-go', 'fixture-files']) {
+    const tree = await lsTreeEntries(repo);
+    if (tree.ok) await forgetBlobs(db, tree.data.map((entry) => entry.oid));
+  }
   for (const key of ENV_KEYS) {
     const value = savedEnv.get(key);
     if (value === undefined) delete process.env[key];
@@ -444,7 +442,7 @@ describe('降级：索引为空就明说退回 grep', () => {
 
 describe('懒建：同一个 (repo, sha) 第二次不重建', () => {
   it('读口调用次数不变，built_at 不变', async () => {
-    await dropIndex(db, 'fixture-react', reactSha);
+    clearAssembleCache();
     let trees = 0;
     let shows = 0;
     const counting: IndexDeps = {
@@ -481,7 +479,6 @@ describe('懒建：同一个 (repo, sha) 第二次不重建', () => {
   });
 
   it('建一次是两次往返：一次 ls-tree、一次批量 show（不是每文件一趟）', async () => {
-    await dropIndex(db, 'fixture-react', reactSha);
     // 2026-11-08（P4-11）：内容按 blob id 落库，上一轮已经把这块内容解析过了；要量
     // 「必须解析时是几次往返」就得先忘掉它们，否则量到的是「一块都不用读」的复用路径
     // （那只有 1 次 ls-tree 往返，是更好的结果，但它不是这条用例要钉的东西）。
