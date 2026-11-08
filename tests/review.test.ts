@@ -700,6 +700,9 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
       files: Object.fromEntries(paths.map((path) => [path, { kind: 'page', exports: [], size: 1 }])),
       imports: {},
       routes: [],
+      // Task 1/2 新增的两列：这份用例钉的是评审的候选集，页面清单留空。
+      pages: [],
+      outline: {},
       builtAt: '2026-11-07T00:00:00.000Z',
     });
 

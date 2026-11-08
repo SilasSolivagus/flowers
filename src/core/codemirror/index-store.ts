@@ -1,6 +1,6 @@
 import type { Db } from '../../db/client.js';
 import {
-  CODE_EXT, HEAD_LINES, assembleIndex, classifyKind, parseBlob, summarize,
+  HEAD_LINES, PAGES_JSON, assembleIndex, isIndexable, parseBlob, summarize,
   type CodeIndex, type IndexSummary, type KindCounts,
 } from './code-index.js';
 import {
@@ -8,7 +8,7 @@ import {
   type BlobFacts, type SyncReport,
 } from './blob-index.js';
 import {
-  lsTreeEntries, readBlobHeads, showHeads,
+  headLines, lsTreeEntries, readBlobHeads, showHeads,
   type MirrorResult,
 } from './mirror.js';
 
@@ -124,6 +124,31 @@ export type AssembleResult = {
 
 // ─── 解析一块内容（内容地址的落点） ─────────────────────────────────────────
 
+/**
+ * 一批内容读回来的行数上限：**整份**。
+ *
+ * 为什么不再只要文件头：`cat-file --batch` 本来就把整块内容传回来了，`maxLines` 只是在
+ * 本地切字符串——省不下传输，却会截掉我们真正需要的那一段。实测 `123pan-uni-app` 的
+ * 101 个 `.vue` 里 55 个的 `</template>` 在第 80 行之后（最长 960 行），只要前 80 行时
+ * outline 只认出 26 个文件、37 处组件；整份读之后是 59 个文件、189 处——「这页缺一个 X」
+ * 这类错误结论正是被那 80 行造出来的。`pages.json` 同理（250 行、27 条页面，前 80 行只
+ * 够 9 条）。
+ *
+ * 非 `.vue` 的文件仍在解析前按 `HEAD_LINES` 截断（见 `clipFor`）：符号与引用的口径与这一轮
+ * 之前**逐字相同**，这条路只多花一点字符串内存。
+ */
+export const READ_LINES = 100_000;
+
+/** 这块内容是不是要整份进解析器：`.vue`（template）与 `pages.json`（页面清单）。 */
+function needsWholeText(path: string): boolean {
+  return /\.vue$/i.test(path) || PAGES_JSON.test(path);
+}
+
+/** 交给解析器的那段文本：`.vue` / `pages.json` 整份，其余仍只给头 `HEAD_LINES` 行。 */
+function clipFor(path: string, text: string): string {
+  return needsWholeText(path) ? text : headLines(text, HEAD_LINES);
+}
+
 /** 内存里「sha → 已解析」的缓存：同一轮里同一块内容被多个路径引用时只解析一次。 */
 type ParseCache = Map<string, BlobFacts>;
 
@@ -143,6 +168,8 @@ function parseInto(
     size,
     symbols: parsed.symbols,
     refs: parsed.refs,
+    outline: parsed.outline,
+    pages: parsed.pages,
   };
   cache.set(blobSha, facts);
   return facts;
@@ -158,9 +185,15 @@ function firstPerBlob(entries: readonly { path: string; oid: string; size: numbe
   return [...seen.values()];
 }
 
-/** 进了索引的那一批（扩展名对、类别不是 `other`）：只有它们的**内容**需要读。 */
+/**
+ * 进了索引的那一批（扩展名对、类别不是 `other`）：只有它们的**内容**需要读。
+ *
+ * 判据只留一份（`code-index.ts` 的 `isIndexable`）：这里曾经有一份自己的
+ * `CODE_EXT + classifyKind` 副本，而 Task 1 把 `pages.json` 纳入可索引范围时，
+ * 两份判据分叉的症状是「路径说该索引、读口却从不读它」——路由表进了索引清单却没有内容。
+ */
 function indexable<T extends { path: string }>(entries: readonly T[]): T[] {
-  return entries.filter((entry) => CODE_EXT.test(entry.path) && classifyKind(entry.path) !== 'other');
+  return entries.filter((entry) => isIndexable(entry.path));
 }
 
 // ─── 有界的进程内缓存 ───────────────────────────────────────────────────────
@@ -251,14 +284,14 @@ export async function assembleFor(
   let parsedBlobs = 0;
 
   if (missing.length > 0) {
-    const got = await readBlobsOf(deps)(repo, missing, { maxLines: HEAD_LINES });
+    const got = await readBlobsOf(deps)(repo, missing, { maxLines: READ_LINES });
     if (!got.ok) return got;
     const cache: ParseCache = new Map();
     for (const ref of missing) {
-      const text = got.data.get(ref.blobSha);
+      const raw = got.data.get(ref.blobSha);
       // 读不回来的块不进索引（少一个文件比编一个空文件好）；它下一轮还会被当成缺失再试。
-      if (text === undefined) continue;
-      parseInto(cache, ref.blobSha, ref.path, ref.size, text);
+      if (raw === undefined) continue;
+      parseInto(cache, ref.blobSha, ref.path, ref.size, clipFor(ref.path, raw));
     }
     parsedBlobs = await writeBlobRows(db, [...cache.values()]);
     if (parsedBlobs > 0) {
@@ -270,7 +303,7 @@ export async function assembleFor(
   const sources = [];
   let newest = 0;
   for (const entry of tree.data) {
-    if (!CODE_EXT.test(entry.path) || classifyKind(entry.path) === 'other') continue;
+    if (!isIndexable(entry.path)) continue;
     const blob = stored.get(entry.oid);
     // 树里有、库里也没有、这次也没读回来：跳过（见上面那条注释）。
     if (blob === undefined) continue;
@@ -280,6 +313,9 @@ export async function assembleFor(
       lang: blob.lang,
       symbols: blob.symbols,
       refs: blob.refs,
+      // 0032 之前解析过的块没有这两列，`readBlobRows` 已按 `[]` 归一（见那里的注释）。
+      outline: blob.outline,
+      pages: blob.pages,
     });
     const at = Date.parse(blob.parsedAt);
     if (Number.isFinite(at) && at > newest) newest = at;
@@ -371,14 +407,14 @@ export async function buildIndex(
   }
 
   const first = firstPerBlob(sources);
-  const got = await readBlobsOf(deps)(repo, first, { maxLines: HEAD_LINES });
+  const got = await readBlobsOf(deps)(repo, first, { maxLines: READ_LINES });
   if (!got.ok) return got;
 
   const cache: ParseCache = new Map();
   for (const ref of first) {
-    const text = got.data.get(ref.blobSha);
-    if (text === undefined) continue;
-    parseInto(cache, ref.blobSha, ref.path, ref.size, text);
+    const raw = got.data.get(ref.blobSha);
+    if (raw === undefined) continue;
+    parseInto(cache, ref.blobSha, ref.path, ref.size, clipFor(ref.path, raw));
   }
 
   const bySha = new Map([...cache.values()].map((facts) => [facts.blobSha, facts]));
@@ -395,6 +431,8 @@ export async function buildIndex(
         lang: facts.lang,
         symbols: facts.symbols,
         refs: facts.refs,
+        outline: facts.outline,
+        pages: facts.pages,
       }];
     }),
   });

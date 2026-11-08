@@ -1,7 +1,7 @@
 import { inArray, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { blobIndex } from '../../db/schema.js';
-import type { BlobRefs } from './code-index.js';
+import type { BlobRefs, IndexPage, OutlineNode } from './code-index.js';
 
 /**
  * 静态索引的**存储层**：一件事——一块内容（git blob id）说了什么。
@@ -34,13 +34,23 @@ import type { BlobRefs } from './code-index.js';
 
 // ─── 形状 ────────────────────────────────────────────────────────────────────
 
-/** 一块已解析内容的落库形状（`blob_index` 去掉 `parsed_at`）。 */
+/**
+ * 一块已解析内容的落库形状（`blob_index` 去掉 `parsed_at`）。
+ *
+ * `outline` / `pages` 是迁移 0032 加的两列，形状与 `symbols` 同一个地位：**这块内容
+ * 说了什么**。它们必须按 blob 存而不是按提交存——同一块 `.vue` 在 40 个提交里只该
+ * 扫一次 template；按提交存就是每次提交重扫整棵树（那正是 0029/0030 推翻掉的那一半）。
+ */
 export type BlobFacts = {
   blobSha: string;
   lang: string;
   size: number;
   symbols: string[];
   refs: BlobRefs;
+  /** template 里的组件使用（只有 `.vue` 非空）。 */
+  outline: OutlineNode[];
+  /** `pages.json` 自己说的页面清单（其它内容恒为空）。 */
+  pages: IndexPage[];
 };
 
 /** 读回来的 blob 行。 */
@@ -113,6 +123,9 @@ export async function readBlobRows(db: Db, shas: readonly string[]): Promise<Map
         size: Number(row.size),
         symbols: (row.symbols as string[] | null) ?? [],
         refs: (row.imports as BlobRefs | null) ?? { specs: [], locals: {}, routes: [] },
+        // 0032 之前写下的行没有这两列：**按空数组读**，不报错、不猜。
+        outline: (row.outline as OutlineNode[] | null) ?? [],
+        pages: (row.pages as IndexPage[] | null) ?? [],
         parsedAt: isoOf(row.parsedAt),
       });
     }
@@ -141,6 +154,8 @@ export async function writeBlobRows(db: Db, blobs: readonly BlobFacts[]): Promis
         size: blob.size,
         symbols: blob.symbols,
         imports: blob.refs,
+        outline: blob.outline,
+        pages: blob.pages,
       })))
       .onConflictDoNothing()
       .returning({ blobSha: blobIndex.blobSha });

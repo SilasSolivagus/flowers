@@ -12,20 +12,35 @@
  *   npx tsx scripts/index-sync.ts --repo 123pan-pc --sha <sha>
  *   npx tsx scripts/index-sync.ts --repo 123pan-pc --sha <sha> --json
  *   npx tsx scripts/index-sync.ts --repo 123pan-pc --sha <sha> --rebuild
+ *   npx tsx scripts/index-sync.ts --repo 123pan-uni-app --force-reparse
  *
  * `--rebuild` 只清掉这个 `(repo, sha)` 的装配缓存（**不动 blob 行**）：内容地址是跨仓
- * 共享的，删它会让别的仓一起掉内容。要重解析内容请用 `forgetBlobs()`（用例那么干）。
+ * 共享的，删它会让别的仓一起掉内容。
+ *
+ * `--force-reparse` 才是「按新口径重解析一遍」：解析器改了口径（0032 的 outline /
+ * pages 就是这种情况）之后，库里那些行还在、`on conflict do nothing` 会让它们永远
+ * 不被重写。所以它先 `ls-tree` 拿到这一棵树用到的 blob id，`forgetBlobs()` 删掉那些
+ * 行，再同步——这一次每块内容都会真的被解析。**代价必须知道**：这些行是跨仓共享的，
+ * 删掉之后别的仓、别的提交下一次装配会当场自愈（重解析一次），所以它是一次「全量
+ * 重扫」而不是一次「增量」。
  */
 import { db, pool } from '../src/db/client.js';
-import { blobIndexStats } from '../src/core/codemirror/blob-index.js';
+import { blobIndexStats, forgetBlobs } from '../src/core/codemirror/blob-index.js';
 import { summarize, type CodeIndex } from '../src/core/codemirror/code-index.js';
 import { dropIndex, syncRepoIndex } from '../src/core/codemirror/index-store.js';
 import { head, lsTreeEntries } from '../src/core/codemirror/mirror.js';
 
-type Args = { repo: string; sha: string | null; rebuild: boolean; json: boolean };
+type Args = {
+  repo: string;
+  sha: string | null;
+  rebuild: boolean;
+  /** 按新口径重解析这个提交用到的每一块内容（删 blob 行再同步）。 */
+  forceReparse: boolean;
+  json: boolean;
+};
 
 function parseArgs(argv: readonly string[]): Args {
-  const args: Args = { repo: '', sha: null, rebuild: false, json: false };
+  const args: Args = { repo: '', sha: null, rebuild: false, forceReparse: false, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i] ?? '';
     const next = (): string => {
@@ -36,9 +51,10 @@ function parseArgs(argv: readonly string[]): Args {
     if (flag === '--repo') args.repo = next();
     else if (flag === '--sha') args.sha = next();
     else if (flag === '--rebuild') args.rebuild = true;
+    else if (flag === '--force-reparse') args.forceReparse = true;
     else if (flag === '--json') args.json = true;
     else if (flag === '--help' || flag === '-h') {
-      console.log('用法：tsx scripts/index-sync.ts --repo <id> [--sha <sha>] [--rebuild] [--json]');
+      console.log('用法：tsx scripts/index-sync.ts --repo <id> [--sha <sha>] [--rebuild] [--force-reparse] [--json]');
       process.exit(0);
     }
   }
@@ -83,6 +99,19 @@ async function main(): Promise<void> {
 
   if (args.rebuild) dropIndex(args.repo, sha);
 
+  // 重解析：删掉这一棵树用到的内容行（跨仓共享，别的仓下次装配会当场自愈）。
+  let reparsed = 0;
+  if (args.forceReparse) {
+    const tree = await lsTreeEntries(args.repo, { ref: sha });
+    if (!tree.ok) {
+      console.error(`读不到 ${args.repo}@${sha.slice(0, 8)} 的树：${tree.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    reparsed = await forgetBlobs(db, tree.data.map((entry) => entry.oid));
+    dropIndex(args.repo, sha);
+  }
+
   const started = Date.now();
   const synced = await syncRepoIndex(db, args.repo, sha);
   const totalMs = Date.now() - started;
@@ -111,6 +140,7 @@ async function main(): Promise<void> {
       indexable,
       ...report,
       totalMs,
+      forceReparse: reparsed,
       blobRows: stats.rows,
       blobBytes: stats.bytes,
       index: summarize(synced.data.index),
@@ -124,7 +154,12 @@ async function main(): Promise<void> {
   console.log(`本轮      新内容 ${report.newBlobs} 块、复用 ${report.reusedBlobs} 块、`
     + `耗时 ${report.ms} ms（整条 ${totalMs} ms，含一次 ls-tree）`);
   console.log(`去重      ${indexable} 个源码文件 → ${report.newBlobs + report.reusedBlobs} 块内容`);
+  if (args.forceReparse) console.log(`重解析    删掉 ${reparsed} 块内容行，这一轮按新口径重新解析`);
   printSummary(synced.data.index);
+  const fromConfig = synced.data.index.pages.filter((page) => page.source === 'pages.json').length;
+  console.log(`页面清单  ${synced.data.index.pages.length} 条（pages.json ${fromConfig} 条、`
+    + `目录约定 ${synced.data.index.pages.length - fromConfig} 条）、`
+    + `组件轮廓 ${Object.keys(synced.data.index.outline).length} 个文件`);
   console.log(`库里      blob_index ${stats.rows} 行（${stats.bytes} 字节）——这套索引只有这一张表`);
 }
 

@@ -36,6 +36,9 @@ const index = (
   files,
   imports,
   routes,
+  // Task 1/2 新增的两列：这份用例只关心打分，页面清单与组件轮廓留空。
+  pages: [],
+  outline: {},
   builtAt: '2026-11-07T00:00:00.000Z',
 });
 

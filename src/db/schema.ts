@@ -654,6 +654,16 @@ export const blobIndex = pgTable('blob_index', {
   symbols: jsonb('symbols').notNull(),
   /** `{ specs, locals, routes }`：向外的引用，全部**未解析**。 */
   imports: jsonb('imports').notNull(),
+  /**
+   * `.vue` template 里的组件使用（迁移 0032）：`[{ kind, name, line }]`。
+   *
+   * 可空是必须的：这一列出现**之前**写下的行没有它，读侧按 `[]` 处理（见
+   * `blob-index.ts` 的 `readBlobRows`）。按 blob 存而不是按提交存，理由与 `symbols`
+   * 同一个：同一块内容只该扫一次 template。
+   */
+  outline: jsonb('outline'),
+  /** `pages.json` 自己说的页面清单（迁移 0032）：`[{ route, title, source }]`。 */
+  pages: jsonb('pages'),
   parsedAt: timestamp('parsed_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

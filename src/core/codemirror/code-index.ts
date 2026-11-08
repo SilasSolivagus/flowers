@@ -48,6 +48,37 @@ export type IndexRoute = {
   title: string;
 };
 
+/**
+ * 一条**页面清单**（Task 1）：应用自己说的那些页面，以及我们按目录补的那些。
+ *
+ * 它与 `IndexRoute` 的区别不是「有没有文件」，而是**谁说的**：`routes` 回答「这条路径
+ * 落到哪个文件」，`pages` 回答「这个应用有哪些屏」。评估材料要的是后者——它最容易
+ * 编出来的错误是「加一个分享页」，而分享页已经在 `pages.json` 里；没有这份清单，
+ * 模型只能从目录名猜，猜出来的页面既可能重复也可能不存在。
+ */
+export type IndexPage = {
+  /** 路由，统一带前导 `/`（`pages.json` 的 `path` 是相对 `src/` 的说明符，不是路由）。 */
+  route: string;
+  /** 标题（`navigationBarTitleText`）。约定推出来的那一条没有标题——null 而不是空串。 */
+  title: string | null;
+  /** `pages.json` 是**它自己说的**；`convention` 是我们按 `pages/<dir>/<name>` 猜的。 */
+  source: 'pages.json' | 'convention';
+};
+
+/**
+ * 一页里用到的一个组件（Task 2 的 outline 第一层）。
+ *
+ * 只排到「template 里的标签」这一层是刻意的：评估要回答的是「这页里已经有搜索框了吗」，
+ * 而那个答案就是标签名本身。`kind` 现在只产出 `component-use`；留 `tag` 是为了将来
+ * 把「原生标签」也记下来时不改形状（`div` / `li` 这类现在**不进** outline）。
+ */
+export type OutlineNode = {
+  kind: 'component-use' | 'tag';
+  name: string;
+  /** 1 起算的全文行号（`grep -n` 对得上）。 */
+  line: number;
+};
+
 export type CodeIndex = {
   repo: string;
   /** 这份索引描述的是哪个提交。**主键的一半**：sha 一变，索引自然失效。 */
@@ -56,6 +87,10 @@ export type CodeIndex = {
   /** path → 被它 import 的仓内路径（外部包不进来）。 */
   imports: Record<string, string[]>;
   routes: IndexRoute[];
+  /** 页面清单：`pages.json` 自己说的 ＋ 目录约定补的（同一条 route 时前者胜出）。 */
+  pages: IndexPage[];
+  /** path → 这一页 template 里用到的组件（只做 `.vue`；没有组件的那一页不占一个键）。 */
+  outline: Record<string, OutlineNode[]>;
   /** 建索引的时刻（ISO）。第二次读到同一个 `(repo, sha)` 时，这个值不该变。 */
   builtAt: string;
 };
@@ -67,7 +102,12 @@ export const EMPTY_KIND_COUNTS: KindCounts = {
   page: 0, component: 0, service: 0, state: 0, route: 0, other: 0,
 };
 
-/** 每个文件只读前这么多行：导入/导出/路由表都在文件头部，全文是不必要的。 */
+/**
+ * 解析前给每个**非 `.vue`** 文件留多少行：导入/导出/路由表都在文件头部。
+ *
+ * `.vue` 与 `pages.json` 不再走这条截断（见 `index-store.ts` 的 `clipFor`）：它们的
+ * template 与页面清单会在第 80 行之后，截掉就等于让「这页有什么组件」这一层失真。
+ */
 export const HEAD_LINES = 80;
 
 /**
@@ -87,7 +127,15 @@ export type SourceEntry = { path: string; size: number; text: string };
 
 // ─── 分类：路径即约定 ────────────────────────────────────────────────────────
 
-const ROUTE_FILE = /(^|\/)pages\.json$/i;
+/**
+ * uni-app 的路由表：**唯一**一种值得进索引的 json。
+ *
+ * 为什么只放行这一个名字：索引不是「全仓 json 搜索」。`package-lock.json`、`tsconfig.json`
+ * 一次能到几百 KB，进来只会让每一块内容都付一次读取与解析，而它们永远不是「这个功能
+ * 在哪」的答案。`pages.json` 不同：它本身就是一份页面清单。
+ */
+export const PAGES_JSON = /(^|\/)pages\.json$/i;
+const ROUTE_FILE = PAGES_JSON;
 const ROUTER_DIR = /(^|\/)routers?\//i;
 const PAGE_DIR = /(^|\/)(pages?|views?|screens?)\//i;
 const COMPONENT_DIR = /(^|\/)components?\//i;
@@ -116,9 +164,9 @@ export function classifyKind(path: string): FileKind {
   return 'other';
 }
 
-/** 这个路径要不要进索引：类别认得出，扩展名是源码。 */
+/** 这个路径要不要进索引：类别认得出，扩展名是源码（或它是 `pages.json`）。 */
 export function isIndexable(path: string): boolean {
-  return CODE_EXT.test(path) && classifyKind(path) !== 'other';
+  return (CODE_EXT.test(path) || PAGES_JSON.test(path)) && classifyKind(path) !== 'other';
 }
 
 // ─── 抽取：导入 / 导出 ───────────────────────────────────────────────────────
@@ -355,6 +403,130 @@ export function resolveSpecifier(
   return null;
 }
 
+// ─── 抽取：页面清单（`pages.json`） ─────────────────────────────────────────
+
+/**
+ * 去掉 `//` 与 `/* … *\/` 注释，**字符串里的不算**。
+ *
+ * 为什么必须先去注释：真实的 `pages.json` 里是 uni-app 的条件编译注释
+ * （`// #ifdef MP-ALIPAY`），`JSON.parse` 会在这第一行就整份失败——实测
+ * `123pan-uni-app/src/pages.json` 250 行、27 条页面，`JSON.parse` 一个都不给。
+ * 而字符串里的 `//`（标题写成 `https://123pan.com`）不能被当成注释吃掉，否则后面
+ * 的声明会连着字符串一起消失。所以扫描时带 `inString` 与转义状态。
+ */
+function stripJsonComments(text: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (inString) {
+      if (ch === '\\') {
+        out += ch + (text[i + 1] ?? '');
+        i += 1;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i += 1;
+      out += '\n';
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+      i += 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * `"pages": [ … ]` 里的**顶层对象**原文（注释已经去掉）。
+ *
+ * 为什么不用 `JSON.parse`：注释之外还有一处坑——条件编译让两条分支之间**没有逗号**
+ * （`} // #endif` 换行 `// #ifdef` 换行 `{`）。去掉注释之后那份文本是 `} {`，
+ * 无论怎么补都不是合法 JSON。而我们要的只有每个页面对象里的两个字符串，所以这里按
+ * 大括号深度切对象，逗号存不存在都不影响——与 `routeDecls()` 用正则读路由是同一个理由。
+ */
+function pagesArrayItems(text: string): string[] {
+  const at = /"pages"\s*:\s*\[/.exec(text);
+  if (at === null) return [];
+  const items: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  for (let i = at.index + at[0].length; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (inString) {
+      if (ch === '\\') i += 1;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        items.push(text.slice(start, i + 1));
+        start = -1;
+      }
+      continue;
+    }
+    // 数组结束（深度回到 0 时遇到 `]`）：后面的 `subPackages` / `tabBar` 不是 pages。
+    if (ch === ']' && depth === 0) break;
+  }
+  return items;
+}
+
+const PAGE_PATH = /"path"\s*:\s*"([^"]*)"/;
+const PAGE_TITLE = /"navigationBarTitleText"\s*:\s*"([^"]*)"/;
+
+/** 一条 `pages.json` 声明（**内容级**：不问这块内容将来叫哪个路径）。 */
+function pageEntries(text: string): Array<{ path: string; title: string | null }> {
+  const out: Array<{ path: string; title: string | null }> = [];
+  for (const item of pagesArrayItems(stripJsonComments(text))) {
+    const at = PAGE_PATH.exec(item);
+    const path = (at?.[1] ?? '').trim();
+    if (path === '') continue;
+    out.push({ path, title: PAGE_TITLE.exec(item)?.[1] ?? null });
+  }
+  return out;
+}
+
+/**
+ * 只认 `pages.json` 这种明确的页面清单。为什么不做通用路由解析：pc 仓的路由在
+ * cross-frontend 里、uni 的路由靠目录约定，两者都不是一个能被同一条规则覆盖的东西；
+ * 猜错会让评估材料把不存在的页面当成「现有」。
+ *
+ * `route` 补上前导 `/`：`pages.json` 写的是 `pages/share/index`（相对 `src/` 的说明符），
+ * 而对外要回答的是「哪一屏」，前者带不带斜杠会让同一页在报表里出现两次。
+ */
+export function pagesFromConfig(path: string, text: string): IndexPage[] {
+  if (!PAGES_JSON.test(path)) return [];
+  return pageEntries(text).map((entry) => ({
+    route: `/${entry.path.replace(/^\/+/, '')}`,
+    title: entry.title,
+    source: 'pages.json',
+  }));
+}
+
 // ─── 抽取：路由 ──────────────────────────────────────────────────────────────
 
 const ROUTER_PATH = /(?:^|[\s,{])path\s*:\s*['"]([^'"]+)['"]/g;
@@ -391,12 +563,30 @@ export type ParsedRoute = { route: string; file: string; title: string };
  *
  * 为什么按**内容**而不是文件名区分 `pages.json` 与路由表：这块 blob 不知道自己将来
  * 叫 `pages.json` 还是 `router.js`，而内容寻址要求「同样的内容 = 同样的解析结果」。
- * 判据是 `"path": "…"`（带引号的键）——react-router 的写法是 `path: '/x'`，两种不会
- * 互相误判（实测两个仓：`123pan-uni-app/src/pages.json` 有 27 条带引号的，`123pan-pc/
- * src/router/router.js` 一条都没有）。
+ * 判据是 `"pages": [`（uni-app 的页面数组）或 `"path": "…"`（带引号的键）——
+ * react-router 的写法是 `path: '/x'`，两种不会互相误判（实测两个仓：
+ * `123pan-uni-app/src/pages.json` 有 27 条，`123pan-pc/src/router/router.js` 一条都没有）。
+ *
+ * `pages.json` 那一条路走 `pageEntries()`（去注释 + 按深度切对象），标题直接取
+ * `style.navigationBarTitleText`，不再靠「path 后面 400 字符里捞一个标题」。
  */
 export function routeDecls(text: string): RouteDecl[] {
   const out: RouteDecl[] = [];
+
+  const pages = pageEntries(text);
+  if (pages.length > 0) {
+    for (const entry of pages) {
+      out.push({
+        kind: 'pages',
+        route: entry.path,
+        title: entry.title ?? '',
+        ident: '',
+        spec: entry.path,
+      });
+    }
+    return out;
+  }
+
   JSON_PATH.lastIndex = 0;
   const isPages = JSON_PATH.exec(text) !== null;
   if (isPages) {
@@ -459,25 +649,6 @@ export function parseRouterTable(
 }
 
 /**
- * uni-app 的 `pages.json`：`"path": "pages/search/search"`。
- *
- * 为什么用正则读 JSON：那份文件的注释是真的（`// #ifdef MP-ALIPAY` 条件编译），
- * `JSON.parse` 会直接失败。而我们要的只有 `path` 与旁边的标题。
- */
-export function parsePagesJson(text: string, files: ReadonlySet<string>): ParsedRoute[] {
-  const out: ParsedRoute[] = [];
-  for (const decl of routeDecls(text)) {
-    if (decl.kind !== 'pages') continue;
-    out.push({
-      route: decl.route,
-      file: resolveSpecifier(decl.spec, 'pages.json', files) ?? '',
-      title: decl.title,
-    });
-  }
-  return out;
-}
-
-/**
  * 目录约定：`pages/<dir>/<name>` → `/<name>`，`index` 取上一级目录名。
  *
  * 为什么需要它：路由表只写得下「注册过的页面」，而一个页面文件常常是**子路由**
@@ -502,6 +673,45 @@ export function conventionRoute(path: string): string | null {
   // 是这一页的工具函数，不是一页。
   if (name.toLowerCase() === dir.toLowerCase() || /\.vue$/i.test(clean)) return `/${name}`;
   return null;
+}
+
+// ─── 抽取：组件轮廓（outline 第一层） ───────────────────────────────────────
+
+/** `<template>` 开标签（允许属性：`<template v-if="x">`）。 */
+const TEMPLATE_OPEN = /<template(?:\s[^>]*)?>/i;
+/** 组件标签：**大写开头**。`div` / `ul` / `li` 不是我们维护的东西，不进 outline。 */
+const COMPONENT_TAG = /<([A-Z][A-Za-z0-9_]*)\b/g;
+
+/**
+ * 一页 template 里用到的组件（Task 2 的第一层）。
+ *
+ * 为什么只做 template、只做 vue：评估要回答的是「这页里已经有什么组件」，template 里的
+ * 标签名就是答案，不需要进 script 解析 AST。而修 script 里的函数与 props 是 Phase 3 的
+ * 事——那时才需要 tree-sitter。
+ *
+ * 为什么闭合取**最后一个** `</template>`：template 里还有 `<template v-if>` / `<template
+ * #slot>` 这种嵌套写法，用第一个闭合会被内层截断，后面的组件全部消失（这正是
+ * 「这页缺一个 X」类错误结论的来源）。行号给全文行号（`grep -n` 对得上），不是块内偏移。
+ */
+export function outlineOf(path: string, text: string): OutlineNode[] {
+  if (!/\.vue$/i.test(path)) return [];
+  const open = TEMPLATE_OPEN.exec(text);
+  if (open === null) return [];
+  const bodyStart = open.index + open[0].length;
+  const close = text.lastIndexOf('</template>');
+  if (close < bodyStart) return [];
+  const body = text.slice(bodyStart, close);
+  const before = text.slice(0, bodyStart).split('\n').length - 1;
+  const out: OutlineNode[] = [];
+  COMPONENT_TAG.lastIndex = 0;
+  for (let m = COMPONENT_TAG.exec(body); m !== null; m = COMPONENT_TAG.exec(body)) {
+    out.push({
+      kind: 'component-use',
+      name: m[1] ?? '',
+      line: before + body.slice(0, m.index).split('\n').length,
+    });
+  }
+  return out.filter((node) => node.name !== '');
 }
 
 // ─── 装配 ────────────────────────────────────────────────────────────────────
@@ -547,6 +757,10 @@ export type ParsedBlob = {
   lang: string;
   symbols: string[];
   refs: BlobRefs;
+  /** 这一块内容里 template 用到的组件（`.vue` 之外恒为空）。 */
+  outline: OutlineNode[];
+  /** 这一块内容是不是一份页面清单（进索引的 json 只有 `pages.json`）。 */
+  pages: IndexPage[];
 };
 
 /**
@@ -556,7 +770,7 @@ export type ParsedBlob = {
  * 为什么符号抽取仍然要一个假路径（`index.<lang>`）：`exportsOf` 只在一处用路径——
  * 判断是不是 `.vue`（`.vue` 的 `<script setup>` 没有 `export`，顶层声明就是它的符号）。
  * 用 `index.<lang>` 与用真路径的结果**逐字相同**，而前者让「同一内容 → 同一符号表」
- * 变成不依赖调用顺序的事实。
+ * 变成不依赖调用顺序的事实。`outlineOf` / `pagesFromConfig` 同理：它们各自只看扩展名。
  */
 export function parseBlob(text: string, path: string): ParsedBlob {
   const lang = langOf(path);
@@ -571,6 +785,9 @@ export function parseBlob(text: string, path: string): ParsedBlob {
     lang,
     symbols: exportsOf(text, `index.${lang}`),
     refs: { specs: importSpecs(text), locals, routes },
+    outline: outlineOf(`index.${lang}`, text),
+    // 进索引的 json 只有 `pages.json`（见 `isIndexable`），所以这里用它的名字问一次。
+    pages: lang === 'json' ? pagesFromConfig('pages.json', text) : [],
   };
 }
 
@@ -667,12 +884,51 @@ export function assembleIndex(input: AssembleInput): CodeIndex {
     covered.add(path);
   }
 
+  // 页面清单：先收 `pages.json` **自己说的**，再给目录约定补的那些。
+  //
+  // 两条压制，都是为了不让同一页在清单里出现两次（评估材料看到两条会以为有两个入口）：
+  // 1. 同一条 route 字符串时 `pages.json` 胜出（`pages.json` 连标题都有）；
+  // 2. 已被 `pages.json` 说过的**那个文件**，不再按目录约定造一条——`pages/share/index`
+  //    与约定推出的 `/share` 是同一屏的两种拼法，而应用里真实存在的只有前者。
+  const pages: IndexPage[] = [];
+  const pageRoutes = new Set<string>();
+  const pageFiles = new Set<string>();
+  for (const source of input.sources) {
+    for (const page of source.pages) {
+      const key = page.route.toLowerCase();
+      if (pageRoutes.has(key)) continue;
+      pageRoutes.add(key);
+      pages.push(page);
+      const file = resolveSpecifier(page.route.replace(/^\/+/, ''), 'pages.json', fileSet);
+      if (file !== null) pageFiles.add(file);
+    }
+  }
+  for (const path of Object.keys(files)) {
+    if (files[path]?.kind !== 'page') continue;
+    if (pageFiles.has(path)) continue;
+    const route = conventionRoute(path);
+    if (route === null) continue;
+    const key = route.toLowerCase();
+    if (pageRoutes.has(key)) continue;
+    pageRoutes.add(key);
+    pages.push({ route, title: null, source: 'convention' });
+  }
+
+  // 组件轮廓：按路径挂上每一页 template 里的组件（没有组件的那一页不占一个键）。
+  const outline: Record<string, OutlineNode[]> = {};
+  for (const source of input.sources) {
+    if (source.outline.length === 0) continue;
+    outline[source.path] = source.outline;
+  }
+
   return {
     repo: input.repo,
     sha: input.sha,
     files,
     imports,
     routes,
+    pages,
+    outline,
     builtAt: input.builtAt ?? indexTimestamp(),
   };
 }

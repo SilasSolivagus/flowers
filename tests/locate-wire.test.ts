@@ -423,6 +423,9 @@ const indexOf = (repo: string, paths: string[]): CodeIndex => ({
   files: Object.fromEntries(paths.map((p) => [p, file('page' as FileKind)])),
   imports: {},
   routes: [],
+  // Task 1/2 新增的两列：这份用例钉的是接线，不是页面清单。
+  pages: [],
+  outline: {},
   builtAt: '2026-11-07T00:00:00.000Z',
 });
 

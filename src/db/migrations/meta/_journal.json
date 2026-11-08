@@ -239,6 +239,13 @@
       "when": 1794104300000,
       "tag": "0031_mirror_health",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794106000000,
+      "tag": "0032_blob_outline",
+      "breakpoints": true
     }
   ]
 }
