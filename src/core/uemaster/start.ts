@@ -12,7 +12,7 @@ import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
-import { reviewRequirement } from './review.js';
+import { REVIEW_NEEDS_PRD, reviewRequirement } from './review.js';
 import { inspect as inspectMaterial } from './inspect.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
@@ -160,9 +160,25 @@ export async function startGeneration(
   const stage = parseStage(input.stage);
 
   const jobId = await db.transaction(async (tx) => {
-    const found = await tx.execute<{ id: string }>(
-      sql`select id from requirements where id = ${requirementId} and deleted_at is null for update`);
+    const found = await tx.execute<{ id: string; prd_url: string | null }>(
+      sql`select id, prd_url from requirements
+           where id = ${requirementId} and deleted_at is null for update`);
     if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
+
+    /**
+     * 评审材料要先有 PRD（2026-11-08 裁定：**没有 PRD 直接拒绝，并说清怎么补**）。
+     *
+     * 位置是这一条的要点：拒绝发生在**落作业之前**，所以一次被拒的点击不会留下
+     * `uemaster_jobs` 行、不会甩 worker、不会读 PRD（也就没有 `prd_snapshots` 行）、
+     * 更不会有一份看起来「评过」的材料。用户拿到的就是那句点名修法的中文，
+     * 由 `generateAction` 原样交回按钮那一行。
+     *
+     * 只在 `review` 上生效：评估材料的输入是六段描述，走查是另一条链（它缺 PRD 时
+     * 由 `runJob` 自己那句拦下）——这一条裁定只说评审材料，不顺手扩大。
+     */
+    if (stage === 'review' && (found.rows[0].prd_url ?? '').trim() === '') {
+      throw new AppError('prd_missing_url', REVIEW_NEEDS_PRD);
+    }
 
     const running = await tx.execute<{ id: string; created_at: Date }>(sql`
       select id, created_at

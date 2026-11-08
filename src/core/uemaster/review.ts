@@ -48,8 +48,9 @@ import {
  *
  * 所以这条路的判据与评估那条**只有一处相同**（图），其余全不一样：
  *
- * 1. **PRD 是输入，不是一个 URL。** 没有快照就先读（`readPrd`），读不到就停——
- *    没有 PRD 的评审是用标题在评审。
+ * 1. **PRD 是输入，不是一个 URL。** 没有链接就拒绝（`REVIEW_NEEDS_PRD`），有链接但没有
+ *    快照就先读（`readPrd`），读不到就停——没有 PRD 的评审是用标题在评审。
+ *    （2026-11-08 裁定：链接这一关只在**评审材料**上，评估与走查保持原样。）
  * 2. **问题清单必须有据。** 每条问题带一句 PRD 原文（`quote`），我们会把它和 PRD 正文
  *    **逐字**比对（归一化空白与标点之后做子串判定）。找不到的那一条直接丢掉，
  *    并且记下来、原样回给模型重答一次。这与走查的「路径必须存在于 `lsTree`」是同一条
@@ -270,10 +271,27 @@ export function prdForPrompt(markdown: string): { text: string; truncated: boole
 }
 
 /**
+ * 这条需求没有正式 PRD 链接时，评审材料给的那句中文（2026-11-08 裁定）。
+ *
+ * 一句话要说三件事：**现在缺什么**（没有正式 PRD 链接）、**为什么不能凑**（评审材料要
+ * 先有 PRD——没有 PRD 的评审是照着标题在评，而它看起来像评审过）、**下一步动手做什么**
+ * （在「信息 · PRD 链接」里补上，或把需求退回待设计补 PRD）。
+ *
+ * 只有这一份：`startGeneration`（按钮那一侧，落作业之前）与 `prdBaseline`（真正生成
+ * 之前）都读它。两处各写一句，迟早出现「按钮说的修法」与「作业里说的修法」不是同一句话。
+ */
+export const REVIEW_NEEDS_PRD =
+  '这条需求还没有正式 PRD 链接，评审材料要先有 PRD。'
+  + '请在「信息 · PRD 链接」里补上，或先把需求退回待设计补 PRD。';
+
+/**
  * 这一版 PRD 是哪一份：快照优先，没有才读。
  *
- * 「没有 PRD 就停」在这里分两步说清楚，因为两种缺法对应两种修法：
- * - 需求上没有链接（`prd_url` 为空）→ 先说这件事：补链接，而不是「生成失败」；
+ * 「没有 PRD 就停」的顺序是硬的：**先看需求上有没有链接**，再看快照。
+ * - 需求上没有链接（`prd_url` 为空）→ 直接拒绝，用 `REVIEW_NEEDS_PRD` 那句中文。
+ *   这一条**不看快照**：库里留着上一版快照、链接却被清掉（或从来没补）时，接着往下
+ *   走会产出一份读起来像「PRD 已经评过」的材料，而这条需求根本没有正式 PRD——
+ *   那正是这条裁定要掐掉的形状；
  * - 有链接但读不下来 → `readPrd` 的原文（失败码与中文消息原样上抛，不翻译第二遍，
  *   与走查同一条口径）。
  */
@@ -283,14 +301,12 @@ async function prdBaseline(
   req: RequirementRow,
   deps: ReviewDeps,
 ): Promise<ReviewPrd> {
+  if ((req.prd_url ?? '').trim() === '') {
+    throw new AppError('prd_missing_url', REVIEW_NEEDS_PRD);
+  }
+
   const latest = await deps.latestSnapshot(db, req.id);
   const snapshot = latest ?? await (async (): Promise<Snapshot> => {
-    if ((req.prd_url ?? '').trim() === '') {
-      throw new AppError(
-        'prd_missing_url',
-        '这条需求没有 PRD 链接（prd_url 是空的）：评审就是照着 PRD 逐条过，先在需求上补上链接',
-      );
-    }
     // 没有快照才去读：`readPrd` 要调企业微信 CLI（几秒 + 一次真实读盘）。
     // 有快照还去读，等于让「这一版评审的是哪一版 PRD」这件事跟着文档改动漂。
     const read = await deps.readPrd(db, actor, { requirementId: req.id });

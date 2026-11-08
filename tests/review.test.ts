@@ -9,7 +9,8 @@ import { AppError } from '../src/core/errors.js';
 import { saveSnapshot } from '../src/core/prd/snapshots.js';
 import type { PrdReadResult } from '../src/core/prd/read.js';
 import {
-  findingsAnno, listCounts, readFindings, normalizeQuote, quoteInPrd, reviewRequirement, reviewTitle,
+  findingsAnno, listCounts, readFindings, normalizeQuote, quoteInPrd, REVIEW_NEEDS_PRD,
+  reviewRequirement, reviewTitle,
   type ReviewDeps,
 } from '../src/core/uemaster/review.js';
 import type { CodeIndex } from '../src/core/codemirror/code-index.js';
@@ -499,8 +500,11 @@ describe('reviewRequirement', () => {
     const error = await caught(reviewRequirement(db, '吕品', { requirementId: bare.id }));
 
     expect(error.code).toBe('prd_missing_url');
+    // 2026-11-08 裁定把这句话换成了「点名修法」的那一句（`REVIEW_NEEDS_PRD`）：
+    // 缺什么 + 为什么不能凑 + 下一步动手做什么。全文在 `review-prd-gate.test.ts` 里钉。
+    expect(error.message).toBe(REVIEW_NEEDS_PRD);
     expect(error.message).toContain('PRD 链接');
-    expect(error.message).toContain('prd_url');
+    expect(error.message).toContain('退回待设计');
     // 评审没有 PRD 就是拿标题在评审：停在发出任何调用之前
     expect(provider.prompts).toHaveLength(0);
     expect(await artifactCount()).toBe(0);
