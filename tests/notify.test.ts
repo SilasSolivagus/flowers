@@ -13,7 +13,7 @@ import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { makeRelease } from './helpers/factory.js';
 import {
-  latestNoticeSeq, markRead, notificationsFor, notifyView, unreadCount,
+  latestNoticeSeq, markRead, notificationsFor, notifyView, pendingDeliveries, unreadCount,
   type Notice,
 } from '../src/core/read/notify.js';
 
@@ -478,5 +478,89 @@ describe('排序与上限', () => {
 
     const all = await notificationsFor(db, member(FEATURE_REVIEWER), { limit: 0 });
     expect(all).toHaveLength(1);
+  });
+});
+
+/**
+ * 2026-11-08 裁定：**批量操作不该刷屏**。
+ *
+ * 现场是 0028 那一次：一条 command 搁置 34 条，动作人是 `system`——扇出里「排除自己做的
+ * 事」那条规则因此谁都排除不掉，超管为**一条命令**收到 34 条通知。
+ *
+ * 这里不跑那条迁移（它动的是真数据），只按它写下的**那一行形状**造事件：
+ * `requirement.shelved` + payload 里的 `batch` 标记 + `actor = 'system'`。断言是两侧的：
+ * 批量的一条都不该出现（七个人、两个频道都查），同一批需求上一条**没有** batch 的搁置
+ * 照旧照常通知——只测「没有」的话，一个把所有搁置都吞掉的实现也会绿。
+ */
+describe('批量事件：只写账，不打扰', () => {
+  const BATCH = '2026-11-08-stale-audit';
+
+  /** 与迁移 0028 同形状的一行：`from` / `to` / `reason`，外加 `batch` 标记。 */
+  async function batchShelve(requirementId: string): Promise<void> {
+    await db.execute(sql`
+      insert into events (requirement_id, actor, type, payload)
+      values (${requirementId}, 'system', 'requirement.shelved',
+              ${JSON.stringify({
+                from: 'inbox', to: 'shelved', reason: '过期审计批量搁置', batch: BATCH,
+              })})`);
+  }
+
+  /** 两个频道都开满的人：档位不参与这一组（要钉的是观众谓词，不是口味）。 */
+  const EVERYONE_LEVELS = '{"site":"all","wecom":"all"}';
+  function withWecom(name: string) {
+    return { ...member(name), notifyPrefs: EVERYONE_LEVELS };
+  }
+
+  /** 七个人（含超管房超）的命令：这是那次事故的观众。 */
+  const EVERYONE = ['房超', '吕正豪', '赵越', '吕品', '李嘉', '罗丹', '王妍'];
+
+  it('批量搁置：一条通知都没有（超管也没有），企微也不发，账还在', async () => {
+    const batched: string[] = [];
+    for (const title of ['批量甲', '批量乙']) {
+      const created = await createRequirement(db, PM, {
+        title, type: 'feature', requester: PM,
+      });
+      batched.push(created.id);
+    }
+
+    // 批量的**前后各看一次**：差异只可能来自那两行事件。
+    const owner = withWecom('房超');
+    const unreadBefore = await unreadCount(db, owner);
+    const wecomBefore = await pendingDeliveries(db, owner, { channel: 'wecom', limit: 200 });
+    for (const id of batched) await batchShelve(id);
+
+    for (const name of EVERYONE) {
+      const notices = await notificationsFor(db, member(name));
+      const shelved = notices.filter((notice) => notice.type === 'requirement.shelved');
+      expect(shelved).toEqual([]);
+      // 这两条需求上只该剩下「进入收集」那一行（那是另一条事件，与批量无关）。
+      const touching = notices.filter((notice) => batched.includes(notice.requirementId ?? ''));
+      expect(touching.every((notice) => notice.type !== 'requirement.shelved')).toBe(true);
+    }
+    expect(await unreadCount(db, owner)).toBe(unreadBefore);
+    expect(await pendingDeliveries(db, owner, { channel: 'wecom', limit: 200 })).toEqual(wecomBefore);
+
+    // 事件是账：两行都在，只是不变成通知。
+    const rows = await db.execute<{ n: number }>(sql`
+      select count(*)::int as n from events
+       where type = 'requirement.shelved'
+         and requirement_id in (${sql.join(batched.map((id) => sql`${id}::uuid`), sql`, `)})`);
+    expect(Number(rows.rows[0]!.n)).toBe(2);
+  });
+
+  it('同一条需求、不带 batch 的搁置：照旧通知超管与本线负责人（企微也算）', async () => {
+    const created = await createRequirement(db, PM, {
+      title: '手工搁置', type: 'feature', requester: PM,
+    });
+    await shelveRequirement(db, PM, { requirementId: created.id, reason: '先不做' });
+
+    const notices = await notificationsFor(db, member('房超'));
+    const shelved = notices.filter((notice) => notice.type === 'requirement.shelved');
+    expect(shelved.map((notice) => notice.requirementId)).toEqual([created.id]);
+    expect(shelved[0]!.line).toContain('被搁置：先不做');
+
+    // 企微是同一个谓词：站内会出现的，推送候选里也必须有（反之亦然）。
+    const wecom = await pendingDeliveries(db, withWecom('房超'), { channel: 'wecom', limit: 200 });
+    expect(wecom.map((candidate) => candidate.type)).toContain('requirement.shelved');
   });
 });

@@ -41,6 +41,9 @@ import { prefsOf, type Channel } from '../notify/prefs.js';
  * 商业线负责人收不到。这条规则与 `can()` 的锚点是同一句话，所以两处不可能给出
  * 两个答案——「能改它的人」与「收它通知的人」必须是同一批人。
  *
+ * **批量事件不通知**（2026-11-08 裁定）：事件的 `payload` 里有 `batch` 键 → 它留账、
+ * 不进通知（站内与企微都不进）。理由与判据写在 `addressed()` 里 `notBatch` 那一段。
+ *
  * 三条细节：
  *
  * 1. **排除本人动作**。通知的用途是「别人动了你关心的东西」；自己点的按钮自己知道。
@@ -341,7 +344,28 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
            and e.type in ('member.wecom_unlinked', 'clock.tick_skipped'))`
     : sql`false`;
 
-  return sql`((${base} or ${fanout} or ${memberAlert}) and ${levelFilter(level)})`;
+  /**
+   * 批量事件不变成通知（2026-11-08 裁定：**批量操作不该刷屏**）。
+   *
+   * 0028 一次搁置 34 条，动作人是 `system`——扇出里「排除自己做的事」那条规则因此谁都
+   * 排除不掉，超管为**一条命令**收到 34 条通知。规则补在这里，因为这里是唯一决定
+   * 「某条事件点到某个人」的地方：铃铛、红点、企微候选、已读水位线四个读口全部经过
+   * `addressed`，所以两个频道（站内 + 企微）自动一致，不会出现「铃铛静了、手机还在响」。
+   *
+   * **事件是账，通知是打扰，批量只写账。** `events` 那一行照旧写、照旧是审计记录，
+   * 它只是不进 feed、不计红点、不发企微。
+   *
+   * 判据是「payload 里有没有 `batch` 这个键」而不是某个具体值：每一批带自己的标识
+   * （0028 是 `2026-11-08-stale-audit`），这里只关心「这是一次批量」。`->>` 在键不存在
+   * 时给 null，所以既有的、没有 payload 的事件类型（`release.*`、`member.*` 之类写过
+   * `{}` 的）照常通知；`payload` 是 `text` 列，但库里的值永远是 `JSON.stringify` 的
+   * 产物（`src/core/events.ts` 是唯一写入点，迁移 0028 也照着写），`::jsonb` 不会炸。
+   */
+  const notBatch = sql`(e.payload::jsonb ->> 'batch') is null`;
+
+  return sql`((${base} or ${fanout} or ${memberAlert})
+               and ${levelFilter(level)}
+               and ${notBatch})`;
 }
 
 type NoticeRow = {
