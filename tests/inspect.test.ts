@@ -798,8 +798,17 @@ describe('inspect：PRD ⇄ 真实代码', () => {
       }));
       const banner = bannerTextOf(await readFile(siteFile(out.url), 'utf8'));
 
-      // 两仓结论相同 → 只说一遍（去重），且逐字等于 copy 的输出
-      expect(banner).toBe(`${NOT_FOUND_HEADLINE}${CONFIRM_WITH_DEV}`);
+      // 两仓结论相同 → 只说一遍（去重），第一行逐字等于 copy 的输出；
+      // 之后是每仓一行「代码快照」（2026-11-08）：材料必须说清对着哪一版代码，
+      // 而这一轮**没有任何别的话**可以在结论与快照之外出现。
+      const lines = banner.split('\n');
+      expect(lines[0]).toBe(`${NOT_FOUND_HEADLINE}${CONFIRM_WITH_DEV}`);
+      const rest = lines.slice(1);
+      expect(rest).toHaveLength(INSPECT_REPOS.length);
+      for (const id of INSPECT_REPOS) {
+        expect(rest.some((line) => line.startsWith(`代码快照：${id} @ `))).toBe(true);
+      }
+      expect(rest.every((line) => /^(代码快照：|代码快照较旧（\d+ 天前）$)/.test(line))).toBe(true);
       expect(banner).not.toContain(ABSENT_HEADLINE);
     }, 60_000);
 

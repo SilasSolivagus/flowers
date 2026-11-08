@@ -24,6 +24,7 @@ import { recordLocate } from '../locate/ledger.js';
 import { expandedKeywords, locateFromStructure, type ExpandFn } from '../locate/structure.js';
 import type { LocateResult } from '../locate/types.js';
 import { keywordsFrom, prdVersionOf, renderLocate } from './inspect.js';
+import { withSnapshots } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig,
@@ -383,8 +384,13 @@ function prdBlock(prd: ReviewPrd): string[] {
 export type Baseline = {
   /** 进提示词的现状描述（人读的几段话）。 */
   text: string;
-  /** 这份材料用了哪些仓库的哪个提交——写进标题，读者能追。 */
-  repos: Array<{ id: string; sha: string }>;
+  /**
+   * 这份材料用了哪些仓库的哪个提交、那个提交是哪天的——写进标题，读者能追。
+   *
+   * `date` 是 2026-11-08 加的：材料顶部横幅要写「代码快照：<仓> @ <日期>」，而这一格
+   * 原本只有 sha。sha 只有研发认得出，PM 要的是日期（以及「旧了」这句话）。
+   */
+  repos: Array<{ id: string; sha: string; date: string }>;
   /** 每个仓库 HEAD 上的路径集合，校验代码证据用。 */
   trees: Map<string, Set<string>>;
   /**
@@ -549,7 +555,7 @@ export async function gatherBaseline(
     const text = `${renderLocate(located)}\n${repoLine}`;
     return {
       text,
-      repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
+      repos: inputs.repos.map(({ id, sha, date }) => ({ id, sha, date })),
       trees: inputs.trees,
       locate: located,
     };
@@ -582,7 +588,7 @@ export async function gatherBaseline(
   ].join('\n');
   return {
     text,
-    repos: inputs.repos.map(({ id, sha }) => ({ id, sha })),
+    repos: inputs.repos.map(({ id, sha, date }) => ({ id, sha, date })),
     trees: inputs.trees,
     locate: located,
   };
@@ -1270,7 +1276,10 @@ export async function reviewRequirement(
   // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
   // 于是落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，`why`（唯一能拿去催人的
   // 线索）丢了。这一段由代码写死、模型不参与——模型正文里提没提它都一样。
-  const html = injectBanner(built.html, renderLocate(baseline.locate));
+  // 横幅 = 结论 + 「代码快照」：一句话说清「这是对着哪一版代码评的」，旧了就写旧
+  // （`withSnapshots`，措辞在 `copy.ts`）。没有仓可写时它原样返回结论——那时结论本身
+  // 就是「代码没读到」。
+  const html = injectBanner(built.html, withSnapshots(renderLocate(baseline.locate), baseline.repos));
   await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);

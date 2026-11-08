@@ -110,3 +110,104 @@ export function CANDIDATES_LINE(items: readonly Candidate[]): string {
   const lines = items.map((c, i) => `${i + 1}. \`${c.path}\` ← ${c.reason}`);
   return `${LOW_CONFIDENCE_HEADLINE}\n${lines.join('\n')}\n以上是线索，不是结论。${CONFIRM_WITH_DEV}`;
 }
+
+// ─── 代码快照：这份材料是对着**哪一版代码**说的 ──────────────────────────────
+//
+// 2026-11-08 的裁决（评审意见：「代码没读到」是同一种纪律的另一半）：
+// 材料不许把**旧代码**当成**现在的代码**。定位已经知道每个仓的 HEAD 是哪一天
+// （`head()` 返回 `{sha, date, subject}`），但材料里一个字都没写——于是 PM 读到
+// 「最可能的位置」，以为那是今天的代码，而镜像的 HEAD 可能已经落后十几天。
+//
+// 所以这三句与上面那几句放在同一个文件：**措辞只有一个来源**。规则有两条：
+//
+// 1. 用了几个仓就写几行「代码快照：<仓> @ <日期>」，一行都不许省——省掉哪个仓，
+//    读者就会把那个仓的结论当成「没参考代码」；
+// 2. 某个仓的 HEAD 离今天超过 `SNAPSHOT_STALE_DAYS` 天，紧跟它那一行再写一句
+//    「代码快照较旧（N 天前）」。这就是「我看的是旧代码」的诚实版本：不藏、不解释、
+//    也不因此扣下材料——那会退回「整份不出」的老毛病（见 `types.ts` 的 `absent`）。
+
+/** 快照行的前缀。单独一个常量只为让「这一行以什么开头」也能被用例钉住。 */
+export const SNAPSHOT_PREFIX = '代码快照：';
+
+/** 快照过旧那一行的前缀。 */
+export const SNAPSHOT_STALE_PREFIX = '代码快照较旧（';
+
+/**
+ * 多少天算「旧」：**14 天**。
+ *
+ * 这个数没有理论依据，只有一个用途：把「隔了一个迭代周期」的代码与「昨天的代码」
+ * 分开。改它是产品决定，改完记得同步 `tests/locate-snapshot.test.ts` 的边界用例。
+ */
+export const SNAPSHOT_STALE_DAYS = 14;
+
+/** 一个仓的 HEAD 时间：`id` 是配置里的仓名，`date` 是 `%cI`（可带时分秒）。 */
+export type CodeSnapshot = { id: string; date: string };
+
+/** `%cI` → `YYYY-MM-DD`。格式不对时不编一个日期：写「日期未知」比写一个假日期诚实。 */
+function dayOf(date: string): string {
+  const day = date.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : '日期未知';
+}
+
+/**
+ * 「今天」按**Asia/Shanghai**算，与提交时间的时区一致（`%cI` 里是 `+08:00`）。
+ *
+ * 不按 UTC 算：北京时间 0–8 点之间，UTC 还是昨天，于是「14 天」的门槛会在一个
+ * 白天里来回跳一天——同一份材料上午说「旧」、下午说「不旧」，比不写更糟。
+ */
+export function todayInShanghai(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+}
+
+/** 两个日期之间差几天（`today - date`）。日期不可解析时返回 `null`（不猜）。 */
+export function ageInDays(date: string, today: string): number | null {
+  const day = dayOf(date);
+  if (day === '日期未知' || !/^\d{4}-\d{2}-\d{2}$/.test(today)) return null;
+  const at = Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)));
+  const to = Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 1, Number(today.slice(8, 10)));
+  if (Number.isNaN(at) || Number.isNaN(to)) return null;
+  return Math.round((to - at) / 86_400_000);
+}
+
+/** 「代码快照：123pan-uni-app @ 2026-11-03」。 */
+export const SNAPSHOT_LINE = (repo: string, date: string): string =>
+  `${SNAPSHOT_PREFIX}${repo} @ ${dayOf(date)}`;
+
+/** 「代码快照较旧（16 天前）」。 */
+export const STALE_LINE = (days: number): string => `${SNAPSHOT_STALE_PREFIX}${days} 天前）`;
+
+/**
+ * 每个仓一行快照；旧的那个仓紧跟一行「较旧」。
+ *
+ * 顺序 = 传入顺序（= 材料里结论的顺序），所以「较旧」说的是它上面那一行——不写仓名
+ * 是因为这一行本来就属于上一行，重复仓名只会把一句短话读成一串。
+ */
+export function snapshotLines(
+  repos: readonly CodeSnapshot[],
+  today: string = todayInShanghai(),
+): string[] {
+  const lines: string[] = [];
+  for (const repo of repos) {
+    lines.push(SNAPSHOT_LINE(repo.id, repo.date));
+    const age = ageInDays(repo.date, today);
+    if (age !== null && age > SNAPSHOT_STALE_DAYS) lines.push(STALE_LINE(age));
+  }
+  return lines;
+}
+
+/**
+ * 定位结论 + 快照 → 材料顶部横幅的全文。
+ *
+ * 没有仓（代码根本没读到）时**一行都不加**：那时材料的结论是「代码没读到」，再写
+ * 「代码快照：…」就是在说一件我们并不知道的事。
+ */
+export function withSnapshots(
+  text: string,
+  repos: readonly CodeSnapshot[],
+  today: string = todayInShanghai(),
+): string {
+  const extra = snapshotLines(repos, today);
+  return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
+}

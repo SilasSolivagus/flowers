@@ -731,7 +731,15 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
     expect(findingsPrompt).not.toContain('src/pages/search/search.vue');
     expect(findingsPrompt).toContain('最可能的位置（待研发确认）');
 
-    // (3) 记账：一条 review 行，有候选 → low，候选数 1。
+    // (3) 材料里写着「对着哪一版代码」：评审这条路的横幅也要带快照行（2026-11-08）。
+    //     这里用夹具的 HEAD 日期，逐字断言——去掉 `withSnapshots` 这一条就红。
+    const html = await readFile(siteFile(out.url), 'utf8');
+    const banner = /<section class="locate-banner"[\s\S]*?<\/section>/.exec(html)![0]
+      .replace(/<[^>]+>/g, '\n');
+    expect(banner).toContain('代码快照：123pan-pc @ 2026-11-07');
+    expect(banner).toContain('代码快照：123pan-uni-app @ 2026-11-07');
+
+    // (4) 记账：一条 review 行，有候选 → low，候选数 1。
     const runs = await db.execute<{ stage: string; outcome: string; candidates: number }>(sql`
       select stage, outcome, candidates from locate_runs`);
     expect(runs.rows.map((row) => [row.stage, row.outcome, row.candidates]))

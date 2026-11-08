@@ -20,6 +20,7 @@ import { locateFromHistory } from '../locate/history.js';
 import { injectBanner } from '../locate/banner.js';
 import {
   ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
+  withSnapshots,
 } from '../locate/copy.js';
 import { recordLocate, type LocateDetail } from '../locate/ledger.js';
 import type { LocateResult } from '../locate/types.js';
@@ -880,15 +881,20 @@ function locateLines(repo: RepoBaseline): string[] {
  *    一遍，PM 会以为这是两份不同的结论；而且同一句话念两遍，正是「三句变四句」的开头。
  * 2. 结论不同才按仓标出（`[仓]` 一行 + 正文）：那时仓名是信息，不是排版。
  *
- * 文字一律来自 `renderLocate`（再往下是 `copy.ts`），这里**一个字都不自己写**。
+ * 文字一律来自 `renderLocate`（再往下是 `copy.ts`），这里**一个字都不自己写**；
+ * 末尾那份「代码快照：<仓> @ <日期>」同样来自 `copy.ts`（`withSnapshots`）——材料说
+ * 「最可能的位置」时，必须同时说清这是对着哪一版代码说的，旧了也要说旧（2026-11-08）。
  */
 function locateBannerText(repos: readonly RepoBaseline[]): string {
   const rendered = repos.map((repo) => ({ repo: repo.id, text: renderLocate(repo.locate, 'history') }));
   const first = rendered[0];
   if (first === undefined) return '';
   const distinct = new Set(rendered.map((item) => item.text));
-  if (distinct.size === 1) return first.text;
-  return rendered.map((item) => `[${item.repo}]\n${item.text}`).join('\n');
+  const body = distinct.size === 1
+    ? first.text
+    : rendered.map((item) => `[${item.repo}]\n${item.text}`).join('\n');
+  // 一行一个仓：用了几个仓就写几行（`RepoBaseline` 自带 `id` / `date`）。
+  return withSnapshots(body, repos);
 }
 
 /**
