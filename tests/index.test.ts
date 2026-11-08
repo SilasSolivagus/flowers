@@ -28,7 +28,8 @@ import { DEFAULT_SSH_HOST, head, lsTreeEntries, showHeads } from '../src/core/co
  * 3. 导入关系解析成仓内路径，`@/` 别名与目录导入（`/index`）都对；
  * 4. 导出符号抓得到（含 `export default X`、`<script setup>` 里的 `const`）；
  * 5. `locate` 把「路由命中的页面」排在「导出符号命中的服务」前面，且 `why` 说得出为什么；
- * 6. **后端仓（只有 `.go`）索引为空 → 调用方明说退回 grep**（不测 grep 的输出）；
+ * 6. **索引为空 → 调用方明说退回 grep**（不测 grep 的输出）。2026-11-08 起 `.go` 有解析器了，
+ *    所以「只有 `.go` 的仓」不再是空索引的例子——那一条改成「真的一个可索引文件都没有」；
  * 7. 同一个 `(repo, sha)` 建第二次**不再建**（读口计数不变、`built_at` 不变）。
  */
 
@@ -231,7 +232,9 @@ describe('分类：路径即约定', () => {
     expect(kindOf('src/pages.json')).toBe('route');
     // 认不出的不进索引：类型、工具函数、配置文件不会是「这个功能在哪」的答案。
     expect(kindOf('src/types/file.ts')).toBe('other');
-    expect(kindOf('main.go')).toBe('other');
+    // 2026-11-08 起 `.go` 不再落 `other`（那正是 79 个后端仓 0/49 的原因）：Go 仓没有
+    // 「页面/组件」这一层，`.go` 一律判 `service`，理由见 `classifyKind` 的长注释。
+    expect(kindOf('main.go')).toBe('service');
   });
 
   it('噪音路径一个都不进索引', async () => {
@@ -418,22 +421,36 @@ describe('locateAcross：一条需求的候选，不是每仓各自的一份', (
 // ─── 6. 降级 ────────────────────────────────────────────────────────────────
 
 describe('降级：索引为空就明说退回 grep', () => {
-  it('只有 .go 的仓 → 空索引 → 调用方选 grep（不测 grep 的输出）', async () => {
+  /**
+   * 这条用例原来的断言是「只有 `.go` 的仓 → 索引为空 → 选 grep」——**那是一个 bug 的
+   * 形状，不是需求**：79 个 Go 仓就是这么变成「镜像绿了、覆盖率 0/49」的。2026-11-08 起
+   * `.go` 有解析器，同一个夹具仓必须**有**索引，并且 outline 里能看见 `func Search`。
+   */
+  it('只有 .go 的仓现在有索引（Go 解析器落地之后不再是空索引）', async () => {
     const built = await buildIndex('fixture-go', goSha);
     expect(built.ok).toBe(true);
     if (!built.ok) return;
-    expect(Object.keys(built.data.index.files)).toEqual([]);
+    expect(Object.keys(built.data.index.files).sort()).toEqual(['main.go', 'pkg/util.go']);
     expect(built.data.index.routes).toEqual([]);
+    expect(built.data.index.outline['pkg/util.go']).toEqual([
+      { kind: 'go-func', name: 'Search', line: 3 },
+    ]);
+    // 有索引就走索引。这里候选为空是**真答案**（关键词不在名字里），不是降级理由。
+    expect(locateOrFallback(built.data.index, ['完全不存在的词']).source).toBe('index');
+  });
 
-    const choice = locateOrFallback(built.data.index, ['搜索']);
+  it('真的一个可索引文件都没有 → 选 grep；没有索引（null）→ 选 grep', () => {
+    const empty = extractIndex({ repo: 'fixture-empty', sha: '0'.repeat(40), all: [], sources: [] });
+    const choice = locateOrFallback(empty, ['搜索']);
     expect(choice.source).toBe('grep');
     if (choice.source === 'grep') expect(choice.reason).toContain('grep');
 
     // 有索引时走索引——哪怕候选为空（「这个功能不在这个仓」是个真答案）。
-    const react = await buildIndex('fixture-react', reactSha);
-    if (!react.ok) return;
-    const indexed = locateOrFallback(react.data.index, ['完全不存在的词']);
-    expect(indexed.source).toBe('index');
+    const react = extractIndex({
+      repo: 'fixture-react', sha: '0'.repeat(40), all: ['src/pages/Download/index.tsx'],
+      sources: [{ path: 'src/pages/Download/index.tsx', size: 10, text: 'export default 1;' }],
+    });
+    expect(locateOrFallback(react, ['完全不存在的词']).source).toBe('index');
     expect(locateOrFallback(null, ['搜索']).source).toBe('grep');
   });
 });

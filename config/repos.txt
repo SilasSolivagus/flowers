@@ -32,3 +32,4 @@
 123pan-cross-frontend	master
 123pan-agent-tracker	master
 123pan-gateway	master
+apisrv	master

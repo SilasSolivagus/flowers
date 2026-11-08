@@ -69,14 +69,17 @@ export type IndexPage = {
 /**
  * 一页里用到的一个组件（Task 2 的 outline 第一层），或一个文件对外提供的符号（Task 2b）。
  *
- * 只排到「template / JSX 里的标签」这一层是刻意的：评估要回答的是「这页里已经有搜索框了
- * 吗」，而那个答案就是标签名本身。`kind` 现在产两种：
+ * 只排到「template / JSX 里的标签」这一层是刻意的：评估要回答的是「这页里已经有搜索框
+ * 吗」，而那个答案就是标签名本身。`kind` 现在产六种：
  * - `component-use`：`.vue` 的 template 与 `.tsx` / `.jsx` 的 JSX 里**大写开头**的标签；
- * - `symbol`：`.ts` / `.tsx` 没有 JSX 可言时，文件 `export` 出来的那些名字。
+ * - `symbol`：`.ts` / `.tsx` 没有 JSX 可言时，文件 `export` 出来的那些名字；
+ * - `go-func` / `go-method` / `go-struct` / `go-iface`：Go 仓的顶层声明（见 `goOutline`）。
+ *   四种分开而不共用 `symbol`，是因为后端材料要说的话不一样：「有没有这个方法」与
+ *   「有没有这个结构体」是两个问题，混成一个 kind 之后调用方还得回头解析名字。
  * 留 `tag` 是为了将来把「原生标签」也记下来时不改形状（`div` / `li` 这类现在**不进** outline）。
  */
 export type OutlineNode = {
-  kind: 'component-use' | 'tag' | 'symbol';
+  kind: 'component-use' | 'tag' | 'symbol' | 'go-func' | 'go-struct' | 'go-iface' | 'go-method';
   name: string;
   /** 1 起算的全文行号（`grep -n` 对得上）。 */
   line: number;
@@ -156,20 +159,40 @@ const COMPONENT_DIR = /(^|\/)components?\//i;
 const SERVICE_DIR = /(^|\/)(services?|apis?)\//i;
 const STATE_DIR = /(^|\/)(stores?|hooks?|composables?)\//i;
 
-/** 只认这几种扩展名：索引不是「全仓文本搜索」。 */
-export const CODE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/i;
+/** 只认这几种扩展名：索引不是「全仓文本搜索」。`.go` 是 2026-11-08 扩的（后端 35 条需求）。 */
+export const CODE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|vue|go)$/i;
+
+/**
+ * Go 的**测试文件**：`xxx_test.go` 与它同目录的 `_test.go` 辅助件。
+ *
+ * 为什么整类排除而不是「索引进去但 outline 留空」：`_test.go` 里的 `TestCreateFolder`
+ * 命中「文件夹」这个词时，`locate` 会把它当候选交给材料——而材料照着测试名说
+ * 「已有创建文件夹的接口」，那是把**测试**当成**产品**。测试不是产品，一行都不该进。
+ * 代价：覆盖率的分母（`ls-tree` 总数）里还有它们，所以 Go 仓的 `files_indexed/files_total`
+ * 天生小于 1；报告里要把这一条写清，别让人以为是漏索引。
+ */
+const GO_TEST_FILE = /_test\.go$/i;
 
 /**
  * 一个路径属于哪一类。**顺序即优先级**：
- * - `pages.json` 与 `router/` 先判：它们是路由表，比「页面」更该被当成结构；
- * - `pages/` 再判：`pages/Search/api.ts` 描述的是「这一页」，不是「一个接口」；
+ * - `.go` 先判并**一律** `service`（见下）；
+ * - `pages.json` 与 `router/` 再判：它们是路由表，比「页面」更该被当成结构；
+ * - `pages/`：`pages/Search/api.ts` 描述的是「这一页」，不是「一个接口」；
  * - 然后是组件、服务、状态。
  *
  * 认不出的落 `other`（等于「不进索引」）：一个仓里大量是配置、类型、工具函数，
  * 它们不会成为「这个功能在哪」的答案，进来只会稀释候选。
+ *
+ * **为什么 `.go` 不走目录约定、直接判 `service`**：`FileKind` 这一根轴是**前端角色**
+ * 的轴（页面/组件/服务/状态）。Go 仓里没有「一屏」也没有「一个可复用组件」——
+ * `apisrv/component/` 是一个库包、`app/` 是 handler、`service/` 是业务层，它们的角色
+ * 完全相同：服务端实现。若沿用目录约定，`apisrv/component/*.go` 会被判成 `component`
+ * （于是定位排序把它当成「前端组件」抬到页面前面），`app/` / `library/` / `constvar/`
+ * 会落 `other`（于是整个仓又变成 0）。两种错法都不如一个诚实的桶：`.go` = `service`。
  */
 export function classifyKind(path: string): FileKind {
   const clean = path.replace(/^\.?\//, '');
+  if (/\.go$/i.test(clean)) return 'service';
   if (ROUTE_FILE.test(clean) || ROUTER_DIR.test(clean)) return 'route';
   if (PAGE_DIR.test(clean)) return 'page';
   if (COMPONENT_DIR.test(clean)) return 'component';
@@ -178,8 +201,12 @@ export function classifyKind(path: string): FileKind {
   return 'other';
 }
 
-/** 这个路径要不要进索引：类别认得出，扩展名是源码（或它是 `pages.json`）。 */
+/**
+ * 这个路径要不要进索引：类别认得出，扩展名是源码（或它是 `pages.json`），且不是
+ * Go 的测试文件（见 `GO_TEST_FILE`）。
+ */
 export function isIndexable(path: string): boolean {
+  if (GO_TEST_FILE.test(path)) return false;
   return (CODE_EXT.test(path) || PAGES_JSON.test(path)) && classifyKind(path) !== 'other';
 }
 
@@ -722,8 +749,14 @@ function maskHtmlComments(text: string): string {
  * 代价两处，都写在这里免得下次有人以为是 bug：模板字符串里的 `${…}` 会连插值一起被
  * 抹掉（JSX 写在插值里的情况不存在）；正则字面量（`/<[A-Z]/`）仍可能误命中——它没有
  * 「引号」可依，扫不出来。
+ *
+ * `rawBacktick`：反引号里的 `\` 算不算转义。JS 算（模板字符串），**Go 不算**——Go 的
+ * 反引号是**原始字符串**，`\` 就是反斜杠本身。这一条不区分会出现真错位：`` `C:\` ``
+ * 在 JS 语义下会把结尾的反引号吃掉，于是一整段代码被当成字符串抹掉，后面的
+ * `func Foo(` 全部消失（少说）或者让下一个引号错位（编一个）。默认 `false` = JS 口径，
+ * Go 的调用方显式传 `true`。
  */
-function maskCode(text: string): string {
+function maskCode(text: string, opts: { rawBacktick?: boolean } = {}): string {
   let out = '';
   let i = 0;
   while (i < text.length) {
@@ -755,7 +788,7 @@ function maskCode(text: string): string {
       i += 1;
       while (i < text.length) {
         const inner = text[i] ?? '';
-        if (inner === '\\') {
+        if (inner === '\\' && !(opts.rawBacktick === true && quote === '`')) {
           out += '  ';
           i += 2;
           continue;
@@ -870,6 +903,96 @@ function symbolOutline(text: string): OutlineNode[] {
   return hits.map((hit) => ({ kind: 'symbol', name: hit.name, line: lineAt(masked, hit.index) }));
 }
 
+// ─── 抽取：Go 的顶层声明 ─────────────────────────────────────────────────────
+
+/**
+ * Go 的四种顶层声明。**为什么是正则而不是 AST**：tree-sitter / go/parser 都是新依赖，
+ * 而这一层要回答的问题只有一个——「这个文件里有哪些函数/方法/类型」。Go 有一条对正则
+ * 极友好的性质：`gofmt` 把每一条顶层声明都顶在第 0 列、`func` / `type` 关键字开头，
+ * 于是 `^func` 这种锚点不需要任何缩进推断就能用（与 `.ts` 那半边必须逐行猜 `export`
+ * 形成对比）。
+ *
+ * 正则的盲区（报告里也写了，因为这是选型的代价）：
+ * - **接口里的方法**（`type X interface { Do(a int) error }` 里那些行）没有 `func`
+ *   关键字，一个都不会被抽到——只有接口名进 outline；
+ * - **多行 receiver**（`func (\n\ts *Server,\n) Name(`）会漏：`gofmt` 不这么排版，所以只在
+ *   手写/生成代码里出现；
+ * - **泛型类型参数里带换行或嵌套括号**（`func F[A interface{ M() }, B any]()`）能抽出名字，
+ *   但 `[` 之后的形态没有校验——名字对了，签名理解不了；
+ * - **构建标签**（`//go:build windows`）不看：同一个包里各平台的实现都会进 outline；
+ * - **匿名函数、闭包**不算声明，正确跳过；**`func init()`** 按约定跳过（它不是产品能力）。
+ */
+const GO_FUNC = /^func\s+([A-Za-z_]\w*)\s*[([]/gm;
+/** `func (r *Recv) Name(` / `func (Recv) Name(` / `func (r *Recv[T]) Name(`。 */
+const GO_METHOD = /^func\s*\(\s*(?:[A-Za-z_]\w*\s+)?\*?\s*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\)\s*([A-Za-z_]\w*)\s*[([]/gm;
+const GO_TYPE = /^type\s+([A-Za-z_]\w*)\s+(struct|interface)\b/gm;
+/** 分组类型块：`type (` … `)`。条目按 gofmt 的**一个 tab** 缩进认。 */
+const GO_TYPE_BLOCK_OPEN = /^type\s*\(\s*$/gm;
+const GO_TYPE_BLOCK_ITEM = /^\t([A-Za-z_]\w*)\s+(struct|interface)\b/gm;
+const GO_TYPE_BLOCK_CLOSE = /^\)/gm;
+
+/** `type (` 块的内部区间（`[start, end)` 偏移）。没有闭合的块算到文件尾。 */
+function goTypeBlocks(masked: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  GO_TYPE_BLOCK_OPEN.lastIndex = 0;
+  for (let m = GO_TYPE_BLOCK_OPEN.exec(masked); m !== null; m = GO_TYPE_BLOCK_OPEN.exec(masked)) {
+    const start = m.index + m[0].length;
+    GO_TYPE_BLOCK_CLOSE.lastIndex = start;
+    const close = GO_TYPE_BLOCK_CLOSE.exec(masked);
+    const end = close === null ? masked.length : close.index;
+    out.push([start, end]);
+    if (close !== null) GO_TYPE_BLOCK_OPEN.lastIndex = end;
+  }
+  return out;
+}
+
+/**
+ * `.go`：函数、方法、结构体、接口（2026-11-08；起因是后端 35 条需求对材料无话可说）。
+ *
+ * 方法名写成 `Recv.Name`（`Server.Handle`）：`apisrv/service/` 里 `Handle`、`List`、
+ * `Get` 这类名字会在十几个 receiver 上重复出现，只留 `Handle` 的材料说不出「谁的 Handle」。
+ *
+ * 先 `maskCode(…, { rawBacktick: true })`：Go 仓里最常见的假声明是注释掉的旧接口
+ * （`// func CreateFolder(`）与 SQL/JSON 字符串里的 `type X struct`。抹成空格保留换行，
+ * 所以 `line` 仍是全文行号，`grep -n` 对得上。
+ */
+function goOutline(text: string): OutlineNode[] {
+  const masked = maskCode(text, { rawBacktick: true });
+  const hits: Array<{ index: number; kind: OutlineNode['kind']; name: string }> = [];
+
+  GO_METHOD.lastIndex = 0;
+  for (let m = GO_METHOD.exec(masked); m !== null; m = GO_METHOD.exec(masked)) {
+    const name = (m[2] ?? '').trim();
+    if (name === '' || name === 'init') continue;
+    hits.push({ index: m.index, kind: 'go-method', name: `${m[1] ?? ''}.${name}` });
+  }
+  GO_FUNC.lastIndex = 0;
+  for (let m = GO_FUNC.exec(masked); m !== null; m = GO_FUNC.exec(masked)) {
+    const name = (m[1] ?? '').trim();
+    // `func init()` 是包的初始化钩子，不是「这个仓提供的能力」。
+    if (name === '' || name === 'init') continue;
+    hits.push({ index: m.index, kind: 'go-func', name });
+  }
+  const typeHit = (index: number, name: string, keyword: string): void => {
+    if (name === '') return;
+    hits.push({ index, kind: keyword === 'struct' ? 'go-struct' : 'go-iface', name });
+  };
+  GO_TYPE.lastIndex = 0;
+  for (let m = GO_TYPE.exec(masked); m !== null; m = GO_TYPE.exec(masked)) {
+    typeHit(m.index, (m[1] ?? '').trim(), m[2] ?? '');
+  }
+  for (const [start, end] of goTypeBlocks(masked)) {
+    const block = masked.slice(start, end);
+    GO_TYPE_BLOCK_ITEM.lastIndex = 0;
+    for (let m = GO_TYPE_BLOCK_ITEM.exec(block); m !== null; m = GO_TYPE_BLOCK_ITEM.exec(block)) {
+      typeHit(start + m.index, (m[1] ?? '').trim(), m[2] ?? '');
+    }
+  }
+
+  hits.sort((a, b) => a.index - b.index);
+  return hits.map((hit) => ({ kind: hit.kind, name: hit.name, line: lineAt(masked, hit.index) }));
+}
+
 /**
  * 一个文件的结构轮廓（Task 2 / 2b）。
  *
@@ -884,8 +1007,15 @@ function symbolOutline(text: string): OutlineNode[] {
  * - `.tsx` / `.jsx`：JSX 里的大写标签（先剥注释与字符串，见 `maskCode`）；
  * - `.ts`：`export` 出来的函数与常量，kind 记 `symbol`（`.ts` 编译不过 JSX）。
  * 行号一律给全文行号（`grep -n` 对得上），不是块内偏移。
+ *
+ * 2026-11-08 加第四条：`.go` 走 `goOutline`（`func` / 方法 / `struct` / `interface`）。
+ * 起因是一张实测账单：索引只认 `.ts/.tsx/.js/.jsx/.vue` 与 `pages.json`，于是
+ * `123pan-gateway` 接进来、同步绿了、覆盖率 `0/49`——79 个 Go 仓一个都没接；而 35 条
+ * 活需求挂着 `backend` 平台，材料对它们一个字都说不出来。`_test.go` 在 `isIndexable`
+ * 那一层就被挡掉了，这里再挡一次：`outlineOf` 是公开函数，别的调用方可能直接喂它。
  */
 export function outlineOf(path: string, text: string): OutlineNode[] {
+  if (/\.go$/i.test(path)) return GO_TEST_FILE.test(path) ? [] : goOutline(text);
   if (/\.vue$/i.test(path)) return vueOutline(text);
   if (/\.[jt]sx$/i.test(path)) return jsxOutline(text);
   if (/\.ts$/i.test(path)) return symbolOutline(text);
@@ -967,10 +1097,27 @@ export function parseBlob(text: string, path: string, fullText: string = text): 
   if (routes.length > 0) {
     for (const [name, spec] of localNames(text)) locals[name] = spec;
   }
+  /**
+   * **Go 的 `imports` 一律留空**（2026-11-08 的裁决），理由不是懒：
+   *
+   * `imports` 这张图是 `path → 仓内**文件**路径`，而 Go 的导入单位是**包（一个目录）**。
+   * `apisrv` 的 import 写的是完整模块路径
+   * （`codeup.aliyun.com/…/123pan/apisrv/app/grpcserver`），要落地必须先把模块路径
+   * 去掉前缀——而模块根不一定是仓根（`cmd/x/go.mod` 这种多模块仓），前缀还随 `go.mod`
+   * 的 `module` 行变。落地之后拿到的仍是一个目录，目录里有 N 个文件，随便挑一个写进
+   * `imports` 就是**编一条边**：`importedBy` 会照着这条假边给「改它会波及几个页面」下
+   * 结论。这个仓已经被一个「猜」出来的 matcher 坑过一次（`resolveSpecifier` 的后缀
+   * 兜底就是这么来的：只在唯一命中时才采纳），所以 Go 这一半宁可空着：
+   * 一条错的边比缺一条边糟。
+   *
+   * 空着意味着：Go 文件的定位只能靠「目录/文件名 + outline」，走不了一跳图。这是
+   * 已知且被接受的上限，`docs/superpowers/plans/2026-11-08-go-parser.md` 写了代价。
+   */
+  const specs = lang === 'go' ? [] : importSpecs(text);
   return {
     lang,
     symbols: exportsOf(text, `index.${lang}`),
-    refs: { specs: importSpecs(text), locals, routes },
+    refs: { specs, locals, routes },
     outline: outlineOf(`index.${lang}`, fullText),
     // 进索引的 json 只有 `pages.json`（见 `isIndexable`），所以这里用它的名字问一次。
     pages: lang === 'json' ? pagesFromConfig('pages.json', fullText) : [],
@@ -1006,6 +1153,11 @@ export function assembleIndex(input: AssembleInput): CodeIndex {
   const imports: Record<string, string[]> = {};
 
   for (const source of input.sources) {
+    // 生产路径（`index-store.ts`）在**读内容之前**就用 `isIndexable` 筛过一遍，所以这里
+    // 只对纯函数调用方（`extractIndex`）起作用。仍然要判：`_test.go` 一旦被手工塞进来，
+    // 它没有 outline、却会因为文件名进 `files`，于是 `locate` 拿「folder_test」命中
+    // 「文件夹」这个词，材料照着说「已有这个能力」——那是把测试当产品。
+    if (!isIndexable(source.path)) continue;
     const kind = classifyKind(source.path);
     if (kind === 'other') continue;
     files[source.path] = { kind, exports: source.symbols, size: source.size };
