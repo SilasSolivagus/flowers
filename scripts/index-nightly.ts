@@ -33,6 +33,7 @@ import { db, pool } from '../src/db/client.js';
 import { head } from '../src/core/codemirror/mirror.js';
 import { resolveMirrorConfig } from '../src/core/codemirror/mirror.js';
 import { checkMirrorFreshness, recordMirrorHealth } from '../src/core/codemirror/health.js';
+import { readRepoInventory } from '../src/core/codemirror/repo-inventory.js';
 import { REPO_ROOT, dataLayout } from '../src/core/runtime-dir.js';
 
 const TSX = path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
@@ -105,6 +106,46 @@ async function main(): Promise<number> {
     });
     console.error(`读不到镜像配置：${config.message}`);
     return 2;
+  }
+
+  // 清单 vs 设置的漂移：这一层**仍然按设置跑**（`resolveMirrorConfig()` 是唯一权威：
+  // 传输方式、path 都在那一份里），但清单是「人以为有哪些仓」的那份。两者不一致时，
+  // 夜里的日志必须说出来——2026-11-08 的 `123pan-cross-frontend` 正是「设置里有、
+  // shell 数组里没有」：服务器不抓、镜像停在 10-21，而这里一片绿。
+  //
+  // 只记一行、不改退出码：这是**告警**（下一步是跑 `scripts/repos-apply.ts`），
+  // 不是这次的同步失败——把告警塞进退出码会让「3 = 至少一个仓失败」这句话变模糊。
+  try {
+    const inventory = await readRepoInventory();
+    if (inventory.ok) {
+      const listed = inventory.data.inventory.repos.map((entry) => entry.id);
+      const configured = config.data.repos.map((repo) => repo.id);
+      const missing = listed.filter((id) => !configured.includes(id));
+      const extra = configured.filter((id) => !listed.includes(id));
+      if (missing.length > 0 || extra.length > 0) {
+        const detail = [
+          missing.length === 0 ? '' : `清单有、设置没有：${missing.join('、')}`,
+          extra.length === 0 ? '' : `设置有、清单没有：${extra.join('、')}`,
+        ].filter((part) => part !== '').join('；');
+        writeRow(log, {
+          ts: new Date().toISOString(), repo: '(inventory)', sha: null, newBlobs: null, ms: 0,
+          error: `${detail}（跑 scripts/repos-apply.ts 对齐）`,
+        });
+        console.error(`仓清单与设置漂移：${detail}`);
+      }
+    } else {
+      // 清单读不到不算失败（可能还没建），但要说一句：这个检查从此是瞎的。
+      writeRow(log, {
+        ts: new Date().toISOString(), repo: '(inventory)', sha: null, newBlobs: null, ms: 0,
+        error: `读不到仓清单，漂移检查跳过：${inventory.message}`,
+      });
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    writeRow(log, {
+      ts: new Date().toISOString(), repo: '(inventory)', sha: null, newBlobs: null, ms: 0,
+      error: `漂移检查出错（不影响本轮同步）：${detail}`,
+    });
   }
 
   let failed = 0;

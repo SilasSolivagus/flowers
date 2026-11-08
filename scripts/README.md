@@ -1,22 +1,37 @@
-# scripts/ 里两个夜间任务
+# scripts/ 里的夜间任务与批量接入
 
-两件事，一个目的：**材料上那句「代码快照」必须是真的**。
+两件事，一个目的：**材料上那句「代码快照」必须是真的**；再加一层「仓多起来之后
+哪些仓、按什么顺序进来」。
 
 ```
-05:05（dogyun）  scripts/sync-mirrors.sh     镜像仓 master 跟上 codeup
+05:05（dogyun）  scripts/sync-mirrors.sh     清单里每个仓的分支跟上 codeup
 05:10（本机）    scripts/index-nightly.sh    新提交的静态索引进本地 Postgres
+手工/分批        scripts/onboard-repos.ts    建镜像 + 索引 + 覆盖率（repo_coverage）
+手工/改清单后    scripts/repos-apply.ts      config/repos.txt → code.mirror.repos
 ```
+
+仓清单只有一份：`config/repos.txt`（见下一节）。
 
 两边都是**仓库里的脚本**（本目录），线上/定时器里只装「薄壳或哈希可见的副本」，
 没有第三份手改的版本。
 
+## config/repos.txt（唯一一份仓清单）
+
+「哪些仓」只写在 `config/repos.txt` 里（一行 `仓名<TAB 或空格>分支`，`#` 整行注释）。
+三个读者：服务器上的 `sync-mirrors.sh`、`scripts/repos-apply.ts`（播种设置）、
+`scripts/onboard-repos.ts`（批量接入）。**加一个仓 = 改这个文件 + commit**，脚本一行
+都不用动。格式、校验、加仓步骤见文件头的注释。
+
 ## sync-mirrors.sh（服务器）
 
-在 `dogyun` 上以 root 跑，把 `123pan-pc` / `123pan-uni-app` 的 `master` 从 codeup
-fetch 进 `/srv/123pan-mirror/<repo>.git`（bare），用 CAS（`update-ref` 带旧值）更新
-本地 `master`，然后把写位收回（目录 555 / 文件 444，owner root）——这两个仓被
-flowers 的走查/评审**只读**读取，同步完就不该再有人能改。
+在 `dogyun` 上以 root 跑，读**脚本旁边的 `repos.txt`**（`install-cron.sh --server`
+把 `config/repos.txt` 与脚本一起 rsync 过去：`/opt/123pan/tools/_ro/`），把清单里
+每个仓的**清单里写的分支**从 codeup fetch 进 `/srv/123pan-mirror/<仓名>.git`（bare），
+用 CAS（`update-ref` 带旧值）更新本地同名 ref，然后把写位收回（目录 555 / 文件 444，
+owner root）——这些仓被 flowers 的走查/评审**只读**读取，同步完就不该再有人能改。
 
+- 清单：默认「脚本旁边那份」，`REPOS_FILE` 可整条覆盖；清单坏了在锁之前就 rc=2
+  （一行坏就整份作废：半份仓库列表比没有更糟）
 - 日志：`/var/log/sync-flowers-mirror.log`（`SYNC_FLOWERS_LOG` 可改）
 - 锁：`/var/lock/sync-flowers-mirror.lock`（`flock -n`，抢不到退出 0 并留一行
   `skip: another sync is running`）
@@ -28,7 +43,7 @@ flowers 的走查/评审**只读**读取，同步完就不该再有人能改。
 **它必须跑在服务器上**，所以本仓库这一份会被 rsync 过去：
 
 ```bash
-scripts/install-cron.sh --server   # rsync + chmod 755 + 备份 crontab + 追加 cron 行
+scripts/install-cron.sh --server   # rsync 脚本 + repos.txt（各打两边 sha256）+ 备份 crontab + 追加 cron 行
 scripts/install-cron.sh --check    # 比两边 sha256、看 cron 行是否在
 scripts/install-cron.sh --remove   # 删 cron 行与副本
 ```
@@ -43,6 +58,10 @@ scripts/install-cron.sh --remove   # 删 cron 行与副本
 读 `app_settings.code.mirror.repos`（解析复用 `src/core/codemirror/mirror.ts` 的
 `resolveMirrorConfig()`，**不硬编码仓名**），对每个仓 `head()` → `scripts/index-sync.ts
 --sha <sha> --json`，一行一仓追加到日志。
+
+日志里还会多一行 `(inventory)`：清单与 `code.mirror.repos` 不一致时告警（**不改退出码**
+——下一步是跑 `scripts/repos-apply.ts`）。2026-11-08 的 `123pan-cross-frontend` 就是
+「设置里有、shell 数组里没有」漏掉的，这条告警专门盯这一类漂移。
 
 - 日志：`~/Library/Application Support/flowers/logs/index-nightly.log`
   （`FLOWERS_INDEX_LOG` 可改）；launchd 的 stdout/stderr 另有一份 `.launchd.log`
@@ -70,6 +89,38 @@ scripts/install-cron.sh --remove   # bootout + 删 plist（日志与索引数据
 
 plist 里是 `StartCalendarInterval` Hour=5 Minute=10，等价于 `10 5 * * *`。
 
+## repos-apply.ts（清单 → 设置）
+
+```bash
+npx tsx scripts/repos-apply.ts --dry-run   # 只看 diff（+ / - / ~ / ↕）
+npx tsx scripts/repos-apply.ts             # 写进 app_settings.code.mirror.repos
+```
+
+写之前先过 `parseRepos()`（与读侧同一个解析器），写之后再用 `resolveMirrorConfig()`
+读一遍：**「写进去的东西读不回来」在构造上不可能发生**。环境里有人钉了
+`FLOWERS_MIRROR_REPOS` 时，读侧看到的不是设置那一份——脚本会当场指出（这是最常见的
+「两边不一致」）。退出码：`0` 成功（含已经一致）/ `2` 清单或现状不合法 / `1` 写库失败。
+
+## onboard-repos.ts（批量接入 + 覆盖率）
+
+```bash
+npx tsx scripts/onboard-repos.ts                 # 全清单，断点续跑
+npx tsx scripts/onboard-repos.ts --limit 10      # 只做前 10 个待做的（分批上线）
+npx tsx scripts/onboard-repos.ts --budget-gb 20  # 这一批最多占 20 GB
+npx tsx scripts/onboard-repos.ts --force         # 同 HEAD 也重测
+```
+
+每个仓：确保镜像在服务器上存在（缺了就从 codeup `clone --mirror`，**先 clone 到
+`<path>.tmp-onboard` 再 mv**，避免半成品 bare 仓被下一次当成「已存在」）→ 读 HEAD →
+增量索引（`syncRepoIndex`，与 `index-sync.ts` 同一个函数）→ 量覆盖率 → 写
+`repo_coverage`（迁移 0033）一行。一个仓失败**不打断**这一批（记 `ok=false` + 中文原因），
+结尾点名全部失败并 `exit 3`。同 HEAD 且上一轮 ok 的仓跳过（`--force` 才重测）。
+
+磁盘闸：clone 之前用 `df` 的可用空间减掉「这一批还要」判水位（默认 10 GB，
+`--floor-gb` 可调）。首轮没有实测样本时**只测量不拦**并告警——用猜出来的均值去拦
+139 个仓，比不拦更容易误判。退出码：`0` 全成功 / `3` 至少一个仓失败 / `2` 清单、
+配置或 ssh 读不到。
+
 ## 手工验证
 
 ```bash
@@ -95,6 +146,10 @@ scripts/install-cron.sh --check
 - 镜像本身依赖 codeup 可达：2026-11-08 09:45 的一次手工跑里，`123pan-pc` 就因为
   `Could not resolve host` 失败过一次（同一分钟内重跑成功）。脚本对这种情况是
   「一个仓失败不拖另一个 + 退出 3」，所以**要有人看日志**才知道那一夜少了一仓。
-- `/srv/123pan-mirror/123pan-cross-frontend.git` 不在 `sync-mirrors.sh` 的白名单里
-  （本轮只要求 pc / uni-app），它的 HEAD 仍是 `aefda58`（2026-10-21），而
-  `code.mirror.repos` 里有它——索引会照它算，材料里也会照它写快照日期。
+- 「同步脚本的仓列表」与「设置里的仓列表」曾经是两份（`REPOS=(…)` vs
+  `code.mirror.repos`），`123pan-cross-frontend` 因此从 2026-10-21 一直没抓。
+  现在两份由 `config/repos.txt` 统一，`index-nightly` 里那条 `(inventory)` 告警盯漂移；
+  但**漂移仍要人去跑 `repos-apply.ts`**——这一层不自动改设置。
+- 新接入的 `123pan-agent-tracker`（HEAD 2026-08-28）与 `123pan-gateway`（2026-09-20）
+  的 `master` 本身就旧，按 0031 的判据它们每天都会触发一条 `mirror.stale`。这不是接入
+  出错，是那两个仓真的没动。
