@@ -527,3 +527,139 @@ export function knownSurfaces(
     note: total <= limit ? null : `页面数超过上限，只列了前 ${limit} 个（共 ${total} 个）`,
   };
 }
+
+// ─── 正文与脚注：产品语言 vs 代码坐标（2026-11-09 的产品决定）────────────────
+//
+// owner 读了一份真实材料，把这句话退回来了：
+//
+//   「落点是 `service/cdn_link.go:382` 的 `(*cdnLink).getUserCustomDomainIsShortLink`
+//    私有方法，改动面在 `service/cdn_link.go` 及其调用方，不在 `component/`」
+//
+// 他的原话是「这种好像也不对吧 得是产品语言吧」。读者是功能线/商业线负责人与 PM，
+// 他们会**跳过**任何一句「文件路径 + Go 方法名」。这件事不是措辞偏好，是材料的读者变了：
+// 同一句话对研发是信息，对 PM 是一段噪音——而他连噪音都读不到，因为他在第一行就翻页了。
+//
+// 所以材料改成**两层**，而且是**位置**上的两层（不是两个渠道）：
+// 1. **正文** = 产品语言：说清「产品的哪一部分变了、用户会看到什么」，用需求自己的词；
+// 2. **末尾** = 「研发参考」小节：坐标（`仓:路径:行号 符号`）与受影响文件数。
+//
+// 三条硬规矩（改字之前先读）：
+// 1. **坐标是证据，不是结论**。正文里出现路径/函数名/行号 = 违规，由机器拦（见
+//    `uemaster/body-language.ts`），不靠模型自觉——2026-11-09 那次正是「只写在提示词里」
+//    所以没拦住。
+// 2. **没有可引的坐标就整段不写**（`referenceLines` 返回空数组，`injectReference` 原样返回）。
+//    绝不写「研发参考：无」——与「同类先例」「最近改动」同一个纪律：给「没有」编一句话，
+//    读者会以为「查过了，确实没有」。
+// 3. **这一节只放证据，不放判断**。它不解释影响面、不建议改法：一句话说清「哪个文件的
+//    哪一行有这个东西」，其余留给要动手的人。
+
+/** 「研发参考」小节的标题（材料里最后一个标题，字号最小）。 */
+export const REFERENCE_TITLE = '研发参考';
+
+/** 受影响文件数那一行的前缀。 */
+export const REFERENCE_FILES_PREFIX = '受影响文件：';
+
+/**
+ * 提示词里那个**正例**：一条后端需求的产品语言写法。
+ *
+ * 为什么它必须进提示词而不是只留在报告里：模型没有「PM 会跳过什么」这个概念，它只知道
+ * 「我读过代码，把结论说清楚」。给一个具体句子，它才知道目标长什么样——这比十条禁令有用。
+ */
+export const PRODUCT_BODY_EXAMPLE =
+  '这条需求改的是「自定义域名备案失效」的判定规则：系统现在能判断某个自定义域名是否已备案，'
+  + '缺的是失效后主动告警。不涉及界面，用户侧看不到变化。';
+
+/**
+ * 提示词里的**反例**：owner 退回来的那一句（逐字）。
+ *
+ * 反例比正例更能定住边界：模型很容易把「引用代码」写成这种形状，而它读起来完全像一条
+ * 严谨的结论——所以它必须被点名说「这就是要删掉的东西」。
+ */
+export const PRODUCT_BODY_ANTI_EXAMPLE =
+  '落点是 `service/cdn_link.go:382` 的 `(*cdnLink).getUserCustomDomainIsShortLink` 私有方法，'
+  + '改动面在 `service/cdn_link.go` 及其调用方，不在 `component/`';
+
+/**
+ * 两层的规矩（提示词片段，**每一份材料**的提示词都带它）。
+ *
+ * 为什么这段文字住在 `copy.ts` 而不是散在三个提示词里：这与 `ABSENT_LINE` 那几句同一个
+ * 理由——一处措辞、一处口径。三个提示词各写一遍，改一次就漂一次，而漂的那一份恰好不会
+ * 被用例发现（它只是「提示词里少了一句话」）。
+ */
+export const PRODUCT_BODY_RULE: readonly string[] = [
+  '',
+  '【正文必须是产品语言】这份材料的读者是功能线/商业线负责人与 PM，他们会跳过任何一句',
+  '「文件路径 + 函数名」。所以分两层写：',
+  '  · **正文**（结论、差异说明、标注、页面文案）用产品语言：说清「产品的哪一部分变了、',
+  '    用户会看到什么」，用这条需求自己的词（功能名、页面名、状态名）。',
+  '  · 正文里**不许**出现：文件路径（`service/x.go`、`src/pages/a.tsx`）、函数或方法名、',
+  '    行号（`xxx.go:382`），也不许用反引号把这类标识符包起来。',
+  '  · 代码坐标是**证据**，不是结论：它们由系统自动放进材料末尾的「研发参考」小节，',
+  '    你不要在正文里写，写了会被机器删掉。',
+  '  · 这条规则**不改变结论本身**：「代码没读到 / 没找到 / 最可能的位置（待确认）」这三种',
+  '    说法照旧（它们说的是证据够不够，与坐标无关）。',
+  '正例（照这个语气写）：',
+  `  ${PRODUCT_BODY_EXAMPLE}`,
+  '反例（这句话会被机器拦掉，别写）：',
+  `  ${PRODUCT_BODY_ANTI_EXAMPLE}`,
+];
+
+/** 一行坐标：仓、仓内路径、可选的行号与符号。 */
+export type CodeRef = {
+  /** 配置里的仓名（`123pan-pc` / `apisrv`）。 */
+  repo: string;
+  /** 仓内相对路径（`service/cdn_link.go`）。 */
+  path: string;
+  /** 1 起算的行号。不知道就不给——不猜一个「大概在第几行」。 */
+  line?: number | null;
+  /** 符号名（`GetUserCustomDomainIsShortLink`）。不知道就不给。 */
+  symbol?: string | null;
+};
+
+/** 坐标 → 材料里的一行（`apisrv:service/cdn_link.go:382 GetUserCustomDomainIsShortLink`）。 */
+export function referenceLine(ref: CodeRef): string {
+  const line = typeof ref.line === 'number' && Number.isFinite(ref.line) && ref.line > 0
+    ? `:${ref.line}`
+    : '';
+  const symbol = (ref.symbol ?? '').trim();
+  return `${ref.repo}:${ref.path}${line}${symbol === '' ? '' : ` ${symbol}`}`;
+}
+
+/**
+ * 一批坐标 → 「研发参考」小节的正文行（**空数组 = 整节不写**）。
+ *
+ * 两条口径：
+ * 1. **去重、保持首次出现的顺序**：同一个文件被两条结论引用时只写一次——这一节是证据
+ *    清单，不是又一次论证；顺序跟着结论走，读者能对上。
+ * 2. **受影响文件数只数路径**：同一个文件的三个符号是**一个**文件。这个数是
+ *    「材料引用到了几个文件」，不是「这次改动要改几个文件」（后者只有研发知道，
+ *    而我们没有资格替他估）。
+ */
+export function referenceLines(refs: readonly CodeRef[], extra: readonly string[] = []): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const paths = new Set<string>();
+  for (const ref of refs) {
+    const repo = ref.repo.trim();
+    const path = ref.path.trim();
+    if (repo === '' || path === '') continue;
+    const line = typeof ref.line === 'number' && ref.line > 0 ? ref.line : null;
+    const symbol = (ref.symbol ?? '').trim() === '' ? null : (ref.symbol ?? '').trim();
+    const key = `${repo}\u0000${path}\u0000${line ?? ''}\u0000${symbol ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    paths.add(`${repo}\u0000${path}`);
+    lines.push(referenceLine({ repo, path, line, symbol }));
+  }
+  // 从正文里搬过来的坐标（`body-language.ts` 删掉的那些子句）：它们可能不带仓名
+  // （模型写的是 `service/cdn_link.go:382`），所以**不进「受影响文件」的计数**——
+  // 拿一个缺了一半的坐标去数文件，会数出一个比真实值小的数，而那个数会被当成结论。
+  for (const line of extra) {
+    const text = line.trim();
+    if (text === '' || lines.includes(text)) continue;
+    lines.push(text);
+  }
+  if (lines.length === 0) return [];
+  if (paths.size > 0) lines.push(`${REFERENCE_FILES_PREFIX}${paths.size} 个`);
+  return lines;
+}

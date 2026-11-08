@@ -12,7 +12,9 @@ import { makeTrace, type Trace } from './attempts.js';
 import { typeLabel } from '../requirements/type.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
-import { EMPTY_SURFACES, type KnownSurface, type KnownSurfaces } from '../locate/copy.js';
+import { EMPTY_SURFACES, PRODUCT_BODY_RULE } from '../locate/copy.js';
+import type { KnownSurface, KnownSurfaces } from '../locate/copy.js';
+import { relocateHtmlBody } from './body-language.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
@@ -358,6 +360,8 @@ export function flowPrompt(
     ' 5. 节点文案用中文，一行不超过 12 个汉字；要换行就用 <br>。',
     ' 6. 禁止：subgraph、style、classDef、click、%% 注释、emoji、括号里套引号、',
     '    任何解释性文字（不要「以下是流程图」这类开场白）。',
+    ' 6b. 节点文案是**产品语言**：写用户在做什么（「选择要分享的文件」），不要写文件路径、',
+    '    函数名或行号——读者是 PM，代码坐标由系统放进材料末尾的「研发参考」，不写进图里。',
     ' 7. 不要 ``` 代码围栏。第一行就是 flowchart TD，最后一行是最后一条连线。',
     '',
     '只输出 mermaid 源码本身。',
@@ -511,6 +515,7 @@ export function fragmentsPrompt(
     '流程图已经定稿，节点清单（id / 形态 / 文案）：',
     list,
     ...fragmentsSurfacesBlock(known),
+    ...PRODUCT_BODY_RULE,
     '',
     '请为每个节点交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
     ' 1. 设备框就是用户的手机屏幕或浏览器窗口：框里每一段文字都必须是上线后用户真的会看到的内容。',
@@ -586,6 +591,7 @@ export function fragmentsRepairPrompt(
     '节点清单（id / 形态 / 文案，一个都不能少）：',
     nodes.map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`).join('\n'),
     ...fragmentsSurfacesBlock(known),
+    ...PRODUCT_BODY_RULE,
     '',
     '重发**完整**的 JSON，形状不变：',
     '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]]}]}',
@@ -1203,7 +1209,19 @@ export async function composeEvaluation(
 
   const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, `${stage}.html`);
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, built.html, 'utf8');
+  /**
+   * 正文那一层（2026-11-09）：页面片段与标注都是给 PM 读的，所以先过 `relocateHtmlBody`
+   * 把代码坐标剥掉。**这一条路没有「研发参考」**：评估的输入是需求本身（PRD 只是额外
+   * 依据），它**不读代码**，因此没有任何一个坐标是经过核对的。
+   *
+   * 于是这里只剥、不搬：被剥掉的那些路径不能出现在末尾的「研发参考」里——那一节是给
+   * 研发照着点开的证据，而这一条路上它们全是模型的想象（它连仓都没读）。把想象写成
+   * 证据，比正文里有一句研发黑话坏得多。剥掉之后正文就只剩产品语言，这正是评估材料
+   * 该有的样子；确实需要坐标的读者去看评审或走查材料。
+   */
+  const dropped: string[] = [];
+  const html = relocateHtmlBody(built.html, dropped);
+  await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
   const artifact = await attachArtifact(db, actor, { requirementId, stage, url, inputHash });

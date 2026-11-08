@@ -25,6 +25,11 @@ import { expandedKeywords, locateFromStructure, type ExpandFn } from '../locate/
 import type { LocateResult } from '../locate/types.js';
 import { recencyOf, topRecent } from '../locate/recency.js';
 import { keywordsFrom, prdVersionOf, renderLocate } from './inspect.js';
+import {
+  PRODUCT_BODY_RULE, referenceLines, type CodeRef,
+} from '../locate/copy.js';
+import { injectReference } from '../locate/reference.js';
+import { relocateHtmlBody } from './body-language.js';
 import { withRecency, withSnapshots } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
@@ -395,6 +400,14 @@ export type Baseline = {
   /** 每个仓库 HEAD 上的路径集合，校验代码证据用。 */
   trees: Map<string, Set<string>>;
   /**
+   * 每个仓库的结构索引（`repo` → `CodeIndex`）。
+   *
+   * 为什么要跟着 `Baseline` 走到写盘那一步：末尾的「研发参考」要把 `仓:路径:行号 符号`
+   * 写出来，而**行号与符号只有索引知道**。重新建一次索引是白花 0.5–1 秒 × 仓数的钱，
+   * 而且换一次读就可能与材料里的结论不是同一棵树。这里直接带上已经用过的那一份。
+   */
+  indexes: Map<string, CodeIndex>;
+  /**
    * 这一次定位的结论（三种里的哪一种）。材料里那句话由 `renderLocate` 渲染，
    * 但结论本身也要交出去：用例与留痕要能分开断言「没读到」与「没有」，
    * 而两者的 `text` 只是一句话的差别，靠读字符串分辨迟早会被改坏。
@@ -537,7 +550,9 @@ export async function gatherBaseline(
   if (!inputs.ok) {
     // 代码本身没读到：`renderLocate` 用默认的 `origin: 'code'`，第一句是「代码没读到」。
     const located: LocateResult = { kind: 'absent', why: inputs.why };
-    return { text: renderLocate(located), repos: [], trees: new Map(), locate: located };
+    return {
+      text: renderLocate(located), repos: [], trees: new Map(), indexes: new Map(), locate: located,
+    };
   }
 
   // 回落值取**全量** markdown，不是提示词里那份截断过的 `prd.text`：关键词只要词，
@@ -558,6 +573,7 @@ export async function gatherBaseline(
       text,
       repos: inputs.repos.map(({ id, sha, date }) => ({ id, sha, date })),
       trees: inputs.trees,
+      indexes: new Map(inputs.entries.map((entry) => [entry.repo, entry.index])),
       locate: located,
     };
   }
@@ -591,6 +607,7 @@ export async function gatherBaseline(
     text,
     repos: inputs.repos.map(({ id, sha, date }) => ({ id, sha, date })),
     trees: inputs.trees,
+    indexes: new Map(inputs.entries.map((entry) => [entry.repo, entry.index])),
     locate: located,
   };
 }
@@ -638,6 +655,8 @@ export function findingsPrompt(req: RequirementRow, prd: ReviewPrd, nodes: FlowN
     '  这三类的 code 形如 { "repo": "123pan-pc", "path": "src/pages/x.ts" }，',
     '  path 必须是上面现状里**出现过的**那个文件（我们会逐条核，编的整条丢掉）。',
     '  没有可指的现状文件时，不要用这三类。',
+    '',
+    ...PRODUCT_BODY_RULE,
     '',
     '硬性要求（逐条会被机器核对）：',
     ' 1. quote 必须是 PRD 原文里的一整句，**逐字复制**。我们会把它和 PRD 正文逐字比对',
@@ -687,6 +706,8 @@ export function findingsRepairPrompt(
     '',
     '节点清单（id / 形态 / 文案，node 只能取这里的 id）：',
     ...nodeLines(nodes),
+    '',
+    ...PRODUCT_BODY_RULE,
     '',
     '重发**完整**的 JSON，形状不变：',
     '{"findings":[{"type","node","quote","why"}]}',
@@ -970,13 +991,63 @@ export function findingsAnno(own: ReviewFinding[]): Anno[] {
   if (own.length === 0) return [['无问题', '这一步没挑出问题']];
   return own.map((finding): Anno => {
     const head = [...finding.quote].slice(0, QUOTE_EXCERPT).join('');
-    const where = finding.code === undefined ? '' : `（现在：${finding.code.path}）`;
+    // 2026-11-09：「（现在：src/pages/x.tsx）」这一格**删掉了**。右栏是给 PM 读的正文，
+    // 读者看到的第一眼应该是「PRD 要的和现在的不一样」，而不是一个文件路径——路径属于
+    // 材料末尾的「研发参考」（那里连行号与符号一起给研发看）。
+    // 这一格原本是唯一一处**我们自己**往正文里写坐标的地方，所以它在代码里删，不靠提示词。
     const row: [string, string] = [
       REVIEW_TYPE_LABEL[finding.type],
-      safeText(`「${head}」——${finding.why}${where}`),
+      safeText(`「${head}」——${finding.why}`),
     ];
     return row;
   });
+}
+
+/**
+ * 这份材料引用到的**代码坐标**（末尾「研发参考」小节的输入）。
+ *
+ * 来源只有两处，都是我们已经核过的：
+ * 1. 问题清单里那些必须带现状的三类条目（`conflicts_current` / `misses_current_edge` /
+ *    `no_migration`）的 `code`——`path` 已经在镜像里核对过存在（`code_not_found` 会丢条）；
+ * 2. 结构索引给出的候选（`baseline.locate.items`）——它们是「最可能的位置」，也正是
+ *    研发要看的入口。
+ *
+ * 行号与符号**只在索引里有的时候才写**（`index.outline`，见 0032/Go 解析器）：
+ * 宁可行号空着，也不要猜一行——`service/cdn_link.go:382` 这种数一旦编错，
+ * 研发照着点开是另一个函数，这一节就再也没人信了。
+ */
+export function reviewRefs(
+  findings: readonly ReviewFinding[],
+  baseline: Pick<Baseline, 'locate' | 'trees' | 'indexes'>,
+): CodeRef[] {
+  const refs: CodeRef[] = [];
+  const outlineOf = (repo: string, path: string): { line: number; symbol: string } | null => {
+    const nodes = baseline.indexes.get(repo)?.outline[path] ?? [];
+    // 优先函数/方法（研发要动手的地方），再退到结构体/导出符号。
+    const order = ['go-method', 'go-func', 'symbol', 'go-struct', 'go-iface'];
+    for (const kind of order) {
+      const node = nodes.find((item) => item.kind === kind);
+      if (node !== undefined) return { line: node.line, symbol: node.name };
+    }
+    return null;
+  };
+  for (const finding of findings) {
+    if (finding.code === undefined) continue;
+    const path = finding.code.path;
+    const repo = finding.code.repo !== '' ? finding.code.repo : repoOf(path, baseline.trees);
+    if (repo === null) continue;
+    const spot = outlineOf(repo, path);
+    refs.push({ repo, path, line: spot?.line ?? null, symbol: spot?.symbol ?? null });
+  }
+  if (baseline.locate.kind === 'candidates') {
+    for (const item of baseline.locate.items) {
+      const repo = repoOf(item.path, baseline.trees);
+      if (repo === null) continue;
+      const spot = outlineOf(repo, item.path);
+      refs.push({ repo, path: item.path, line: spot?.line ?? null, symbol: spot?.symbol ?? null });
+    }
+  }
+  return refs;
 }
 
 /**
@@ -1305,9 +1376,25 @@ export async function reviewRequirement(
       : [],
     new Date(),
   ));
-  const html = injectBanner(
-    built.html,
-    withRecency(withSnapshots(renderLocate(baseline.locate), baseline.repos), recency),
+  /**
+   * 三段，顺序是硬的（2026-11-09 的两层语言）：
+   * 1. `relocateHtmlBody` — 正文里**不许**有代码坐标（`service/x.go:382`、反引号标识符）。
+   *    它只看 `build.py` 产物里的**文本节点**，被删掉的原句收集进 `moved`，随后搬进
+   *    末尾的「研发参考」。这一道是机器保证，不看模型有没有照提示词做。
+   * 2. `injectBanner` — 顶部的结论 + 代码快照 + 最近改动（`copy.ts` 的措辞）。
+   *    **顺序在剥离之后**：横幅里的候选清单本来就带路径（那是给 PM 拿去催研发的线索），
+   *    它不是正文，不该被这一道删。
+   * 3. `injectReference` — 末尾的「研发参考」：坐标 + 受影响文件数。没有坐标可引时
+   *    （评审落 `absent` / `none`）整节不写。
+   */
+  const moved: string[] = [];
+  const stripped = relocateHtmlBody(built.html, moved);
+  const html = injectReference(
+    injectBanner(
+      stripped,
+      withRecency(withSnapshots(renderLocate(baseline.locate), baseline.repos), recency),
+    ),
+    referenceLines(reviewRefs(found.findings, baseline), moved),
   );
   await writeFile(file, html, 'utf8');
 

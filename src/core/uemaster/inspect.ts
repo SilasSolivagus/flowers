@@ -19,8 +19,11 @@ import { ensureHistory, readHistory, type HistoryRow } from '../locate/history-s
 import { locateFromHistory } from '../locate/history.js';
 import { recencyOf, topRecent, type RecentFile } from '../locate/recency.js';
 import { injectBanner } from '../locate/banner.js';
+import { injectReference } from '../locate/reference.js';
+import { relocateHtmlBody } from './body-language.js';
 import {
   ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
+  PRODUCT_BODY_RULE, referenceLines, type CodeRef,
   withRecency, withSnapshots,
 } from '../locate/copy.js';
 import { recordLocate, type LocateDetail } from '../locate/ledger.js';
@@ -912,6 +915,27 @@ function locateBannerText(
 }
 
 /**
+ * 走查材料引用到的**代码坐标**（末尾「研发参考」的输入）。
+ *
+ * 来源只有一处：结论里那些 evidence 的 `{repo, path}`——它们已经被 `validateStructure`
+ * 拿 `ls-tree` 逐个核对过存在（不存在的会整条退回重答），所以这里不再筛。
+ *
+ * **为什么不带行号与符号**：走查这条路不读结构索引（`structureOf` 只取 HEAD / 树 / 形状，
+ * 见那里的注释），拿不到 `outline` 的行号。宁可行号空着，也不要猜一行——这一节唯一的
+ * 价值是「研发照着点开就是那个东西」，猜错一次它就作废了。（评审那条路有索引，
+ * 所以它的坐标带行号与符号，见 `reviewRefs`。）
+ */
+export function inspectRefs(findings: readonly Finding[]): CodeRef[] {
+  const refs: CodeRef[] = [];
+  for (const finding of findings) {
+    for (const evidence of finding.evidence) {
+      refs.push({ repo: evidence.repo, path: evidence.path });
+    }
+  }
+  return refs;
+}
+
+/**
  * 有仓「没读到」时，把那条硬规则当场写进提示词（没有就一行都不加）。
  *
  * 为什么不把它写死成第 8 条规则、永远出现：模型看到一句与本次输入无关的禁令，会开始
@@ -982,6 +1006,7 @@ export function structurePrompt(
     '      "evidence": [ { "repo": "123pan-pc", "path": "src/pages/share/Share.tsx", "note": "为什么是这条证据" } ] }',
     '  ]',
     '}',
+    ...PRODUCT_BODY_RULE,
     '',
     '规则（逐条会被机器校验）：',
     ` 1. flows 是这条需求**用户实际走的流程**，按顺序 3–${FLOW_CAP} 个；kind 只能 page / decision / system，`,
@@ -1028,6 +1053,8 @@ export function structureRepairPrompt(
     ...repos.flatMap((repo) => locateLines(repo)),
     ...absentRule(repos),
     `（阶段一抽出的关键词（只用于下面的结构摘要，不参与历史检索）：${keywords.join('、')}）`,
+    '',
+    ...PRODUCT_BODY_RULE,
     '',
     '重发**完整**的 JSON，形状不变：',
     '{"flows":[{"id","title","kind"}],"findings":[{"verdict","prd","code","evidence":[{"repo","path","note"}],"searched"}]}',
@@ -1318,6 +1345,11 @@ export function verifyPrompt(
     '流程节点（id / 形态 / 文案）：',
     list,
     '',
+    ...PRODUCT_BODY_RULE,
+    '（上面这段正文规则对 findings 的 prd / code 两格与每个节点的 anno 都成立：anno 写在'
+      + '右栏给 PM 读，说清「这一步与需求对不对得上」，不要贴路径。'
+      + '证据位置由系统写进末尾的「研发参考」。）',
+    '',
     '要交的东西：一个 JSON 对象（不要代码围栏、不要解释），两个键 findings 与 nodes。',
     '',
     'findings：**同一条一条不少**，形状与上面完全一致（verdict / prd / code / evidence / searched）。',
@@ -1373,6 +1405,8 @@ export function verifyRepairPrompt(
     '',
     '流程节点（id / 形态 / 文案，一个都不能少）：',
     flows.map((flow) => `  ${flow.id}  [${flow.kind}]  ${flow.title}`).join('\n'),
+    '',
+    ...PRODUCT_BODY_RULE,
     '',
     '重发**完整**的 JSON，形状不变：{"findings":[{"verdict","prd","code","evidence":[],"searched":[]}],"nodes":[{"id","kind","frame","title","html","anno"}]}',
     'kind=page 给 frame 与 html；kind=system / decision 只给 anno，不要给 html。',
@@ -1778,7 +1812,20 @@ export async function inspect(
   // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
   // 于是评审/走查落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，而 `why`（唯一
   // 能拿去催人的线索）丢了。这一段由代码写死、模型不参与——模型在正文里提没提它都一样。
-  const html = injectBanner(built.html, locateBannerText(repos, recency));
+  /**
+   * 三段，顺序与评审那条路一字不差（`review.ts` 同一处有完整理由）：
+   * 1. `relocateHtmlBody` —— 正文里不许有代码坐标（`service/x.go:382`、反引号标识符）。
+   *    被删掉的原句进 `moved`，随后搬进末尾的「研发参考」。**机器保证**，不看模型脸色。
+   * 2. `injectBanner` —— 顶部结论 + 代码快照 + 最近改动；放在剥离之后，因为横幅里的
+   *    候选清单本来就带路径（那是给 PM 拿去催研发的线索，不是正文）。
+   * 3. `injectReference` —— 末尾「研发参考」：`仓:路径` + 受影响文件数；没坐标整节不写。
+   */
+  const moved: string[] = [];
+  const stripped = relocateHtmlBody(built.html, moved);
+  const html = injectReference(
+    injectBanner(stripped, locateBannerText(repos, recency)),
+    referenceLines(inspectRefs(findings), moved),
+  );
   await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
