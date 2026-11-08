@@ -33,3 +33,34 @@
 123pan-agent-tracker	master
 123pan-gateway	master
 apisrv	master
+
+# ─── 2026-11-08 第二批：清单文档《代码仓库全景图-2026-04-16.md》里的前端的一批（17 个）───
+#
+# 为什么只挑前端、不挑那 79 个 Go 仓：解析器只读 [ts|tsx|js|jsx|vue] 与 `pages.json`。
+# `123pan-gateway`（39 个 .lua）已经证明过代价——镜像建了、同步绿了、索引 **0/49**：
+# 仓进来但不进索引，只会让覆盖率表多 79 行 0，并每月多花几十 GB 磁盘去换一个看不见。
+#
+# 这 17 个名字来自那份文档，而它是**六个月前的产品文档、不是仓注册表**。所以：
+#   - 仓名按文档原样写；远端已经不存在的（`ls-remote` 说 not found）**不删**，
+#     让 onboard-repos.ts 把它们记成 ok=false + 原因（跑一次就知道缺的是哪几个）；
+#   - `platform-fontend` 疑似 `platform-frontend` 的笔误（两种都试过，都不存在）；
+#   - `eslint-config` / `app-ui-test` / `web-ui-test` 是库与测试件，不是应用——按名字照加，
+#     覆盖率表会显示它们「有索引、没有页面」，这是它们该有的样子。
+# 分支一律 master：逐个 `git ls-remote --symref <url> HEAD` 验过，默认分支就是 master。
+frontend	master
+share	master
+phoenix-share	master
+123pan-ssr	master
+123pan-video	master
+123pan_manager_frontend	master
+123pan-ele-react	master
+123pan-resource-library	master
+123pan-virtuallist-antd	master
+123pan-windowsPro	master
+123pan-image-hosting	master
+Nimbus	master
+crazy-api	master
+platform-fontend	master
+eslint-config	master
+app-ui-test	master
+web-ui-test	master
