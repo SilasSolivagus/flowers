@@ -107,7 +107,8 @@ export type ResetOptions = {
  * - 泄漏由它的唯一用户自己收口：`tests/index.test.ts` 在 beforeAll / afterAll 里
  *   按 fixture 仓名 `dropIndex`，跑完不留痕（那里也写着「code_index 不参与 truncate」）。
  * 结论：它不是「忘了清」，是「清了更贵，且有明确的收口人」。要改这条结论，先给
- * 它一个能廉价重建的来源。
+ * 它一个能廉价重建的来源。迁移 0029 的 `blob_index` / `tree_entry` 走同一条判断，
+ * 理由写在下面 `KEPT_TABLES` 的注释里。
  *
  * restart identity 只重置「属于这些表的」序列：events_seq_seq / requirements_number_seq
  * 在迁移 0001 里被 `alter sequence ... owned by ...` 绑到了列上，所以编号会回到 1
@@ -142,8 +143,17 @@ export const RESET_TABLES = [
  * 重建要跑 `scripts/index-repo.ts` 逐个 sha 扫镜像。一次「重灌演示数据」不该付这笔账。
  * 它的泄漏由唯一用户 `tests/index.test.ts` 自己收口（beforeAll / afterAll 按 fixture
  * 仓名 drop）。哪天有人给它加了一条廉价的重建路径，这条结论才值得重新评估。
+ * （2026-11-08 起不再有代码写它，它只是一份历史——留着的成本是零，删掉的成本是一次重扫。）
+ *
+ * `blob_index` / `tree_entry`（迁移 0029）**同一条理由，而且更强**：它们的重建路径是
+ * 「逐个仓 ssh 扫镜像 + 解析」，一次演示重灌更不该付这笔账。但它们和 `code_index`
+ * 有一个关键差别——**它们有明确的、写的一侧收口人**：`tests/index.test.ts` 与
+ * `tests/blob-index.test.ts` 在 beforeAll / afterAll 里按 fixture 仓名
+ * `dropIndex` / 删 `blob_index` 行，跑完不留痕迹。也就是说「不清」不会让下一轮用例
+ * 看到上一轮的残留：会看残留的那几张表（需求/事件/派单）都在 `RESET_TABLES` 里，
+ * 而索引表从来只有 fixture 自己读写。
  */
-export const KEPT_TABLES = ['code_index'] as const;
+export const KEPT_TABLES = ['code_index', 'blob_index', 'tree_entry'] as const;
 
 export async function resetDb(options: ResetOptions = {}): Promise<string> {
   const database = options.guardDatabase ?? await currentDatabase();

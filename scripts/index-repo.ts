@@ -139,10 +139,12 @@ async function main(): Promise<void> {
     + `，走完 ${totalMs} ms${cached === null ? '' : '（库里本来就有）'}`);
   printSummary(resolved.data.index, resolved.data.buildMs, locateMs);
 
+  // 2026-11-08（P4-11）：索引的规模看的是 `blob_index` 的**行数**（内容地址，跨仓共享），
+  // 不是「几份快照」。旧表 `code_index` 已经不再被写，不再报它。
   const rows = await db.execute<{ n: number; bytes: string }>(sql`
-    select count(*)::int as n, coalesce(sum(pg_column_size(code_index)), 0)::text as bytes
-      from code_index`);
-  console.log(`库里共    ${rows.rows[0]?.n ?? 0} 份索引，占 ${rows.rows[0]?.bytes ?? '0'} 字节`);
+    select count(*)::int as n, coalesce(sum(pg_column_size(blob_index)), 0)::text as bytes
+      from blob_index`);
+  console.log(`库里共    ${rows.rows[0]?.n ?? 0} 块已解析内容，占 ${rows.rows[0]?.bytes ?? '0'} 字节`);
 }
 
 await main();

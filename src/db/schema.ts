@@ -639,6 +639,13 @@ export const prdUrlBackfillSeed = pgTable('prd_url_backfill_seed', {
  *
  * 三列都是 `jsonb` 而不是拆成行：这一层只按 `(repo, sha)` 整份读、整份写，
  * 拆表只会多三张要 join 的表，换不来一次更快的查询。
+ *
+ * **2026-11-08（P4-11）起它只读不写，且没有任何代码再写它。** 新的形状是
+ * `blob_index`（内容地址，一份内容只解析一次）+ `tree_entry`（按提交的路径映射），
+ * 见本文件上面那两张表。这张表留着是因为演示库里那 32 行是上一版实测的对照数据，
+ * 删表容易、重建对照要重扫镜像。`repoIndex()` 已经不读它了——**它是一份历史，不是
+ * 缓存**，因此 `reset.ts` 里那条「故意留下」的结论不变（留着不花任何人的时间）。
+ * 等新形状在 139 个仓的规模上站住，下一步的迁移就是 `drop table code_index`。
  */
 export const codeIndex = pgTable('code_index', {
   repo: text('repo').notNull(),
@@ -654,6 +661,53 @@ export const codeIndex = pgTable('code_index', {
 }, (t) => ({
   pk: primaryKey({ columns: [t.repo, t.sha] }),
   byBuiltAt: index('code_index_built_at').on(t.builtAt),
+}));
+
+/**
+ * 静态索引的**内容层**（迁移 0029）：一块 git blob → 它说了什么。
+ *
+ * 主键是 git 的 blob id —— **内容地址**，不是 `(repo, path)`。同一份内容出现在 40 个
+ * 提交里、出现在两个仓里，都只有这一行。旧形状（`code_index`）按 `(repo, sha)` 存整棵
+ * 树的快照，实测一次 1017–1330 ms，且改两个文件也要整份重建；owner 的规划是 139 个仓
+ * 的规模，那笔账按「仓 × 提交」翻倍。这一层把它变成「一次解析、永久复用」。
+ *
+ * `imports` 存的是**未解析的**引用（说明符 / 本地名绑定 / 路由声明），不是解析后的仓内
+ * 路径：解析需要整棵树，而同一块 blob 在两个仓里可能落到不同文件上——把某一仓的布局写进
+ * 共享行，等于让另一个仓读错（详见 `core/codemirror/blob-index.ts` 与迁移 0029 的注释）。
+ *
+ * `parsed_at` 是「这块内容被解析的时刻」：它不变就是没被重新解析，用例靠它钉复用。
+ */
+export const blobIndex = pgTable('blob_index', {
+  /** git blob id（`ls-tree -r -l` 的 oid 列）。**内容地址**：不按 repo、不按 path 分。 */
+  blobSha: text('blob_sha').primaryKey(),
+  /** 第一次见到这块内容时路径的扩展名（`ts` / `vue` / …）。符号抽取只关心它是不是 `.vue`。 */
+  lang: text('lang'),
+  /** 字节数，`CodeIndex.files[].size` 直接取它。 */
+  size: integer('size').notNull(),
+  /** 导出符号名（`["searchFiles","shareLink"]`）。 */
+  symbols: jsonb('symbols').notNull(),
+  /** `{ specs, locals, routes }`：向外的引用，全部**未解析**。 */
+  imports: jsonb('imports').notNull(),
+  parsedAt: timestamp('parsed_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * 静态索引的**提交层**（迁移 0029）：`(repo, commit, path) → blob`。
+ *
+ * 这是唯一按提交存的数据，而且只是一张映射表——一个改了 600 个文件里 2 个的提交只多
+ * 2 行。它不能省：`repoIndex(repo, sha)` 要还原「这个提交上这棵树长什么样」，而这段
+ * 关系只有提交自己知道。
+ *
+ * 噪音路径（`dist/`、`node_modules/`、二进制）**不进这张表**：`lsTreeEntries` 已经滤过，
+ * 而 `CodeIndex` 的解析文件集历来就是那份滤过的清单——把噪音放进来会改变后缀匹配的结果。
+ */
+export const treeEntry = pgTable('tree_entry', {
+  repo: text('repo').notNull(),
+  commitSha: text('commit_sha').notNull(),
+  path: text('path').notNull(),
+  blobSha: text('blob_sha').notNull(),
+}, (t) => ({
+  pk: primaryKey({ name: 'tree_entry_repo_commit_path_pk', columns: [t.repo, t.commitSha, t.path] }),
 }));
 
 /**

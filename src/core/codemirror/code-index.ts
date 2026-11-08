@@ -364,23 +364,53 @@ const ROUTER_TITLE = /\b(?:name|title)\s*:\s*['"]([^'"]+)['"]/;
 const JSON_PATH = /"path"\s*:\s*"([^"]+)"/g;
 const JSON_TITLE = /"navigationBarTitleText"\s*:\s*"([^"]*)"/;
 
+/**
+ * 一条路由的**声明**：键与标题已经读出来了，但 `component` 还没有落到文件上。
+ *
+ * 为什么要把「读」与「解析」拆开（P4-11）：路由声明的全部依据是这块 blob 的内容，
+ * 而落到哪个文件取决于**这一棵树的布局**。前者可以按内容地址缓存一次，后者必须
+ * 每次读的时候现算。`kind` 说明这条声明是用哪种语法读出来的：
+ * - `pages`：uni-app 的 `pages.json`（`"path": "pages/x/y"`，路径本身就是说明符）；
+ * - `router`：React/Vue-Router 的路由表（`path: '/x'` + `component: Ident`）。
+ */
+export type RouteDecl = {
+  kind: 'pages' | 'router';
+  route: string;
+  title: string;
+  /** `component: Ident` / `element: <Ident />` 里的那个标识符；字面量或 json 声明时为空串。 */
+  ident: string;
+  /** `component: './x'` 的字面量，或 `pages.json` 的路径字符串（本身就是一个说明符）。 */
+  spec: string;
+};
+
 /** 一条路由的解析结果：文件可能解不出来（留空，不猜）。 */
 export type ParsedRoute = { route: string; file: string; title: string };
 
 /**
- * React 路由表：`path: '/x'` 后面跟着 `component: Y`（或 `element: <Y />`）。
+ * 路由声明（**不解析**，纯内容）。
  *
- * 为什么在 `path` 之后**开一个窗口**找 `component` 而不是逐行配对：格式化之后
- * 一个路由对象可以写成三行，也可以一行；而 `path` 永远在 `component` 之前
- * （`123pan-pc` 的 `router.js` 就是这样）。窗口 600 字符，够一个路由对象，不够跨到
- * 下一个 `path`（实测下一个 `path` 至少隔着一个 route 对象）。
+ * 为什么按**内容**而不是文件名区分 `pages.json` 与路由表：这块 blob 不知道自己将来
+ * 叫 `pages.json` 还是 `router.js`，而内容寻址要求「同样的内容 = 同样的解析结果」。
+ * 判据是 `"path": "…"`（带引号的键）——react-router 的写法是 `path: '/x'`，两种不会
+ * 互相误判（实测两个仓：`123pan-uni-app/src/pages.json` 有 27 条带引号的，`123pan-pc/
+ * src/router/router.js` 一条都没有）。
  */
-export function parseRouterTable(
-  text: string,
-  resolveId: (name: string) => string | null,
-  files: ReadonlySet<string>,
-): ParsedRoute[] {
-  const out: ParsedRoute[] = [];
+export function routeDecls(text: string): RouteDecl[] {
+  const out: RouteDecl[] = [];
+  JSON_PATH.lastIndex = 0;
+  const isPages = JSON_PATH.exec(text) !== null;
+  if (isPages) {
+    JSON_PATH.lastIndex = 0;
+    for (let m = JSON_PATH.exec(text); m !== null; m = JSON_PATH.exec(text)) {
+      const route = (m[1] ?? '').trim();
+      if (route === '') continue;
+      const window = text.slice(m.index, m.index + 400);
+      const title = JSON_TITLE.exec(window)?.[1] ?? '';
+      out.push({ kind: 'pages', route, title, ident: '', spec: route });
+    }
+    return out;
+  }
+
   ROUTER_PATH.lastIndex = 0;
   for (let m = ROUTER_PATH.exec(text); m !== null; m = ROUTER_PATH.exec(text)) {
     const route = (m[1] ?? '').trim();
@@ -393,16 +423,37 @@ export function parseRouterTable(
     const window = nextPath < 0 ? raw : raw.slice(0, nextPath);
     const comp = ROUTER_COMPONENT.exec(window);
     const element = ROUTER_ELEMENT.exec(window);
-    let file = '';
     const ident = comp?.[1] ?? element?.[1] ?? '';
     const literal = comp?.[2] ?? '';
-    if (literal !== '') {
-      file = resolveSpecifier(literal, '', files) ?? '';
-    } else if (ident !== '') {
-      file = resolveId(ident) ?? '';
-    }
     const title = ROUTER_TITLE.exec(window)?.[1] ?? '';
-    out.push({ route, file, title });
+    out.push({ kind: 'router', route, title, ident, spec: literal });
+  }
+  return out;
+}
+
+/**
+ * React 路由表：`path: '/x'` 后面跟着 `component: Y`（或 `element: <Y />`）。
+ *
+ * 为什么在 `path` 之后**开一个窗口**找 `component` 而不是逐行配对：格式化之后
+ * 一个路由对象可以写成三行，也可以一行；而 `path` 永远在 `component` 之前
+ * （`123pan-pc` 的 `router.js` 就是这样）。窗口 600 字符，够一个路由对象，不够跨到
+ * 下一个 `path`（实测下一个 `path` 至少隔着一个 route 对象）。
+ *
+ * 2026-11-08 起它只是 `routeDecls()` + 一次解析的薄包装：解析这一步必须发生在
+ * 「有一棵树」的地方（`assembleIndex`），所以两件事被拆开了。
+ */
+export function parseRouterTable(
+  text: string,
+  resolveId: (name: string) => string | null,
+  files: ReadonlySet<string>,
+): ParsedRoute[] {
+  const out: ParsedRoute[] = [];
+  for (const decl of routeDecls(text)) {
+    if (decl.kind !== 'router') continue;
+    let file = '';
+    if (decl.spec !== '') file = resolveSpecifier(decl.spec, '', files) ?? '';
+    else if (decl.ident !== '') file = resolveId(decl.ident) ?? '';
+    out.push({ route: decl.route, file, title: decl.title });
   }
   return out;
 }
@@ -415,14 +466,13 @@ export function parseRouterTable(
  */
 export function parsePagesJson(text: string, files: ReadonlySet<string>): ParsedRoute[] {
   const out: ParsedRoute[] = [];
-  JSON_PATH.lastIndex = 0;
-  for (let m = JSON_PATH.exec(text); m !== null; m = JSON_PATH.exec(text)) {
-    const route = (m[1] ?? '').trim();
-    if (route === '') continue;
-    const window = text.slice(m.index, m.index + 400);
-    const title = JSON_TITLE.exec(window)?.[1] ?? '';
-    const file = resolveSpecifier(route, 'pages.json', files) ?? '';
-    out.push({ route, file, title });
+  for (const decl of routeDecls(text)) {
+    if (decl.kind !== 'pages') continue;
+    out.push({
+      route: decl.route,
+      file: resolveSpecifier(decl.spec, 'pages.json', files) ?? '',
+      title: decl.title,
+    });
   }
   return out;
 }
@@ -466,14 +516,88 @@ export type ExtractInput = {
   builtAt?: string;
 };
 
+// ─── 内容事实：一块 blob 说了什么（与路径无关，只与内容有关） ────────────────
+
+/** 路径的扩展名（小写，不带点）。`blob_index.lang` 就是它。 */
+export function langOf(path: string): string {
+  const hit = /\.([A-Za-z0-9]+)$/.exec(path.trim());
+  return hit === null ? '' : (hit[1] ?? '').toLowerCase();
+}
+
 /**
- * 把一批「文件头部」拼成索引。
+ * 一块 blob 向外的**引用**，全部保持未解析：
+ * - `specs`：`import` / `require` / `import()` 的模块说明符（去重、保序）；
+ * - `locals`：默认导入 / `lazy()` / `defineAsyncComponent()` 的本地名 → 说明符
+ *   （路由表 `component: Search` 靠它落回文件，而 `import { Search }` 是命名导入，
+ *   两者混在一起会让路由指到错的文件）；
+ * - `routes`：这块内容里的路由声明（见 `routeDecls`）。
  *
- * 顺序是硬的：先按路径建 `files` 与 `imports`（`imports` 要用全树路径解析），
- * 再解析路由（路由要用 `imports` 的本地名映射）。反过来，`component: Search` 就
- * 落不到文件上。
+ * 为什么一条解析结果都不存：解析要用**整棵树**（别名指向哪、`./x` 相对哪个目录、
+ * 谁的路径以它结尾）。同一块 blob 在两个仓里可能落到不同文件上，把解析结果写进
+ * 共享行就是拿 A 仓的布局去解释 B 仓的代码。代价是读的时候多几十次字符串比较。
  */
-export function extractIndex(input: ExtractInput): CodeIndex {
+export type BlobRefs = {
+  specs: string[];
+  locals: Record<string, string>;
+  routes: RouteDecl[];
+};
+
+/** 一块 blob 的解析结果。**除 `lang` 外不含任何路径信息**，所以可以按内容地址缓存。 */
+export type ParsedBlob = {
+  lang: string;
+  symbols: string[];
+  refs: BlobRefs;
+};
+
+/**
+ * 解析一块 blob。P4-11 的核心：这个函数只吃「内容 + 最后一次决定性的路径信息
+ * （扩展名）」，所以同一份内容在 40 个提交、2 个仓里只跑一次。
+ *
+ * 为什么符号抽取仍然要一个假路径（`index.<lang>`）：`exportsOf` 只在一处用路径——
+ * 判断是不是 `.vue`（`.vue` 的 `<script setup>` 没有 `export`，顶层声明就是它的符号）。
+ * 用 `index.<lang>` 与用真路径的结果**逐字相同**，而前者让「同一内容 → 同一符号表」
+ * 变成不依赖调用顺序的事实。
+ */
+export function parseBlob(text: string, path: string): ParsedBlob {
+  const lang = langOf(path);
+  const routes = routeDecls(text);
+  const locals: Record<string, string> = {};
+  // 本地名映射只对路由表有意义（其它文件的 `import X from 'y'` 不进索引的图），
+  // 而 `localNames` 要逐行扫——不给每块 blob 都付这笔钱。
+  if (routes.length > 0) {
+    for (const [name, spec] of localNames(text)) locals[name] = spec;
+  }
+  return {
+    lang,
+    symbols: exportsOf(text, `index.${lang}`),
+    refs: { specs: importSpecs(text), locals, routes },
+  };
+}
+
+/** 装配要用的一块：路径 + 大小 + 内容事实（`blob_index` 的那三列）。 */
+export type AssembledSource = ParsedBlob & { path: string; size: number };
+
+export type AssembleInput = {
+  repo: string;
+  sha: string;
+  /** 全树路径（用来解析说明符与后缀匹配）。 */
+  all: readonly string[];
+  /** 进了索引的文件，**顺序 = 树序**（`ls-tree` 是路径字典序，路由的去重依赖它）。 */
+  sources: readonly AssembledSource[];
+  builtAt?: string;
+};
+
+/**
+ * 把「一组内容事实」拼成索引（`CodeIndex`）。纯函数，不碰 git、不碰库。
+ *
+ * 这是 P4-11 里唯一一处「解析」与「装配」的分界：`parseBlob` 按内容缓存，
+ * `assembleIndex` 每次读都跑（一次 3–8 ms，实测），因为它必须看着**这一棵树**。
+ *
+ * 顺序是硬的，与旧版逐字一致：先按路径建 `files` 与 `imports`（`imports` 要用全树
+ * 路径解析），再解析路由（路由要用 `locals` 的本地名映射）。反过来，`component: Search`
+ * 就落不到文件上。
+ */
+export function assembleIndex(input: AssembleInput): CodeIndex {
   const fileSet = new Set(input.all);
   const files: Record<string, IndexFile> = {};
   const imports: Record<string, string[]> = {};
@@ -481,13 +605,9 @@ export function extractIndex(input: ExtractInput): CodeIndex {
   for (const source of input.sources) {
     const kind = classifyKind(source.path);
     if (kind === 'other') continue;
-    files[source.path] = {
-      kind,
-      exports: exportsOf(source.text, source.path),
-      size: source.size,
-    };
+    files[source.path] = { kind, exports: source.symbols, size: source.size };
     const resolved: string[] = [];
-    for (const spec of importSpecs(source.text)) {
+    for (const spec of source.refs.specs) {
       const target = resolveSpecifier(spec, source.path, fileSet);
       if (target !== null && target !== source.path && !resolved.includes(target)) {
         resolved.push(target);
@@ -510,17 +630,30 @@ export function extractIndex(input: ExtractInput): CodeIndex {
   for (const source of input.sources) {
     const name = source.path.split('/').pop() ?? '';
     if (ROUTE_FILE.test(name)) {
-      for (const entry of parsePagesJson(source.text, fileSet)) push(entry);
+      for (const decl of source.refs.routes) {
+        if (decl.kind !== 'pages') continue;
+        push({
+          route: decl.route,
+          file: resolveSpecifier(decl.spec, 'pages.json', fileSet) ?? '',
+          title: decl.title,
+        });
+      }
       continue;
     }
     if (classifyKind(source.path) !== 'route') continue;
-    const names = localNames(source.text);
-    const resolveId = (ident: string): string | null => {
-      const spec = names.get(ident);
-      if (spec === undefined) return null;
-      return resolveSpecifier(spec, source.path, fileSet);
-    };
-    for (const entry of parseRouterTable(source.text, resolveId, fileSet)) push(entry);
+    for (const decl of source.refs.routes) {
+      if (decl.kind !== 'router') continue;
+      let file = '';
+      // 字面量（`component: './x'`）与标识符（`component: Search`）的解析基准不同，
+      // 与旧版一字不差地保留：字面量按仓根，标识符按**声明所在文件**的目录。
+      if (decl.spec !== '') {
+        file = resolveSpecifier(decl.spec, '', fileSet) ?? '';
+      } else if (decl.ident !== '') {
+        const spec = source.refs.locals[decl.ident];
+        if (spec !== undefined) file = resolveSpecifier(spec, source.path, fileSet) ?? '';
+      }
+      push({ route: decl.route, file, title: decl.title });
+    }
   }
 
   // 目录约定的兜底：只给「还没有任何路由指向它」的页面加一条。
@@ -542,6 +675,27 @@ export function extractIndex(input: ExtractInput): CodeIndex {
     routes,
     builtAt: input.builtAt ?? indexTimestamp(),
   };
+}
+
+/**
+ * 从一批「文件头部」拼成索引：`parseBlob` 每一个源文件，再 `assembleIndex`。
+ *
+ * 这条路仍然有用处——`--dry-run`（不写库地量一次全量建索引的耗时）与纯函数用例
+ * 都走它。生产路径是 `index-store.ts` 的 `repoIndex()`：那里按内容地址复用已解析的
+ * blob，只解析缺的那几块。
+ */
+export function extractIndex(input: ExtractInput): CodeIndex {
+  const sources: AssembledSource[] = [];
+  for (const source of input.sources) {
+    sources.push({ path: source.path, size: source.size, ...parseBlob(source.text, source.path) });
+  }
+  return assembleIndex({
+    repo: input.repo,
+    sha: input.sha,
+    all: input.all,
+    sources,
+    builtAt: input.builtAt,
+  });
 }
 
 // ─── 索引摘要（CLI 与报告共用一份） ─────────────────────────────────────────

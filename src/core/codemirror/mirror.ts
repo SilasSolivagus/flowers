@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { db as appDb } from '../../db/client.js';
 import { readSetting, type Queryable } from '../uemaster/settings.js';
 
@@ -852,7 +852,172 @@ async function showBatch(
   return ok(out);
 }
 
-// ─── 第六个读口：合并历史 ────────────────────────────────────────────────────
+// ─── 第六个读口：按 blob id 批量读内容（P4-11） ──────────────────────────────
+
+/**
+ * 一块要读的 blob：**只有对象 id 与大小**，没有路径。
+ *
+ * 这就是 P4-11 的形状要求：索引按内容寻址，所以「要读什么」由 blob id 决定，
+ * 同一块内容被 40 个路径引用也只读一次。
+ */
+export type BlobRequest = { blobSha: string; size: number };
+
+/** `cat-file --batch` 一次最多塞多少个对象名：够长（一次往返），又不至于把 stdin 撑爆。 */
+export const CAT_FILE_BATCH = 5000;
+
+/**
+ * 一次 `git cat-file --batch` 读回多块 blob 的内容。
+ *
+ * 为什么不是 `show` 多参数（`showHeads` 那条路）：`show <oid> <oid> …` 的输出是**原样
+ * 拼接**的，切分只能靠外部给的大小，切错一位就整棵树错位。`cat-file --batch` 自带
+ * 长度前缀（`<oid> blob <size>\n<content>\n`），协议里就有边界——而增量同步恰恰只读
+ * 「库里没有的那几块」，大小不一定来自同一次 `ls-tree`。
+ *
+ * 为什么这一条带 stdin：`--batch` 的对象名从 stdin 进。本模块其它读口都是纯 argv
+ * （见文件头第 1 条），所以这里单独用 `spawn`，**仍然**过 `isReadOnlyGitArgs()`——
+ * 只读是构造上的，不是靠这条命令自己老实。
+ *
+ * 缺对象（镜像被 gc 过、oid 属于别的仓）**不当成空内容**：那一块会让索引里少一个文件
+ * 而没人发现。所以直接失败，点名是哪个 oid。
+ */
+export async function readBlobHeads(
+  repoId: string,
+  blobs: readonly BlobRequest[],
+  opts: { maxLines?: number; timeoutMs?: number } = {},
+): Promise<MirrorResult<Map<string, string>>> {
+  const maxLines = Number.isFinite(opts.maxLines) && (opts.maxLines ?? 0) > 0
+    ? Math.floor(opts.maxLines as number)
+    : 80;
+  // 去重：同一块内容出现在 40 个路径上时，这里只请求一次。
+  const unique = new Map<string, number>();
+  for (const blob of blobs) {
+    const sha = blob.blobSha.trim();
+    if (sha === '') continue;
+    if (!unique.has(sha)) unique.set(sha, Math.max(0, blob.size));
+  }
+  const out = new Map<string, string>();
+  if (unique.size === 0) return ok(out);
+
+  const resolved = await resolveRepo(repoId);
+  if ('ok' in resolved) return resolved;
+  const args = ['cat-file', '--batch'];
+  if (!isReadOnlyGitArgs(args)) {
+    return fail('not_read_only', `内部错误：只读校验拒绝了一条命令（${args.join(' ')}）`);
+  }
+
+  const oids = [...unique.keys()];
+  const budget = 4 * 1024 * 1024 + [...unique.values()].reduce((sum, size) => sum + size, 0);
+  const timeoutMs = opts.timeoutMs ?? GIT_TIMEOUT_MS;
+  const run = await runGitStdin(gitArgv(resolved.config, resolved.repo.path, args), oids.join('\n') + '\n', {
+    maxBytes: budget,
+    timeoutMs,
+  });
+  const failure = runFailure(run, timeoutMs, 'git cat-file');
+  if (failure !== null) return failure;
+
+  const parsed = parseCatFileBatch(run.stdout);
+  for (const sha of oids) {
+    const content = parsed.get(sha);
+    if (content === undefined) {
+      return fail(
+        'git_failed',
+        `镜像里读不到对象 ${sha}（${repoId}）：cat-file --batch 没有回它，`
+        + '可能是镜像被 gc 过或这个 oid 属于别的仓',
+      );
+    }
+    out.set(sha, headLines(content.toString('utf8'), maxLines));
+  }
+  return ok(out);
+}
+
+/**
+ * `git cat-file --batch` 的输出切分：每条是 `<oid> <type> <size>\n<content>\n`。
+ *
+ * 被请求但不存在时 git 回 `<oid> missing\n`（没有 size、没有正文）——这里跳过它，
+ * 由调用方按「请求了却没拿到」判失败。二进制内容按**长度**切，不按行切：
+ * 源码里可以有 `\n`、可以有非 UTF-8 字节，按行切会错位。
+ */
+export function parseCatFileBatch(buffer: Buffer): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  let offset = 0;
+  while (offset < buffer.length) {
+    const newline = buffer.indexOf(0x0a, offset);
+    if (newline < 0) break;
+    const header = buffer.subarray(offset, newline).toString('utf8');
+    const match = /^([0-9a-f]{4,64}) (\w+)(?: (\d+))?$/.exec(header);
+    offset = newline + 1;
+    if (match === null) continue;
+    const sha = match[1] ?? '';
+    const sizeText = match[3];
+    if (sizeText === undefined) continue; // `<oid> missing` / `<oid> ambiguous`
+    const size = Number(sizeText);
+    if (!Number.isFinite(size) || size < 0) continue;
+    out.set(sha, buffer.subarray(offset, offset + size));
+    offset += size + 1; // 正文之后 git 补一个换行
+  }
+  return out;
+}
+
+/**
+ * 与 `runGit` 同形，但**往 stdin 写一段文本**（`cat-file --batch` 要这个）。
+ *
+ * 唯一的额外约束是输出预算：超过 `maxBytes` 就杀掉进程并标 `outputLimited`，
+ * 让调用方拿到一句中文失败，而不是半份字节流。
+ */
+function runGitStdin(
+  argv: string[],
+  input: string,
+  opts: { timeoutMs: number; maxBytes: number },
+): Promise<GitRun> {
+  const [bin, ...rest] = argv;
+  return new Promise((resolve) => {
+    const child = spawn(bin ?? 'git', rest, { windowsHide: true });
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let stderr = '';
+    let timedOut = false;
+    let limited = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, opts.timeoutMs);
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > opts.maxBytes) {
+        limited = true;
+        child.kill('SIGTERM');
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      resolve({
+        exitCode: null, timedOut: false, spawnError: `${error.code ?? 'error'}: ${error.message}`,
+        outputLimited: false, stdout: Buffer.alloc(0), stderr,
+      });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({
+        exitCode: code === null ? null : Number(code),
+        timedOut,
+        spawnError: null,
+        outputLimited: limited,
+        stdout: Buffer.concat(chunks),
+        stderr,
+      });
+    });
+    child.stdin.on('error', () => { /* 进程被杀时写 stdin 会 EPIPE：那是结果的一部分 */ });
+    child.stdin.end(input);
+  });
+}
+
+// ─── 第七个读口：合并历史 ────────────────────────────────────────────────────
 
 /** 一条合并记录。`files` 只含源码扩展名——docs/、png、package.json 不是「功能的位置」。 */
 export type MergeRecord = {
@@ -972,7 +1137,7 @@ function mergeBranch(subject: string): string | null {
 }
 
 /**
- * 一次取回**全部**合并记录（读口 6）。
+ * 一次取回**全部**合并记录（读口 7）。
  *
  * 省掉的往返见 `HISTORY_SCRIPT`；这里只强调两件事：
  * 1. 失败照旧是数据（超时、ssh 连不上、退出码非 0 都给中文 message）；
