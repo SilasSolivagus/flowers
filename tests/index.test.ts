@@ -13,6 +13,7 @@ import {
   LIVE_INDEX_DEPS, buildIndex, dropIndex, readIndex, repoIndex, type IndexDeps,
 } from '../src/core/codemirror/index-store.js';
 import { DEFAULT_SSH_HOST, head, lsTreeEntries, showHeads } from '../src/core/codemirror/mirror.js';
+import { forgetBlobs } from '../src/core/codemirror/blob-index.js';
 
 /**
  * P4-10 第 1–2 步：静态索引 + 在索引上定位。
@@ -481,6 +482,11 @@ describe('懒建：同一个 (repo, sha) 第二次不重建', () => {
 
   it('建一次是两次往返：一次 ls-tree、一次批量 show（不是每文件一趟）', async () => {
     await dropIndex(db, 'fixture-react', reactSha);
+    // 2026-11-08（P4-11）：内容按 blob id 落库，上一轮已经把这块内容解析过了；要量
+    // 「必须解析时是几次往返」就得先忘掉它们，否则量到的是「一块都不用读」的复用路径
+    // （那只有 1 次 ls-tree 往返，是更好的结果，但它不是这条用例要钉的东西）。
+    const tree = await lsTreeEntries('fixture-react');
+    if (tree.ok) await forgetBlobs(db, tree.data.map((entry) => entry.oid));
     let calls = 0;
     const counting: IndexDeps = {
       lsTreeEntries: (...args) => {
