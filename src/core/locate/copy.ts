@@ -1,3 +1,4 @@
+import type { CodeIndex } from '../codemirror/code-index.js';
 import type { Candidate } from './types.js';
 
 /**
@@ -210,4 +211,73 @@ export function withSnapshots(
 ): string {
   const extra = snapshotLines(repos, today);
   return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
+}
+
+// ─── 现有页面清单：评估提示词里「这一步落在哪一页」的唯一依据 ──────────────────
+//
+// 为什么这一段住在这里、而不是 `compose.ts`：它是**给 PM 读的一句话的来源**，
+// 和上面那几句同一条纪律——一处措辞、一处口径。它进的是提示词（模型照抄），
+// 最终落到材料里「现有页面：/pages/share/index」那行字上；换句话说，材料里
+// 「这页已经存在」这句话的真伪，完全由这个函数取哪些字段决定。
+//
+// 三条口径（都是被真实数据逼出来的，改之前先看报告里的数字）：
+// 1. **只认视图文件**（`.vue` / `.tsx` / `.jsx`）。第一版按「路径里含 route」找文件，
+//    结果 pc 的 `/login` 把 `src/apis/login.ts` 也算了进去，于是提示词里
+//    「登录页已有组件」列的是 `fetchAccountLogin`、`fetchRegister` 这些接口函数——
+//    模型据此说「这页有 X」就是在说假话。页面文件是视图，`.ts` 是同名工具/接口。
+// 2. **组件只取 `component-use` 与 `symbol`**（`tag` 是 `.vue` 里小写标签的占位，
+//    给模型看只会变成噪音），并且**去重**：同一页里 `<MfyIcon>` 用两次是一个组件。
+// 3. **组件名只可能来自 `index.files` 里有的文件**（`outline` 的键就是它们）。
+//    `importedBy` 的键可以不在 `files` 里（`static/storeSdk.ts` 那种），所以这里
+//    遍历的是 `files` 而不是 `outline`——把 `static/` 当组件写进提示词，是同一类假话。
+//
+// 没有索引（`pages` 为空）时返回空数组，调用方据此**整段不写**：说「现有页面上
+// 什么都没有」比不说更坏，它把「没读到索引」伪装成「读过了、确实没有」。
+
+/** 一个已知页面：路由、标题（可能没有）、这一页里读到的组件名。 */
+export type KnownSurface = { route: string; title: string | null; components: string[] };
+
+/** 提示词里一页最多列几个组件。再多就不是「这页有什么」，而是一份文件清单。 */
+const SURFACE_COMPONENT_CAP = 12;
+
+/** 页面文件只可能是这三种扩展名（见上面第 1 条）。 */
+const VIEW_FILE = /\.(vue|tsx|jsx)$/i;
+
+/** 路由 → 这一页的视图文件。比较一律小写：pc 的 `/login` 对应 `src/pages/Login/login.tsx`。 */
+function pageFiles(files: Readonly<Record<string, unknown>>, route: string): string[] {
+  const want = route.replace(/^\/+/, '').toLowerCase();
+  if (want === '') return [];
+  const out: string[] = [];
+  for (const path of Object.keys(files)) {
+    if (!VIEW_FILE.test(path)) continue;
+    const noExt = path.replace(VIEW_FILE, '').toLowerCase();
+    // `pages/share/index` ↔ `src/pages/share/index.vue`；`login` ↔ `src/pages/Login/login.tsx`；
+    // `VideoPage` ↔ `src/pages/VideoPage/index.tsx`（目录名即路由）。
+    if (noExt === want || noExt.endsWith(`/${want}`) || noExt.endsWith(`/${want}/index`)) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+/**
+ * 索引 → 提示词能吃的页面清单。
+ *
+ * `limit` 是**页面条数**上限（默认 40）：两仓加起来 29 页，40 不会截到任何真数据，
+ * 但换一个大仓时它保证提示词不会因为索引变大而线性变长。
+ */
+export function knownSurfaces(
+  index: Pick<CodeIndex, 'pages' | 'outline' | 'files'>,
+  limit = 40,
+): KnownSurface[] {
+  return index.pages.slice(0, limit).map((page) => {
+    const seen: string[] = [];
+    for (const file of pageFiles(index.files, page.route)) {
+      for (const node of index.outline[file] ?? []) {
+        if (node.kind === 'tag') continue;
+        if (!seen.includes(node.name)) seen.push(node.name);
+      }
+    }
+    return { route: page.route, title: page.title, components: seen.slice(0, SURFACE_COMPONENT_CAP) };
+  });
 }

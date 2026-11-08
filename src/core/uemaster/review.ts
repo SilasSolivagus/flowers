@@ -11,7 +11,7 @@ import { attachArtifact } from './attach.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import {
-  addUsage, buildFlow, buildPages, flat, loadRequirement, missingProviderText, parseFlow,
+  addUsage, buildFlow, buildPages, flat, loadKnown, loadRequirement, missingProviderText, parseFlow,
   type ComposeDeps, type ComposeUsage, type FlowNode, type RequirementRow,
 } from './compose.js';
 import { renderFlowchart } from './flow.js';
@@ -1199,8 +1199,18 @@ export async function reviewRequirement(
     },
   };
 
+  /**
+   * 现有页面清单（任务 4）：与评估材料共用同一份读口（`loadKnown`）。评审比评估更
+   * 需要它——评审的判断题是「这个改动落在哪儿」，而模型脑子里若没有页面清单，
+   * 它会把每一个步骤都画成新页面。清单读不到就是空数组，提示词里一个字都不提。
+   *
+   * 调用点选在图之前：`repoIndex` 有进程内缓存，先读一次，`gatherBaseline` 那条路
+   * 后面就命中缓存（同一个 sha 不重复装配、不重复 ssh）。
+   */
+  const known = await loadKnown(full);
+
   // ── 图：与评估材料同一段实现（判据只能有一份） ──
-  const flow = await buildFlow(cfg, req, 'review', counted, usage, trace);
+  const flow = await buildFlow(cfg, req, 'review', counted, usage, trace, known);
   usage = flow.usage;
   const svg = flow.check.svg ?? '';
   // 节点清单只解析一次：提示词 2、提示词 3、标注改写三处都用它，三处不会漂。
@@ -1246,7 +1256,7 @@ export async function reviewRequirement(
 
   // ── 页面片段：同一版式 ──
   const title = reviewTitle(req, prd.version, found.findings, baseline);
-  const pages = await buildPages(cfg, req, 'review', nodes, { svg }, counted, usage, trace);
+  const pages = await buildPages(cfg, req, 'review', nodes, { svg }, counted, usage, trace, known);
   usage = pages.usage;
 
   // 标注整片换成问题清单，再验一次：`anno` 是我们拼的，所以这一层是「我们自己没写错」。

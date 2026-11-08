@@ -12,6 +12,7 @@ import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import { composeEvaluation } from './compose.js';
+import { loadKnownSurfaces } from './surfaces.js';
 import { REVIEW_NEEDS_PRD, reviewRequirement } from './review.js';
 import { inspect as inspectMaterial } from './inspect.js';
 import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
@@ -386,6 +387,8 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
         }, {
           // 同 compose / inspect：worker 是另一个进程，配置要按**同一个人**再解析一次（P2.12）。
           resolveConfig: () => resolveProviderConfig(actor),
+          // 现有页面清单（任务 4）：只有 worker 这一层同时拿得到 db 与镜像读口。
+          loadSurfaces: () => loadKnownSurfaces(db),
         });
         await doneJob(db, jobId, reviewed.artifactId);
         return;
@@ -416,6 +419,8 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
         jobId,
       }, {
         resolveConfig: () => resolveProviderConfig(actor),
+        // 现有页面清单（任务 4）：读不到就整段不写（`loadKnown` 吞成空数组）。
+        loadSurfaces: () => loadKnownSurfaces(db),
       });
       await doneJob(db, jobId, composed.artifactId);
       return;

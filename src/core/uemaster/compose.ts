@@ -12,6 +12,7 @@ import { makeTrace, type Trace } from './attempts.js';
 import { typeLabel } from '../requirements/type.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
+import type { KnownSurface } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
@@ -113,6 +114,16 @@ export type ComposeDeps = {
   resolveConfig: () => Promise<ProviderConfig | null>;
   /** 拼好的 walkmap → HTML。真实实现是 vendored 的 `build.py`（子进程）。 */
   build: (walkmap: Walkmap, assets: WalkmapAssets) => Promise<BuildResult>;
+  /**
+   * 「现在有哪些页面」的读口（任务 4）。**缺省 = 不读**，提示词里因此一个字都不提
+   * 现有页面——这是刻意的默认值，不是漏了：这个函数一走就是镜像 ssh + 索引装配
+   * （几百毫秒到几秒），把它做成 LIVE 默认会让每一个直接调 `composeEvaluation`
+   * 的用例、脚本都去连镜像，而这件事与「材料怎么写」无关。
+   *
+   * 真实路径（`start.ts` 的 `runJob`）显式注入 `() => loadKnownSurfaces(db)`。
+   * 读失败由注入方吞成空数组（见 `loadKnown`）：上下文缺了不该让材料失败。
+   */
+  loadSurfaces?: () => Promise<KnownSurface[]>;
 };
 
 /** 真实的四个依赖：真 HTTP、真 Python 排版器、真配置解析、真 walkmap 构建器。 */
@@ -122,6 +133,22 @@ const LIVE: ComposeDeps = {
   resolveConfig: resolveProviderConfig,
   build: (walkmap, assets) => renderWalkthrough(walkmap, assets),
 };
+
+/**
+ * 拿「现有页面」清单；读不到就是空清单。
+ *
+ * 为什么吞异常：这份清单是**上下文**，不是结论。镜像连不上时材料的结论不该变成
+ * 「代码没读到」——那是评审那条链路的 `absent`，它有专门的一句话（`copy.ts`）。
+ * 评估这里少一段上下文，材料照旧成立，只是这一次材料**不计入基线**（报告里要写明）。
+ */
+export async function loadKnown(deps: ComposeDeps): Promise<readonly KnownSurface[]> {
+  if (deps.loadSurfaces === undefined) return [];
+  try {
+    return await deps.loadSurfaces();
+  } catch {
+    return [];
+  }
+}
 
 // ─── 入参与出参 ──────────────────────────────────────────────────────────────
 
@@ -181,6 +208,80 @@ export type RequirementRow = {
 // ─── 提示词 1：只要一段 mermaid ──────────────────────────────────────────────
 
 /**
+ * 标题那一格：`pages.json` 里没写 title 的页面是 `null`，而 router 推出来的页面可能是
+ * **空串**（`/pages/webview/webview` 实测就是空串）。两种都写「无标题」：提示词里出现
+ * `- /pages/x（）` 这种括号套空，模型只会当它是格式噪音，我们要的是「这页没有标题这件事」。
+ */
+function titleOf(surface: KnownSurface): string {
+  return (surface.title ?? '').trim() === '' ? '无标题' : surface.title!;
+}
+
+/** 清单里的一行。两个提示词共用，免得一处改了标点、另一处忘了。 */
+function surfaceLine(surface: KnownSurface): string {
+  const components = surface.components.length > 0
+    ? `已有组件 ${surface.components.join('、')}`
+    : '没读到组件';
+  return `  - ${surface.route}（${titleOf(surface)}）：${components}`;
+}
+
+/**
+ * 「现有页面」那一段提示词。**清单为空时返回空数组**——调用方据此整段不写。
+ *
+ * 为什么空清单必须一个字都不说：材料里一旦出现「现有页面上什么都没有」，读的人
+ * 会把它当成结论（他分不出「没读到索引」和「读到了、确实没有」），而这句话比不说
+ * 更坏。本仓修过两遍同一个形状（`mergeHistory` 把 0 条吞成成功、`absent` 与
+ * `none` 混用），所以这里是空数组，不是一句「（无）」。
+ *
+ * 为什么标注要占用节点文案的**第二行**（`<br>`）：图里的节点文案有 12 个汉字的上限
+ * （第 5 条），而路由是 `/pages/share/index` 这种不能截断的东西。压成一行只能
+ * 二选一：要么丢页面文案，要么截路由——两个都是把标注变成一知半解。所以第一行是
+ * 页面文案、第二行是标注，`decodeLabel` 会把 `<br>` 压成空格，材料里读起来是一句话。
+ *
+ * 为什么把组件名也列出来：材料要能回答「这页已经有 `FileList` 了，别再说要新建一个
+ * 文件列表」。「现有页面」只说得出「这页在」，说不出「这页里有什么」，那一句就只
+ * 剩半个用处。组件名**只来自索引里这一页的视图文件**（口径见 `knownSurfaces`）。
+ */
+export function surfacesBlock(known: readonly KnownSurface[]): string[] {
+  if (known.length === 0) return [];
+  const first = known[0]!;
+  const exampleTitle = titleOf(first) === '无标题' ? '页面文案' : titleOf(first);
+  return [
+    '',
+    `已知现有页面（来自代码索引，共 ${known.length} 个）。流程里落在这些页面上的步骤，必须标注：`,
+    '  · 节点文案分两行，用 <br> 连接：第一行是页面文案（≤12 汉字），第二行是归属标注；',
+    '  · 落在清单里的页面 → 第二行写「现有页面：<route>」，route 逐字抄清单里的写法；',
+    '  · 不在清单里的 → 第二行只写「新增页面」。',
+    '不要把清单里的页面标成新增，也不要假设清单之外还有页面。清单里的组件是这页已经有的，',
+    '不要说它们要新建。写法示例：',
+    `  A["${exampleTitle}<br>现有页面：${first.route}"]`,
+    '清单（路由（标题）：已有组件）：',
+    ...known.map(surfaceLine),
+  ];
+}
+
+/**
+ * 同一份清单的**页面片段版**。措辞与 `surfacesBlock` 不同，因为模型这一轮要交的是
+ * HTML 而不是图：它已经拿到了图（标注在那上面写着），这里只需要它别把标注抹掉、
+ * 别把已有的组件画成新发明的东西。
+ *
+ * 「title 原样保留」这句必须写：`fragmentsPrompt` 第 4 条本来就要求 title 用清单里的
+ * 节点文案，但那是**总则**；素材里多了一份「现有页面」清单时，模型很容易在 title 里
+ * 换成一句自己概括的页面名——那一换，材料里「这一步落在哪个现有页面」就没了，
+ * 而它正是这份材料唯一能对上代码的一行字。
+ */
+export function fragmentsSurfacesBlock(known: readonly KnownSurface[]): string[] {
+  if (known.length === 0) return [];
+  return [
+    '',
+    '其中这些页面是**已经存在**的（来自代码索引）：',
+    ...known.map(surfaceLine),
+    '这一类节点的 title 要原样保留流程图里的那行标注（「现有页面：<route>」或「新增页面」），',
+    '不要删、不要概括成另一个页面名；页面里出现清单列出的组件时沿用它的名字与位置，',
+    '不要换成自造的等价物；清单之外的页面不要画。',
+  ];
+}
+
+/**
  * 图这一关的提示词。
  *
  * 为什么把子集规则**抄进提示词**而不是说「按 flowspec-v1.md 画」：模型读不到文件。
@@ -192,7 +293,11 @@ export type RequirementRow = {
  * （「好的，这是流程图：」）里的中文如果漏进 mermaid，引擎会把它当成一个节点——
  * 那正是「语法垃圾也能过计数」的那条坑。
  */
-export function flowPrompt(req: RequirementRow, stage: Stage): string {
+export function flowPrompt(
+  req: RequirementRow,
+  stage: Stage,
+  known: readonly KnownSurface[] = [],
+): string {
   const prd = req.prd_url === null
     ? '未提供（照需求标题与类型推断；推断的地方不要假装有依据）'
     : req.prd_url;
@@ -207,6 +312,7 @@ export function flowPrompt(req: RequirementRow, stage: Stage): string {
     `  · 提出人：${flat(req.requester)}`,
     `  · PRD：${flat(prd)}`,
     `  · 这次要做的是${NOUN[stage]}：${FOCUS[stage]}`,
+    ...surfacesBlock(known),
     '',
     '输出格式（硬性要求，逐条都会被机器校验）：',
     ' 1. 第一行必须是 flowchart TD；整段不超过 14 行。',
@@ -276,6 +382,7 @@ export function repairPrompt(
   req: RequirementRow,
   stage: Stage,
   previous: { mermaid: string; check: FlowCheck; shape: FlowShape },
+  known: readonly KnownSurface[] = [],
 ): string {
   const { mermaid, check, shape } = previous;
   const focus: string[] = [];
@@ -311,6 +418,7 @@ export function repairPrompt(
     '',
     '要改的地方：',
     ...focus.filter((line) => line !== ''),
+    ...surfacesBlock(known),
     '',
     '其余规则不变：第一行 flowchart TD；3–8 个节点；单主干 + 右分支；判断出边带「是」「否」；',
     '不要代码围栏、不要解释文字，只输出修好后的 mermaid 源码。',
@@ -356,7 +464,12 @@ export function kindOf(node: FlowNode): NodeKind {
  * 说明写进标注（`anno`），由 `assembleWalkmap` 折进前一个页面节点——正是上游那句
  * "动作说明写进前一节点的标注"。
  */
-export function fragmentsPrompt(req: RequirementRow, stage: Stage, nodes: FlowNode[]): string {
+export function fragmentsPrompt(
+  req: RequirementRow,
+  stage: Stage,
+  nodes: FlowNode[],
+  known: readonly KnownSurface[] = [],
+): string {
   const list = nodes
     .map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`)
     .join('\n');
@@ -367,6 +480,7 @@ export function fragmentsPrompt(req: RequirementRow, stage: Stage, nodes: FlowNo
     '',
     '流程图已经定稿，节点清单（id / 形态 / 文案）：',
     list,
+    ...fragmentsSurfacesBlock(known),
     '',
     '请为每个节点交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
     ' 1. 设备框就是用户的手机屏幕或浏览器窗口：框里每一段文字都必须是上线后用户真的会看到的内容。',
@@ -427,6 +541,7 @@ export function fragmentsRepairPrompt(
   nodes: FlowNode[],
   previous: string,
   why: string,
+  known: readonly KnownSurface[] = [],
 ): string {
   const trimmed = previous.trim();
   const shown = trimmed.length > 2000 ? `${trimmed.slice(0, 2000)}…` : trimmed;
@@ -440,6 +555,7 @@ export function fragmentsRepairPrompt(
     '',
     '节点清单（id / 形态 / 文案，一个都不能少）：',
     nodes.map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`).join('\n'),
+    ...fragmentsSurfacesBlock(known),
     '',
     '重发**完整**的 JSON，形状不变：',
     '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]]}]}',
@@ -830,8 +946,9 @@ export async function buildFlow(
   deps: ComposeDeps,
   usage: ComposeUsage,
   trace: Trace,
+  known: readonly KnownSurface[] = [],
 ): Promise<{ mermaid: string; check: FlowCheck; attempts: number; usage: ComposeUsage }> {
-  let prompt = flowPrompt(req, stage);
+  let prompt = flowPrompt(req, stage, known);
   let spent = usage;
 
   for (let attempt = 1; attempt <= MAX_FLOW_ATTEMPTS; attempt += 1) {
@@ -879,7 +996,7 @@ export async function buildFlow(
         `流程图 ${MAX_FLOW_ATTEMPTS} 次都没通过检查：${why}`,
       );
     }
-    prompt = repairPrompt(req, stage, { mermaid, check, shape });
+    prompt = repairPrompt(req, stage, { mermaid, check, shape }, known);
   }
 
   // 循环不可能走到这里（最后一次一定 return 或 throw）；留着是为了让类型收敛。
@@ -912,10 +1029,11 @@ export async function buildPages(
   deps: ComposeDeps,
   usage: ComposeUsage,
   trace: Trace,
+  known: readonly KnownSurface[] = [],
 ): Promise<{ assembly: Assembly; warnings: string[]; usage: ComposeUsage }> {
   const ids = nodes.map((node) => node.id);
   const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;
-  let prompt = fragmentsPrompt(req, stage, nodes);
+  let prompt = fragmentsPrompt(req, stage, nodes, known);
   let spent = usage;
   let why = '';
 
@@ -958,7 +1076,7 @@ export async function buildPages(
     if (passed !== null) return { ...passed, usage: spent };
 
     if (attempt === MAX_PAGES_ATTEMPTS) break;
-    prompt = fragmentsRepairPrompt(req, stage, nodes, reply.text, why);
+    prompt = fragmentsRepairPrompt(req, stage, nodes, reply.text, why, known);
   }
 
   throw new AppError(
@@ -1015,13 +1133,19 @@ export async function composeEvaluation(
   // 一次作业里所有调用用的是同一份配置，跟着每次调用传一遍只多一处能写错的地方。
   const trace = makeTrace(db, request.jobId ?? null, cfg.model);
 
-  const flow = await buildFlow(cfg, req, stage, full, usage, trace);
+  /**
+   * 现有页面清单（任务 4）：只在这里读一次，图与页面片段两段共用同一份。
+   * 读失败 → 空数组 → 提示词里整段不写（见 `loadKnown` 与 `surfacesBlock`）。
+   */
+  const known = await loadKnown(full);
+
+  const flow = await buildFlow(cfg, req, stage, full, usage, trace, known);
   usage = flow.usage;
 
   const svg = flow.check.svg ?? '';
   // 节点清单只解析一次：提示词 2、拼 walkmap、日志都用它，三处不会漂。
   const nodes = parseFlow(flow.mermaid).nodes;
-  const pages = await buildPages(cfg, req, stage, nodes, { svg }, full, usage, trace);
+  const pages = await buildPages(cfg, req, stage, nodes, { svg }, full, usage, trace, known);
   usage = pages.usage;
 
   const buildStarted = Date.now();
