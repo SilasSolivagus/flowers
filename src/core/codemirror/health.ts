@@ -74,6 +74,28 @@ export const EVENT_MIRROR_STALE = 'mirror.stale';
  */
 export const MIRROR_STALE_DAYS = 7;
 
+/**
+ * 单个仓的阈值：数字 = 超过这么多天才报；`null` = 不因「上游不动了」报（清单里写 `never`）。
+ *
+ * **它只作用于「old」那一条判据**（`judgeMirror` 的第三个分支）。`ok = false`（同步/索引
+ * 失败）与「表里没有这个仓」两条**一个字都不看它**——它们在**任何**阈值下都报。这是
+ * 2026-11-09 那条决定的边界：允许把「上游已归档」静音，不允许把「我们抓不到」静音。
+ *
+ * 为什么是**参数**而不是查库：阈值是清单（`config/repos.txt` 第三格）里的**配置**，
+ * 不是测量结果。`mirror_health` 存的是「这个仓现在停在哪一天」，两者来源不同，混一张表
+ * 会让「改一次阈值」变成一次数据迁移。调用方（`scripts/index-nightly.ts`）每轮从清单
+ * 读一次，缺省（没给、或仓不在表里）仍然是 `MIRROR_STALE_DAYS`。
+ */
+export type StaleThresholds = Readonly<Record<string, number | null>>;
+
+/** 一个仓实际用的阈值；`null` 用 `Infinity` 表示（`age > Infinity` 恒为假）。 */
+function thresholdOf(thresholds: StaleThresholds | undefined, repo: string): number {
+  if (thresholds === undefined) return MIRROR_STALE_DAYS;
+  if (!Object.prototype.hasOwnProperty.call(thresholds, repo)) return MIRROR_STALE_DAYS;
+  const value = thresholds[repo];
+  return value === null || value === undefined ? Number.POSITIVE_INFINITY : value;
+}
+
 /** advisory lock 的键前缀：锁按**仓**上，三个仓同时旧应该是三条提醒。 */
 const ALERT_LOCK_PREFIX = 'mirror.stale:';
 
@@ -171,6 +193,8 @@ export function judgeMirror(
     row: HealthRow | null;
     /** 上海日历日 `YYYY-MM-DD`。 */
     today: string;
+    /** 这个仓的阈值（见 `StaleThresholds`）；不给就按全局 7 天。 */
+    staleAfterDays?: number | null;
   },
 ): MirrorAlert | null {
   const { repo, row, today } = input;
@@ -191,7 +215,12 @@ export function judgeMirror(
     return { repo, headDate: null, days: null, error: null, reason: 'unknown' };
   }
   const age = ageOf(row.head_date, today);
-  if (age.days === null || age.days <= MIRROR_STALE_DAYS) return null;
+  // 这一条**唯一**读按仓阈值的地方（其余两条判据在上面，先返回了）。`never` 走
+  // `Infinity`：不是「跳过判断」，而是「这个仓的 HEAD 年龄不构成提醒的理由」。
+  const threshold = input.staleAfterDays === undefined
+    ? MIRROR_STALE_DAYS
+    : (input.staleAfterDays === null ? Number.POSITIVE_INFINITY : input.staleAfterDays);
+  if (age.days === null || age.days <= threshold) return null;
   // 同步是成功的，只是上游这段时间没有新提交——`error` 留 null，正文会换一种说法。
   return { repo, headDate: age.headDay, days: age.days, error: null, reason: 'old' };
 }
@@ -232,7 +261,7 @@ async function alertedOn(db: Exec, repo: string, day: number): Promise<boolean> 
  */
 export async function checkMirrorFreshness(
   db: Db,
-  input: { repos: readonly string[]; now: Date },
+  input: { repos: readonly string[]; now: Date; staleAfterDays?: StaleThresholds },
 ): Promise<MirrorAlert[]> {
   if (Number.isNaN(input.now.getTime())) throw new AppError('invalid', '时钟时间不合法');
   const day = shanghaiDayOf(input.now.toISOString());
@@ -248,7 +277,10 @@ export async function checkMirrorFreshness(
 
   const alerts: MirrorAlert[] = [];
   for (const repo of input.repos) {
-    const alert = judgeMirror({ repo, row: byRepo.get(repo) ?? null, today });
+    const alert = judgeMirror({
+      repo, row: byRepo.get(repo) ?? null, today,
+      ...(input.staleAfterDays === undefined ? {} : { staleAfterDays: thresholdOf(input.staleAfterDays, repo) }),
+    });
     if (alert !== null) alerts.push(alert);
   }
   if (alerts.length === 0) return [];

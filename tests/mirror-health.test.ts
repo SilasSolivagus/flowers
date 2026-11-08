@@ -196,6 +196,44 @@ describe('触发规则：ok / 天数 / 未知', () => {
 
 // ─── 8：写入口的两个语义 ─────────────────────────────────────────────────────
 
+describe('按仓阈值：清单那张表接在 checkMirrorFreshness 上', () => {
+  it('同一个 400 天前的仓，阈值 365 时无声、never 时无声、默认 7 天时一条', async () => {
+    const repo = 'fixture-archived';
+    await recordMirrorHealth(db, {
+      repo, headSha: 'b'.repeat(40), headDate: isoDaysAgo(400), ok: true, error: null,
+    });
+    // 默认（不给表）：400 天远过 7 天。
+    expect(await checkMirrorFreshness(db, { repos: [repo], now: new Date() })).toHaveLength(1);
+    await db.execute(sql`delete from events where (payload::jsonb ->> 'repo') = ${repo}`);
+
+    // 阈值 365：仍然报（400 > 365），说明表真的被用上了，而不是被忽略。
+    expect(await checkMirrorFreshness(db, {
+      repos: [repo], now: new Date(), staleAfterDays: { [repo]: 365 },
+    })).toHaveLength(1);
+    await db.execute(sql`delete from events where (payload::jsonb ->> 'repo') = ${repo}`);
+
+    // 阈值 500：不报了。
+    expect(await checkMirrorFreshness(db, {
+      repos: [repo], now: new Date(), staleAfterDays: { [repo]: 500 },
+    })).toEqual([]);
+
+    // `never`（清单里的 null）：也不报——但下一格证明它不吞失败。
+    expect(await checkMirrorFreshness(db, {
+      repos: [repo], now: new Date(), staleAfterDays: { [repo]: null },
+    })).toEqual([]);
+
+    // 同一个仓、同一个 never 阈值，同步坏掉时照样一条。
+    await recordMirrorHealth(db, {
+      repo, headSha: 'b'.repeat(40), headDate: isoDaysAgo(400), ok: false, error: 'HTTP 000',
+    });
+    const alerts = await checkMirrorFreshness(db, {
+      repos: [repo], now: new Date(), staleAfterDays: { [repo]: null },
+    });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ repo, reason: 'failed', error: 'HTTP 000' });
+  });
+});
+
 describe('写入口：失败不抹掉上一次已知的 HEAD', () => {
   it('headSha / headDate 传 null 时保留旧值，只把 ok / error 刷成本轮', async () => {
     const repo = 'fixture-keep';
@@ -264,6 +302,28 @@ describe('judgeMirror：判定表', () => {
     expect(judgeMirror({ repo: 'r', row: row(true, '2026-11-01T10:00:00+08:00'), today })).toBeNull();
     // 未知。
     expect(judgeMirror({ repo: 'r', row: null, today })).toMatchObject({ reason: 'unknown' });
+  });
+
+  it('按仓阈值：只放宽「上游不动了」那一条，同步失败照报', () => {
+    const today = '2026-11-08';
+    const old8 = { repo: 'r', head_sha: 'abc', head_date: '2026-10-31T10:00:00+08:00', ok: true, error: null };
+    // 8 天前在默认 7 天下会报；给 365 天就不报了。
+    expect(judgeMirror({ repo: 'r', row: old8, today })).toMatchObject({ reason: 'old' });
+    expect(judgeMirror({ repo: 'r', row: old8, today, staleAfterDays: 365 })).toBeNull();
+    // 超过阈值仍然报（阈值不是静音）。
+    expect(judgeMirror({ repo: 'r', row: old8, today, staleAfterDays: 7 }))
+      .toMatchObject({ reason: 'old', days: 8 });
+    // `null` = never（清单里的 never）：1254 天也不报。
+    const ancient = { ...old8, head_date: '2023-06-04T10:00:00+08:00' };
+    expect(judgeMirror({ repo: 'r', row: ancient, today })).toMatchObject({ reason: 'old' });
+    expect(judgeMirror({ repo: 'r', row: ancient, today, staleAfterDays: null })).toBeNull();
+    // **这条是这一格存在的边界**：never 只静音「旧」，不静音「坏」。
+    const broken = { repo: 'r', head_sha: 'abc', head_date: '2023-06-04T10:00:00+08:00', ok: false, error: 'HTTP 000' };
+    expect(judgeMirror({ repo: 'r', row: broken, today, staleAfterDays: null }))
+      .toMatchObject({ reason: 'failed', error: 'HTTP 000' });
+    // 表里没有这一行也不受阈值影响（从没跑过 = 静默失败，按未知报）。
+    expect(judgeMirror({ repo: 'r', row: null, today, staleAfterDays: null }))
+      .toMatchObject({ reason: 'unknown' });
   });
 });
 

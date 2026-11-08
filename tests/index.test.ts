@@ -237,6 +237,21 @@ describe('分类：路径即约定', () => {
     expect(kindOf('main.go')).toBe('service');
   });
 
+  it('库仓的平铺入口进索引，但不是「什么都算组件」', () => {
+    // 组件库没有 pages/ 与 components/，唯一的产品文件是 src/index.tsx
+    // （`123pan-virtuallist-antd` 的 0/38 就是这个原因，2026-11-09）。
+    expect(kindOf('src/index.tsx')).toBe('component');
+    expect(kindOf('src/index.ts')).toBe('component');
+    expect(kindOf('lib/index.js')).toBe('component');
+    // 故意窄：src 下的其它直接子文件、以及更深的 index 一律照旧落 other。
+    expect(kindOf('src/main.ts')).toBe('other');
+    expect(kindOf('src/utils/index.ts')).toBe('other');
+    expect(kindOf('app/index.ts')).toBe('other');
+    // 目录约定仍然优先（不会被这条规则抢走）。
+    expect(kindOf('src/pages/index.tsx')).toBe('page');
+    expect(kindOf('src/components/index.ts')).toBe('component');
+  });
+
   it('噪音路径一个都不进索引', async () => {
     const tree = await lsTreeEntries('fixture-react');
     expect(tree.ok).toBe(true);

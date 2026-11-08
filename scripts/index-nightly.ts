@@ -33,7 +33,7 @@ import { db, pool } from '../src/db/client.js';
 import { head } from '../src/core/codemirror/mirror.js';
 import { resolveMirrorConfig } from '../src/core/codemirror/mirror.js';
 import { checkMirrorFreshness, recordMirrorHealth } from '../src/core/codemirror/health.js';
-import { readRepoInventory } from '../src/core/codemirror/repo-inventory.js';
+import { readRepoInventory, staleThresholdsOf } from '../src/core/codemirror/repo-inventory.js';
 import { REPO_ROOT, dataLayout } from '../src/core/runtime-dir.js';
 
 const TSX = path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
@@ -115,9 +115,14 @@ async function main(): Promise<number> {
   //
   // 只记一行、不改退出码：这是**告警**（下一步是跑 `scripts/repos-apply.ts`），
   // 不是这次的同步失败——把告警塞进退出码会让「3 = 至少一个仓失败」这句话变模糊。
+  // 按仓的陈旧阈值：与漂移检查共用**同一次**清单读取（同一个文件、同一轮判断）。
+  // 读不到清单时留 `undefined`，`checkMirrorFreshness` 就退回全局 7 天——一条坏掉的
+  // 清单不该把新鲜度检查也一起变成瞎的，但要在日志里说清它退回了哪种口径。
+  let thresholds: Record<string, number | null> | undefined;
   try {
     const inventory = await readRepoInventory();
     if (inventory.ok) {
+      thresholds = staleThresholdsOf(inventory.data.inventory.repos);
       const listed = inventory.data.inventory.repos.map((entry) => entry.id);
       const configured = config.data.repos.map((repo) => repo.id);
       const missing = listed.filter((id) => !configured.includes(id));
@@ -229,6 +234,7 @@ async function main(): Promise<number> {
     const alerts = await checkMirrorFreshness(db, {
       repos: config.data.repos.map((repo) => repo.id),
       now: new Date(),
+      ...(thresholds === undefined ? {} : { staleAfterDays: thresholds }),
     });
     for (const alert of alerts) {
       console.log(`[${alert.repo}] 镜像变旧：${alert.reason === 'failed' ? alert.error : `${alert.days} 天前`}`);

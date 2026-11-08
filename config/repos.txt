@@ -12,7 +12,10 @@
 # 的和索引读的就不是同一批仓（2026-11-08 的 `123pan-cross-frontend` 正是这么漏掉的：
 # 它在设置里、不在数组里，于是「代码快照较旧」挂了十几天没人知道）。
 #
-# 格式：<仓名><TAB 或空格><分支>；`#` 开头整行是注释；空行忽略。
+# 格式：<仓名><TAB 或空格><分支>[<TAB 或空格><stale_after_days>]；`#` 开头整行是注释；
+# 空行忽略。第三格可选：超过这么多天没有新提交才提醒（缺省 7）；写 never = 这个仓的上游
+# 已归档，**不因「上游不动了」提醒**（同步失败照样报）。为什么按仓定阈值见
+# src/core/codemirror/repo-inventory.ts 的文件头，以及 2026-11-09 那份报告。
 #   - 仓名只放行 [A-Za-z0-9._-]：它会被拼成服务器上的路径
 #     （/srv/123pan-mirror/<仓名>.git），带 `/` 或 `..` 就是一次路径穿越。
 #   - 分支写**远端真实存在的那一个**。镜像的 HEAD 会跟着它走，而 `head()` 读的是 HEAD
@@ -30,8 +33,8 @@
 123pan-pc	master
 123pan-uni-app	master
 123pan-cross-frontend	master
-123pan-agent-tracker	master
-123pan-gateway	master
+123pan-agent-tracker	master	365
+123pan-gateway	master	180
 apisrv	master
 
 # ─── 2026-11-08 第二批：清单文档《代码仓库全景图-2026-04-16.md》里的前端的一批（17 个）───
@@ -47,20 +50,55 @@ apisrv	master
 #   - `eslint-config` / `app-ui-test` / `web-ui-test` 是库与测试件，不是应用——按名字照加，
 #     覆盖率表会显示它们「有索引、没有页面」，这是它们该有的样子。
 # 分支一律 master：逐个 `git ls-remote --symref <url> HEAD` 验过，默认分支就是 master。
+#
+# 第三格为什么是这几个数（2026-11-09，判据只一条：**这个仓多久没有任何提交是正常的**）：
+#   virtuallist-antd  never   2023-06-04 之后再无提交（1254 天）。已归档的组件库，HEAD 年龄
+#                             不是关于我们管道的任何事实；任何有限数字早晚会被跨过，然后
+#                             下一个人会看到一个「阈值」并以为它是量出来的。
+#   ele-react         730     停更的 Electron 客户端（364 天）。留一条硬上界：真有人在两年后
+#                             接手时，那句提醒仍然会响。
+#   share             540     分享页（339 天）。产品仓，只是发版稀疏：一年半没有提交本身
+#                             就是一件该被问一句的事。
+#   eslint-config     365     配置库（161 天）。按年改一次是它的正常节奏。
+#   agent-tracker     365     内部工具（73 天）。季度级改动。
+#   gateway           180     网关（50 天，十天内会越过全局 7 天）。它是活跃组件，半年是上界。
+# 这六个之外**一律不写第三格**（= 全局 7 天）：真停摆的仓要尽早被发现，而给所有仓放宽阈值
+# 等于把这一列取消掉。数字是「下一次复评的时间点」，不是永久静音。
+#
+# 2026-11-09 更正：那 7 个「远端不存在」的仓已经从这份清单里**删掉**了。它们在这里
+# 每多待一夜，`sync-mirrors.sh` 就对每一个各打一条 `FAIL … 目录不存在` 并让整轮 rc=3
+# ——一个每晚都非零的退出码不再是信号，于是真正的那一次故障也没人看。
+# 删掉的 7 个是：123pan-ssr、123pan-video、123pan-windowsPro、crazy-api、
+# platform-fontend、app-ui-test、web-ui-test。
+# **证据没有删**：`repo_coverage` 里它们 7 行 ok=false + 原因还在（要查为什么当初以为它们
+# 存在，看那 7 行 + 报告 §8.4）。所以：先查表，**不要再从《代码仓库全景图-2026-04-16.md》
+# 把名字抄回来**——那份文档是历史，不是仓注册表。
 frontend	master
-share	master
+share	master	540
 phoenix-share	master
-123pan-ssr	master
-123pan-video	master
 123pan_manager_frontend	master
-123pan-ele-react	master
+123pan-ele-react	master	730
 123pan-resource-library	master
-123pan-virtuallist-antd	master
-123pan-windowsPro	master
+123pan-virtuallist-antd	master	never
 123pan-image-hosting	master
 Nimbus	master
-crazy-api	master
-platform-fontend	master
-eslint-config	master
-app-ui-test	master
-web-ui-test	master
+eslint-config	master	365
+
+# ─── 2026-11-09 第三批：Go 仓先接 5 个（35 条 backend 需求）───
+#
+# 为什么是这 5 个、为什么只接 5 个：全量 79 个 Go 仓约 32 GB（按 apisrv 0.367 GB 外推），
+# 而 35 条 backend 需求集中在四块：风控/封禁（10 条）、对象存储与 CDN 直链（6 条）、
+# 会员/付费/发票（3 条）、文件域（回收站/批量重命名/修改时间/搜索，4 条）。所以按
+# 「需求落在哪个服务」挑，不按「仓好不好接」挑：
+#   usercenter         账号与封禁字段（默认分支是 v1，不是 master——ls-remote 验过）
+#   pay_server         会员到期、活动商品配置、发票
+#   contentTreeSrv     文件树/目录结构：回收站恢复、批量重命名、file.update_at
+#   api_server_restful RESTful 入口（/blacklist/add 这类接口的另一份实现）
+#   osssrv             对象存储：直链产品的回源/生命周期/日志/成本
+# 没能进来的：`cdn-manager` / `cloud-drive` 在 codeup 的 123pan 组下**不存在**
+# （`ls-remote` 多种拼法都 not found，见报告）。直链那 6 条因此只有 osssrv 这一侧。
+usercenter	v1
+pay_server	master
+contentTreeSrv	master
+api_server_restful	master
+osssrv	master

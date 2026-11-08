@@ -17,10 +17,23 @@
 
 ## config/repos.txt（唯一一份仓清单）
 
-「哪些仓」只写在 `config/repos.txt` 里（一行 `仓名<TAB 或空格>分支`，`#` 整行注释）。
-三个读者：服务器上的 `sync-mirrors.sh`、`scripts/repos-apply.ts`（播种设置）、
+「哪些仓」只写在 `config/repos.txt` 里（一行 `仓名<TAB 或空格>分支[<空白>stale_after_days]`，
+`#` 整行注释）。三个读者：服务器上的 `sync-mirrors.sh`、`scripts/repos-apply.ts`（播种设置）、
 `scripts/onboard-repos.ts`（批量接入）。**加一个仓 = 改这个文件 + commit**，脚本一行
 都不用动。格式、校验、加仓步骤见文件头的注释。
+
+第三格 `stale_after_days`（可选，2026-11-09 起）：
+
+| 写法 | 含义 |
+|---|---|
+| 不写 | 过期判据用全局 7 天（`MIRROR_STALE_DAYS`） |
+| `365` | 这个仓超过 365 天没有新提交才提醒 |
+| `never` | **不因「上游不动了」提醒**（上游已归档的仓），但同步失败照样提醒 |
+
+`never` 的边界（重要）：它只静音「HEAD 旧了」这一条判据。`mirror_health.ok = false`
+（fetch/索引失败）与「表里没有这个仓」两条**不读**这一列，在任何阈值下都报——
+「上游死了」与「我们抓不到」不是一件事，不能因为静音前者而吞掉后者。代价是这几种仓
+「cron 悄悄停了」这种安静坏法也没有铃铛了，见报告里「剩下的告警噪音面」一节。
 
 ## sync-mirrors.sh（服务器）
 
@@ -35,10 +48,23 @@ owner root）——这些仓被 flowers 的走查/评审**只读**读取，同�
 - 日志：`/var/log/sync-flowers-mirror.log`（`SYNC_FLOWERS_LOG` 可改）
 - 锁：`/var/lock/sync-flowers-mirror.lock`（`flock -n`，抢不到退出 0 并留一行
   `skip: another sync is running`）
-- 一个仓失败不拖住另一个；任一失败整体退出 3
+- 一个仓失败不拖住另一个；**瞬时**失败按 `FETCH_RETRIES`（默认 2）重试，退避
+  `RETRY_BACKOFF × 第几次`（默认 2 s）——2026-11-08 夜 14 轮实测里 13 轮有 ≥5 个
+  `Could not resolve host` / `Failed to connect … after 1 ms`，全是重试一次就好的
+  瞬时错误。只重试瞬时错误：分支不存在、仓不存在、凭据失效重试三次只是把答案拖长。
+  超时（我们自己的 `timeout` 杀的）**最多再试一次**：两次 300 s 的挂起就能把
+  05:05→05:10 的窗口顶过，那时夜间索引会开始索引一个还在同步的镜像。
 - 日志里 userinfo 一律抹成 `//<userinfo>@`；`config` 里不许有 `remote`、不许有带凭据的 URL
-- 退出码：`0` 成功（含 `moved=0` 已是最新）/ `3` 至少一个仓失败 / `2` 环境不对（缺
-  flock、建不了日志或锁目录）
+- 退出码（四档）：
+  - `0` 成功（含 `moved=0` 已是最新）
+  - `3` **真故障**：某仓在所有重试之后仍 fetch / `update-ref` 失败，或收尾 cfg 检查不过
+  - `4` **没有真故障，但有仓还没有镜像**（清单里有、还没 onboard）。这不是同步坏了，
+    下一步是跑 `onboard-repos.ts`——所以它是另一个码，否则「昨晚加了 5 个仓」与
+    「codeup 连不上」在 cron 里长得一样
+  - `2` 环境/清单不对（缺 flock、清单读不到或不合格式、建不了日志或锁目录）。
+    注意 `set -e` 之外还有一层：`sync_one` 用返回码 `2` 表示「镜像不存在」，
+    调用方据此把整轮收成 `4` 而不是 `3`
+  - `flock` 抢不到 → `0`（另一次同步在做）
 
 **它必须跑在服务器上**，所以本仓库这一份会被 rsync 过去：
 
@@ -150,6 +176,8 @@ scripts/install-cron.sh --check
   `code.mirror.repos`），`123pan-cross-frontend` 因此从 2026-10-21 一直没抓。
   现在两份由 `config/repos.txt` 统一，`index-nightly` 里那条 `(inventory)` 告警盯漂移；
   但**漂移仍要人去跑 `repos-apply.ts`**——这一层不自动改设置。
-- 新接入的 `123pan-agent-tracker`（HEAD 2026-08-28）与 `123pan-gateway`（2026-09-20）
-  的 `master` 本身就旧，按 0031 的判据它们每天都会触发一条 `mirror.stale`。这不是接入
-  出错，是那两个仓真的没动。
+- `123pan-agent-tracker`（HEAD 2026-08-28）、`123pan-gateway`（2026-09-20）、`share`
+  （2025-12-05）、`123pan-ele-react`（2025-11-10）、`eslint-config`（2026-06-01）、
+  `123pan-virtuallist-antd`（2023-06-04）的 `master` 本身就旧。2026-11-09 起这几个仓在
+  清单里有自己的第三格（`365`/`180`/`540`/`730`/`365`/`never`），所以它们不再每晚各产
+  一条 `mirror.stale`。这不是接入出错，是那些仓真的没动。

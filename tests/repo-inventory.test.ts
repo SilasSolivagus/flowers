@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import { parseRepos } from '../src/core/codemirror/mirror.js';
 import {
-  FALLBACK_BRANCH, diffRepos, formatInventoryLine, inventoryToRepos, parseRepoInventory,
-  readRepoInventory, reposSettingJson,
+  DEFAULT_STALE_AFTER_DAYS, FALLBACK_BRANCH, STALE_NEVER, diffRepos, formatInventoryLine,
+  inventoryToRepos, parseRepoInventory, readRepoInventory, reposSettingJson, staleThresholdsOf,
 } from '../src/core/codemirror/repo-inventory.js';
 
 /**
@@ -38,9 +38,9 @@ describe('parseRepoInventory', () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.data.repos).toEqual([
-      { id: '123pan-pc', branch: 'master', line: 2 },
-      { id: '123pan-uni-app', branch: 'master', line: 3 },
-      { id: '123pan-gateway', branch: FALLBACK_BRANCH, line: 6 },
+      { id: '123pan-pc', branch: 'master', line: 2, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
+      { id: '123pan-uni-app', branch: 'master', line: 3, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
+      { id: '123pan-gateway', branch: FALLBACK_BRANCH, line: 6, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
     ]);
     // 注释 2 行 + 空行 2 行（含结尾换行造出来的那一行）：计数只为「这份文件确实被读到了」。
     expect(parsed.data.skipped).toBe(4);
@@ -50,7 +50,9 @@ describe('parseRepoInventory', () => {
 
   it('连续空格当一格（有人用对齐）', () => {
     const parsed = parseRepoInventory('a    dev\n');
-    expect(parsed.ok && parsed.data.repos[0]).toEqual({ id: 'a', branch: 'dev', line: 1 });
+    expect(parsed.ok && parsed.data.repos[0]).toEqual({
+      id: 'a', branch: 'dev', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+    });
   });
 
   it('重名整份失败，并点名两行', () => {
@@ -68,11 +70,32 @@ describe('parseRepoInventory', () => {
     }
   });
 
-  it('多出来的格子整份失败（注释只能整行）', () => {
-    const parsed = parseRepoInventory('a master 主线\n');
+  it('多出来的格子整份失败（第四格起，注释只能整行）', () => {
+    const parsed = parseRepoInventory('a master 365 主线\n');
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
     expect(parsed.message).toContain('多了');
+  });
+
+  it('第三格：数字 = 每仓阈值；缺省 = 7；never = 永不因旧提醒', () => {
+    const parsed = parseRepoInventory('a master 365\nb dev\nc main never\n');
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.data.repos.map((entry) => entry.staleAfterDays))
+      .toEqual([365, DEFAULT_STALE_AFTER_DAYS, null]);
+    // `null` 与 `7` 必须是两件事：前者是「上游已归档」，后者是「照常提醒」。
+    expect(parsed.data.repos[2]!.staleAfterDays).toBeNull();
+    expect(staleThresholdsOf(parsed.data.repos)).toEqual({ a: 365, b: 7, c: null });
+  });
+
+  it('第三格写 0 / 负数 / 非数字整份失败并点名（0 不是一个天数）', () => {
+    for (const bad of ['0', '-1', '7d', 'never!', '1.5']) {
+      const parsed = parseRepoInventory(`a master ${bad}\n`);
+      expect(parsed.ok, bad).toBe(false);
+      if (parsed.ok) continue;
+      expect(parsed.message).toContain('stale_after_days');
+      expect(parsed.message).toContain('never');
+    }
   });
 
   it('分支带 .. 整份失败', () => {
@@ -98,8 +121,8 @@ describe('parseRepoInventory', () => {
 describe('inventoryToRepos / reposSettingJson', () => {
   it('path 由 MIRROR_ROOT 拼出来（尾斜杠不影响）', () => {
     const lines = [
-      { id: 'a', branch: 'master', line: 1 },
-      { id: 'b', branch: 'dev', line: 2 },
+      { id: 'a', branch: 'master', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
+      { id: 'b', branch: 'dev', line: 2, staleAfterDays: null },
     ];
     expect(inventoryToRepos(lines, '/srv/x/')).toEqual([
       { id: 'a', path: '/srv/x/a.git' },
@@ -172,6 +195,12 @@ describe('readRepoInventory', () => {
     if (!result.ok) return;
     expect(result.data.file).toBe(file);
     expect(formatInventoryLine(result.data.inventory.repos[0]!)).toBe('shop-web\tmain');
+    // 偏离默认的第三格才写出来（一份 30 行的清单里 24 行写 7 只是噪音）。
+    const withStale = parseRepoInventory('a master 365\nb main never\nc dev\n');
+    expect(withStale.ok).toBe(true);
+    if (!withStale.ok) return;
+    expect(withStale.data.repos.map(formatInventoryLine))
+      .toEqual(['a\tmaster\t365', `b\tmain\t${STALE_NEVER}`, 'c\tdev']);
   });
 
   it('坏行的报错里有文件名', async () => {

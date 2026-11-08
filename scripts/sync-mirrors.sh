@@ -20,6 +20,12 @@
 # 分支也是每仓一格：仓一多，「所有仓都叫 master」立刻不成立（有的叫 main，有的就是 dev），
 # 而分支写错的错法是安静的——fetch 成功、HEAD 很新、材料对着另一个分支的代码。
 #
+# 第三格 `stale_after_days`（可选）：**本脚本只负责认它、不解释它**。它被
+# `src/core/codemirror/health.ts` 的新鲜度判定读（超过这么多天才提醒；`never` = 上游
+# 已归档、不因「上游不动了」提醒，但同步失败照报）。两处必须认同一套语法：一份清单在
+# TS 侧能读、在 bash 侧报错退出 2，那一晚就一条仓都不同步——所以这里的校验与
+# `parseRepoInventory()` 逐条对齐（`never` 或正整数，缺省 7 天）。
+#
 # 与 `sync-repos-ro.sh`（另一批仓，影子只读挂载）的关系：同一套约定（flock、单一日志、
 # GIT_TERMINAL_PROMPT=0、日志里抹掉 userinfo、safe.directory），但它**不**复用那份
 # 脚本——那三个仓是 brainboil 的 555 只读影子，这些仓是 root 的 bare 镜像，权限与
@@ -34,9 +40,15 @@
 #   SYNC_FLOWERS_LOG=/tmp/x.log scripts/sync-mirrors.sh
 #   scripts/sync-mirrors.sh --help
 #
-# 退出码：0 = 全部成功（含「已经是最新」，日志里 moved=0 能分辨）；3 = 至少一个仓失败；
-#         2 = 环境/清单不对（缺仓目录 / 清单读不到或不合格式 / 建不了日志或锁文件）。
-#         flock 被人占着时退出 0：那一轮是**另一次同步在做**，不是失败（次数少、且下一次会补上）。
+# 退出码（2026-11-09 起四档，理由见「两个信号不能共用一格」那段）：
+#   0 = 全部成功（含「已经是最新」，日志里 moved=0 能分辨）
+#   3 = **真故障**：至少一个仓在所有重试之后仍然 fetch / update-ref 失败，或收尾的
+#       cfg 检查不过（镜像里有 remote、或 config 里带凭据 URL）
+#   4 = **没有真故障**，但有仓在服务器上没有镜像目录（清单里有、还没 onboard）。
+#       这不是「同步坏了」，下一步是跑 scripts/onboard-repos.ts —— 所以它必须是另一个码，
+#       否则「昨晚加了 5 个仓、还没来得及建镜像」和「codeup 连不上」在 cron 里长得一样。
+#   2 = 环境/清单不对（清单读不到或不合格式 / 建不了日志或锁文件）—— 一个仓都还没动
+#   flock 被人占着时退出 0：那一轮是**另一次同步在做**，不是失败（次数少、且下一次会补上）
 set -euo pipefail
 
 MIRROR_ROOT="${MIRROR_ROOT:-/srv/123pan-mirror}"
@@ -44,6 +56,13 @@ CODEUP_BASE="${CODEUP_BASE:-https://codeup.aliyun.com/60f9058e68e2993a8e6d0750/1
 LOG="${SYNC_FLOWERS_LOG:-/var/log/sync-flowers-mirror.log}"
 LOCK="${SYNC_FLOWERS_LOCK:-/var/lock/sync-flowers-mirror.lock}"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-300}"
+# 重试：2026-11-08 夜在 dogyun 上跑了 14 次整轮，**13 次**出现 ≥5 个瞬时 fetch 失败
+# （`Could not resolve host` / `Failed to connect … port 443 after 1 ms`），而仓本身全是好的。
+# 不重试的话每一轮都以 rc=3 收尾并留下几条 FAIL——那种「每晚都红」的日志没有人会读，
+# 于是真正的故障也一起被淹掉。与 `onboard-repos.ts` 的 `cloneWithRetry` 同一套语义
+# （同一条故障源、同一份证据），区别只在退避更短：夜间窗口只有 5 分钟。
+FETCH_RETRIES="${FETCH_RETRIES:-2}"
+RETRY_BACKOFF="${RETRY_BACKOFF:-2}"
 
 # 清单位置：默认**脚本旁边那一份**（`install-cron.sh --server` 会把 config/repos.txt
 # rsync 到 `/opt/123pan/tools/_ro/repos.txt`，与脚本同一个目录）。在仓库里直接跑时
@@ -66,7 +85,9 @@ usage() {
 读仓清单（默认 $(default_repos_file)），把每个仓的**清单里写的分支**从 codeup
 fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref，然后把写位收回。
 
-清单格式：<仓名><TAB 或空格><分支>；\`#\` 开头整行是注释；空行忽略。
+清单格式：<仓名><TAB 或空格><分支>[<TAB 或空格><stale_after_days>]；
+\`#\` 开头整行是注释；空行忽略。第三格缺省 7 天，写 never = 不因「上游不动了」提醒
+（本脚本只认这一格，判定在 src/core/codemirror/health.ts）。
 
 环境变量：
   REPOS_FILE          仓清单            默认 脚本旁边的 repos.txt（或 ../config/repos.txt）
@@ -75,8 +96,11 @@ fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref�
   SYNC_FLOWERS_LOG    日志文件          默认 /var/log/sync-flowers-mirror.log
   SYNC_FLOWERS_LOCK   锁文件            默认 /var/lock/sync-flowers-mirror.lock
   FETCH_TIMEOUT       单次 fetch 超时（秒） 默认 300
+  FETCH_RETRIES       瞬时失败重试次数      默认 2（只重试瞬时错误，见脚本头部）
+  RETRY_BACKOFF       重试退避基数（秒）     默认 2（第 n 次失败后等 n×这个数）
 
-退出码：0 成功（含 already up to date）/ 3 至少一个仓失败 / 2 环境或清单不对。
+退出码：0 全部成功（含 already up to date）/ 3 重试后仍失败的仓或 cfg 检查不过
+        / 4 有仓还没有镜像（跑 onboard-repos.ts）/ 2 环境或清单不对。
 USAGE
 }
 
@@ -119,9 +143,18 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "清单里仓名「$name」形状不合法：只允许 [A-Za-z0-9._-]" >&2
     exit 2
   fi
-  if [ -n "${3:-}" ]; then
-    echo "清单里「$trimmed」多了格子（格式是「仓名 分支」，注释只能整行）" >&2
+  if [ -n "${4:-}" ]; then
+    echo "清单里「$trimmed」多了格子（格式是「仓名 分支 [stale_after_days]」，注释只能整行）" >&2
     exit 2
+  fi
+  # 第三格：可选，本脚本只认不解释（判定在 health.ts）。校验要与 parseRepoInventory 对齐：
+  # 一边能读、一边报错退出 2，那一晚整份清单都不同步。
+  stale="${3:-}"
+  if [ -n "$stale" ]; then
+    if ! printf '%s' "$stale" | grep -Eqi '^never$' && ! printf '%s' "$stale" | grep -Eq '^[1-9][0-9]{0,5}$'; then
+      echo "清单里「$name」的 stale_after_days「$stale」不合法：只接受正整数或 never" >&2
+      exit 2
+    fi
   fi
   if [ -z "$branch" ]; then
     branch=master   # 与 TS 侧 FALLBACK_BRANCH 同一个值；TS 会给一行提示，这里只记日志
@@ -161,7 +194,21 @@ echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} manifest=$REPOS_FILE =
 # 但一旦有人顺手把 token 拼进 URL，这一行是最后一道闸。
 mask() { sed -E 's#//[^/@ ]*@#//<userinfo>@#g'; }
 
-# 同步一个仓。成功返回 0（无论 ref 有没有动），失败返回 1——调用方收集，不中断循环。
+# 这次失败是不是**瞬时**的（值得再试一次）。
+#
+# 只重试瞬时错误，不重试「确定性」错误：分支不存在（`couldn't find remote ref`）、仓不存在
+# （`not found`）、凭据失效（`Authentication failed`）重试三次只会把一个明确的答案拖成
+# 3 倍的等待，而且它们的日志会长得和真实故障一模一样。判定按**错误文本**（git 的退出码
+# 太粗：DNS 失败、连不上、认证失败都是 128）。
+is_transient() {
+  local rc="$1" out="$2"
+  [ "$rc" -eq 124 ] && return 0   # 我们自己 timeout 杀的：最典型的瞬时
+  printf '%s' "$out" | grep -Eqi \
+    'could not resolve host|temporary failure in name resolution|failed to connect|connection (reset|refused|timed out|aborted)|recv failure|send failure|early eof|rpc failed|remote end hung up|operation timed out|the remote end hung up unexpectedly|tls handshake|unexpected disconnect|http 5[0-9][0-9]|returned error: 5[0-9][0-9]'
+}
+
+# 同步一个仓。成功返回 0（无论 ref 有没有动）、镜像不存在返回 2、失败返回 1--
+# 调用方按这三种收尾（rc=3 与 rc=4 的区别就来自这个 2，见文件头）。
 sync_one() {
   local repo="$1"
   local branch="$2"
@@ -173,22 +220,37 @@ sync_one() {
     # 镜像不存在不是「同步失败」而是「还没接入」：说清楚下一步（onboard-repos 建它），
     # 而不是让人去猜为什么一个目录凭空该存在。
     echo "FAIL $repo: 目录不存在（${dir}）——先跑 scripts/onboard-repos.ts 建这个镜像"
-    return 1
+    return 2
   fi
 
   before=$("${g[@]}" rev-parse --short HEAD 2>/dev/null) || before="(none)"
 
   # fetch 只写 FETCH_HEAD，不动任何 ref：真正的更新在下面用 CAS 写，
   # 这样「fetch 到一半失败」不会把 master 留在半更新的状态。
-  set +e
-  out=$(timeout "$FETCH_TIMEOUT" "${g[@]}" fetch --quiet --no-tags --prune \
-    "$CODEUP_BASE/$repo.git" "$branch" 2>&1)
-  st=$?
-  set -e
-  if [ "$st" -ne 0 ]; then
-    echo "FAIL fetch $repo@$branch (rc=$st): $(printf '%s' "$out" | mask | tail -3 | tr '\n' ' ')"
-    return 1
-  fi
+  local attempt=0 max=$((FETCH_RETRIES + 1))
+  while :; do
+    attempt=$((attempt + 1))
+    set +e
+    out=$(timeout "$FETCH_TIMEOUT" "${g[@]}" fetch --quiet --no-tags --prune \
+      "$CODEUP_BASE/$repo.git" "$branch" 2>&1)
+    st=$?
+    set -e
+    [ "$st" -eq 0 ] && break
+    # 超时**最多再试一次**：一次 300 s 的挂起已经吃掉 05:05→05:10 那 5 分钟窗口的十分之一，
+    # 而两次挂起就能把整轮顶过 05:10（那时夜间索引会开始索引一个还在同步的镜像）。
+    # 「连不上」是秒级失败，重试它很便宜；「挂住」不是，所以两者不共用同一个次数上限。
+    if [ "$st" -eq 124 ] && [ "$attempt" -ge 2 ]; then
+      echo "FAIL fetch $repo@$branch (rc=$st, 超时，试了 $attempt 次): $(printf '%s' "$out" | mask | tail -3 | tr '\n' ' ')"
+      return 1
+    fi
+    if [ "$attempt" -ge "$max" ] || ! is_transient "$st" "$out"; then
+      echo "FAIL fetch $repo@$branch (rc=$st, 试了 $attempt 次): $(printf '%s' "$out" | mask | tail -3 | tr '\n' ' ')"
+      return 1
+    fi
+    local wait_secs=$((RETRY_BACKOFF * attempt))
+    echo "RETRY fetch $repo@$branch (rc=$st, 第 $attempt 次失败，${wait_secs}s 后重试): $(printf '%s' "$out" | mask | tail -1)"
+    sleep "$wait_secs"
+  done
 
   local new_full
   new_full=$("${g[@]}" rev-parse FETCH_HEAD 2>/dev/null) || {
@@ -221,8 +283,17 @@ sync_one() {
 }
 
 rc=0
+missing=0
 for i in "${!REPOS[@]}"; do
-  if ! sync_one "${REPOS[$i]}" "${BRANCHES[$i]}"; then rc=3; fi
+  # 逐仓判定，**不许**用 `if ! sync_one`：那样「镜像还没建」（2）与「同步失败」（1）
+  # 会合成同一个真值，而这两件事的下一步完全不同（跑 onboard-repos.ts vs 看网络）。
+  st=0
+  sync_one "${REPOS[$i]}" "${BRANCHES[$i]}" || st=$?
+  case "$st" in
+    0) ;;
+    2) missing=$((missing + 1)) ;;
+    *) rc=3 ;;
+  esac
 done
 
 # 与 sync-repos-ro.sh 同一条收尾检查：镜像不许有 remote、config 里不许有带凭据的 URL。
@@ -235,5 +306,11 @@ for repo in "${REPOS[@]}"; do
   if [ "$c" -ne 0 ] || [ "$u" -ne 0 ]; then rc=3; fi
 done
 
+# 只有「没有真故障」时，缺镜像才升级成 rc=4：一个既连不上 codeup、又有仓没建镜像的夜里，
+# 人要先看到的是 3（同步坏了），不是 4（去建镜像）。
+if [ "$rc" -eq 0 ] && [ "$missing" -gt 0 ]; then
+  rc=4
+  echo "NOTE $missing 个仓还没有镜像（清单里有）：跑 scripts/onboard-repos.ts 建；本轮 fetch 全绿"
+fi
 echo "=== sync done rc=$rc $(date -Iseconds) ==="
 exit "$rc"

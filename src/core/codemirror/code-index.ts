@@ -168,6 +168,28 @@ const COMPONENT_DIR = /(^|\/)components?\//i;
 const SERVICE_DIR = /(^|\/)(services?|apis?)\//i;
 const STATE_DIR = /(^|\/)(stores?|hooks?|composables?)\//i;
 
+/**
+ * **库仓的平铺入口**：`src/index.ts` / `src/index.tsx` / `lib/index.js` 这一类。
+ *
+ * 为什么需要它（2026-11-09 实测）：`123pan-virtuallist-antd` 的 38 个文件里**只有一个**
+ * 产品源码——`src/index.tsx`（其余 37 个是 `.eslintrc.js`、`rollup.config.js`、
+ * `jest.config.js`、`docs/` 下的 20 个 md、`docs/examples/*.tsx` 演示、`__mocks__/`、
+ * `tests/`、`.umirc.ts`、`tsconfig.json`）。组件库没有 `components/`、没有 `pages/`，
+ * 于是它落 `other`，整个仓 **0/38**——而 0 在覆盖率表里与「这个仓不值得接」长得一样。
+ *
+ * 为什么判 `component` 而不是新造一个 kind：`FileKind` 是**前端角色**的轴
+ * （页面/组件/服务/状态/路由表），一个组件库的入口导出的就是组件；新加 `'entry'` 会让
+ * `KIND_RANK`、`locate` 的排序、以及所有穷举 `FileKind` 的地方各多一条分支，而它能表达的
+ * 信息（「这个文件是库的公开面」）在这张表里没有消费者。
+ *
+ * **故意窄**：只认 `src/` 或 `lib/` 的**直接子文件**且名字正好是 `index.<源码扩展名>`。
+ * 更宽的写法（`src/` 下的任意源码、`app/index.ts`、任意深度的 `index.ts`）会把每个 app 仓的入口与每个
+ * 目录的 barrel 都收进来——那正是这条规则要避免的「什么都算组件」。副作用要说清：
+ * 一个普通 app 仓的 `src/index.tsx`（真正的应用入口）此后也会以 `component` 进索引，
+ * 那是这一类文件在 `locate` 里最接近的桶，而不是「它真的是个组件」。
+ */
+const LIB_ENTRY = /^(?:src|lib)\/index\.(?:ts|tsx|js|jsx|mjs|cjs|vue)$/i;
+
 /** 只认这几种扩展名：索引不是「全仓文本搜索」。`.go` 是 2026-11-08 扩的（后端 35 条需求）。 */
 export const CODE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|vue|go)$/i;
 
@@ -242,6 +264,7 @@ export function classifyKind(path: string): FileKind {
   if (COMPONENT_DIR.test(clean)) return 'component';
   if (SERVICE_DIR.test(clean)) return 'service';
   if (STATE_DIR.test(clean)) return 'state';
+  if (LIB_ENTRY.test(clean)) return 'component';
   return 'other';
 }
 

@@ -43,6 +43,24 @@ import type { MirrorResult, RepoRef } from './mirror.js';
  * （有的仓主线叫 `master`、有的叫 `main`、有的就是 `dev`）。更麻烦的是**它的错法是安静的**：
  * 分支写错时 `head()` 读到的是另一个分支的最新提交，`mirror_health` 显示「很新」，
  * 而材料对着的是错的代码。所以分支是每仓一格，且是必填（不猜默认值）。
+ *
+ * ── 第三格 `stale_after_days` 为什么在这里（2026-11-09）
+ *
+ * 镜像新鲜度的判据一直是**全局一个数**（`MIRROR_STALE_DAYS = 7`）。仓少的时候够用，仓多
+ * 之后它把两类完全不同的事混成一条红点：
+ *
+ * - 「这个仓真的停摆了」——该报，而且是越早越好；
+ * - 「这个仓的上游本来就一年不动一次」——`123pan-virtuallist-antd` 停在 2023-06（1254 天）、
+ *   `123pan-ele-react` 364 天、`share` 339 天。这类仓每晚各产一条提醒，owner 的铃铛里
+ *   从此常驻 5–6 条**永远不会消失**的红点。永远非零的告警不再是信号。
+ *
+ * 所以阈值要按仓定，而**按仓的属性属于清单**（它描述的是「我们这个仓是什么」），不属于
+ * 读侧的测量表（`mirror_health` 存的是「它现在怎样」）。这也是为什么这一格**不落库、
+ * 不需要迁移**：清单本身就是这份策略的存储，读侧每次从文件里读一次。
+ *
+ * 语义：超过这么多天才报；`never` = 不因「上游不动了」报。**同步失败照报**（`ok = false`
+ * 那条判据不看这一列）——「上游死了」与「我们抓不到」是两件事，不能因为前者被静音
+ * 而把后者一起吞掉。
  */
 
 /** 服务器上 bare 镜像的根目录。与 `scripts/sync-mirrors.sh` 的 `MIRROR_ROOT` 同一个默认值。 */
@@ -77,8 +95,43 @@ export const REPO_NAME_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** 分支名的形状：git 自己允许的字符很宽，这里只拦最危险的那几个（空格 / `..` / 控制字符）。 */
 export const BRANCH_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
-/** 清单里的一行：仓名 + 分支 + 它在文件里的行号（报错时点名「第 12 行」比「某个仓」有用）。 */
-export type InventoryLine = { id: string; branch: string; line: number };
+/**
+ * 「上游多少天没有新提交才算旧」的默认值。与 `health.ts` 的 `MIRROR_STALE_DAYS` 是同一个数，
+ * 但**不是同一个常量**：这一份是**清单语法**的默认（清单里没写这一格时填什么），那一份是
+ * **判定逻辑**的默认（调用方没给这张表时按几天判）。两者今天相等是巧合，不是约束——
+ * 一个是「文件的缺省」，一个是「函数的缺省」，值的来源不同。
+ */
+export const DEFAULT_STALE_AFTER_DAYS = 7;
+
+/**
+ * 第三格的「永不为旧」写法。
+ *
+ * 为什么要有这个哨兵，而不是「写一个很大的数」：`123pan-virtuallist-antd` 的 HEAD 停在
+ * 2023-06-04（1254 天），任何有限的数**早晚会被跨过**——写 1460 只是把同一句谎话推迟
+ * 一年，而下一年的维护者会看到一个「阈值」并以为它是量出来的。`never` 说的是实话：
+ * 这个仓的上游已经归档，HEAD 的年龄**不是**关于我们管道的任何事实。
+ *
+ * 它换掉的是哪一种提醒：**只有「上游不动了」那一条**。同步真的坏掉（fetch 失败、索引
+ * 失败、镜像里没有 HEAD）走的是 `ok = false` / `unknown` 两条路，那两条**不读**这一列，
+ * 照报（见 `health.ts` 的 `judgeMirror`）。代价写在 `docs/superpowers/plans/
+ * 2026-11-08-repo-onboarding.md` 的收尾一节：这两类仓「cron 停了」这种安静坏法也没有
+ * 铃铛了。
+ */
+export const STALE_NEVER = 'never';
+
+/**
+ * 清单里的一行：仓名 + 分支 + 它的陈旧阈值 + 行号（报错时点名「第 12 行」比「某个仓」有用）。
+ *
+ * `staleAfterDays`：`null` = `never`（不因「上游不动了」提醒），数字 = 超过这么多天才提醒。
+ * 清单里没写这一格时填 `DEFAULT_STALE_AFTER_DAYS`，于是**读侧永远拿到一个确定的值**，
+ * 不必在三个调用点上各自再写一遍「缺省 7」。
+ */
+export type InventoryLine = {
+  id: string;
+  branch: string;
+  line: number;
+  staleAfterDays: number | null;
+};
 
 export type Inventory = {
   repos: InventoryLine[];
@@ -125,11 +178,11 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
           + '（它会被拼成 /srv/123pan-mirror/<仓名>.git）',
       };
     }
-    if (cells.length > 2) {
+    if (cells.length > 3) {
       return {
         ok: false, code: 'bad_config',
-        message: `第 ${lineNo} 行多了 ${cells.length - 2} 格：「${trimmed}」`
-          + '（格式是「仓名<空白>分支」，注释只能整行）',
+        message: `第 ${lineNo} 行多了 ${cells.length - 3} 格：「${trimmed}」`
+          + '（格式是「仓名<空白>分支[<空白>stale_after_days]」，注释只能整行）',
       };
     }
     let branch = branchCell;
@@ -144,6 +197,24 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
         message: `第 ${lineNo} 行的分支「${branch}」形状不合法（不许空格、不许 ..）`,
       };
     }
+    // 第三格：可选。**不写 = 走默认 7 天**（而不是「不报」）——默认值必须是「照常提醒」，
+    // 否则漏写一格会把一个真停摆的仓静音，而漏写是加仓时最容易发生的事。
+    let staleAfterDays: number | null = DEFAULT_STALE_AFTER_DAYS;
+    if (cells.length === 3) {
+      const cell = cells[2] ?? '';
+      if (cell.toLowerCase() === STALE_NEVER) {
+        staleAfterDays = null;
+      } else if (/^[1-9][0-9]{0,5}$/.test(cell)) {
+        staleAfterDays = Number(cell);
+      } else {
+        return {
+          ok: false, code: 'bad_config',
+          message: `第 ${lineNo} 行的 stale_after_days「${cell}」不合法：`
+            + `只接受 1–999999 的整数，或 ${STALE_NEVER}（不因「上游不动了」提醒，`
+            + '但同步失败照样报）。写成 0 或 -1 一律拒绝：这两种都不是一个天数。',
+        };
+      }
+    }
     const firstLine = seen.get(id);
     if (firstLine !== undefined) {
       // 重名不是「后者覆盖前者」：清单里两行同一个仓，说明有人改到一半，而
@@ -154,7 +225,7 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
       };
     }
     seen.set(id, lineNo);
-    repos.push({ id, branch, line: lineNo });
+    repos.push({ id, branch, line: lineNo, staleAfterDays });
   }
   if (repos.length === 0) {
     return { ok: false, code: 'bad_config', message: '清单里一个仓都没有（全空或是全注释）' };
@@ -237,5 +308,25 @@ export function diffRepos(current: readonly RepoRef[] | null, next: readonly Rep
 
 /** 把一份清单变成 shell 可消费的行（`仓名<TAB>分支`），只为测试与文档里的示例。 */
 export function formatInventoryLine(entry: InventoryLine): string {
-  return `${entry.id}\t${entry.branch}`;
+  // 只写**偏离默认**的第三格：一份 30 行的清单里 24 行写着 7 只是噪音，而第三格存在的
+  // 理由是「这几个仓要单独定阈值」——不偏离就不该出现。
+  const stale = entry.staleAfterDays === DEFAULT_STALE_AFTER_DAYS
+    ? ''
+    : `\t${entry.staleAfterDays === null ? STALE_NEVER : String(entry.staleAfterDays)}`;
+  return `${entry.id}\t${entry.branch}${stale}`;
+}
+
+/**
+ * 清单里的「仓 → 陈旧阈值」表（`null` = 永不为旧）。
+ *
+ * 为什么要这一层而不是让调用方各自 `Object.fromEntries(repos.map(...))`：`null = never`
+ * 这个约定只有一处写下来的地方最安全——读侧（`checkMirrorFreshness`）与用例都必须
+ * 用同一个含义读它，而「有人把 null 写成 0」这种错法在两边都表现为「永远提醒」。
+ */
+export function staleThresholdsOf(
+  lines: readonly InventoryLine[],
+): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  for (const entry of lines) out[entry.id] = entry.staleAfterDays;
+  return out;
 }
