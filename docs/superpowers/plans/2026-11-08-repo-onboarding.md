@@ -701,3 +701,365 @@ ssh dogyun 'SYNC_FLOWERS_LOG=/tmp/s.log /opt/123pan/tools/_ro/sync-flowers-mirro
    不是再调 `RETRY_BACKOFF`，是 `xargs -P` 并行（§8.6 第 2 条，仍未做）。
 5. **`repo_coverage` 里 7 个孤儿行**：它们不在清单里，读侧不遍历表，所以不影响判断；
    但「表里有 28 行、清单 21 个仓」这个差会被下一个人当成 bug 问一次。答案在 §9.1。
+
+## 10. 第四轮（2026-11-09 上午）：同步改并行、10 仓排除口径验证、Go 全量 45 个
+
+这一轮的顺序是**先修路再进车**：`sync-mirrors.sh` 串行 21 个仓就已经 154–267 s，而 05:05 →
+05:10 只有 300 s；在这个前提下把仓数从 21 推到 66，等于每天让 `index-nightly` 索引一批
+还没同步完的镜像。所以 §10.1–§10.4 是同步的改动与实测（**先过**），§10.5 是排除口径在
+10 个真仓上的验证（**再过**），§10.6 起才是批量接入。
+
+### 10.1 并行：`xargs -P N`，默认 8
+
+改动全在 `scripts/sync-mirrors.sh`，三条纪律各自对应一种「并行最容易丢的东西」：
+
+| 纪律 | 做法 | 不这么做会怎样 |
+|---|---|---|
+| 日志不许插半行 | 每仓一个缓冲文件 `$JOBDIR/<仓>.log`，全部跑完后按**清单顺序**整份 `cat` | N 个进程同时 `echo` 到同一个 fd，>4 K 的写不保证原子，长行被撕开成读不懂的垃圾——而这份日志是「哪一晚坏了」的唯一证据 |
+| 退出码聚合与串行逐字一致 | 子进程把 `sync_one` 的 rc（0/1/2）写进 `$JOBDIR/<仓>.rc`，父进程按清单顺序读回做同样的分档 | 拿 `xargs` 的退出码当聚合信号，只知道「某次调用非零」，丢掉「哪个仓坏了」；rc=3/4 的分界也随之消失 |
+| 失败隔离 + 锁不泄漏 | `timeout` 仍在子进程里（函数内）；子进程 `exec 9>&-` 摘掉锁 fd | 一个挂住的子进程会让下一轮 `flock -n` 拿到「另一轮在做」的假象，整轮静默跳过 |
+
+`SYNC_JOBS`（默认 8，1–64）是新环境变量。**默认 8 不是拍出来的**：单个 fetch 99% 时间在等
+TLS 与 codeup，所以并发近乎线性；但 codeup 本来就不稳定，N 越大换来的是更多
+`Failed to connect`（对端限流/抖动）而不是更多成功。8 是实测中「没有一个仓因为并发而
+新失败」的最大档。上限卡 64 是因为 `xargs -P 0` 是**无限**并发——一个笔误就能把 codeup
+打成整轮失败。
+
+窗口的算术因此从 `N × 单仓` 变成 `ceil(N/JOBS) × 单仓`。
+
+### 10.2 实测一：21 个仓前后各 5 轮（交错跑，抵消时段性抖动）
+
+串行（旧脚本）与并行（新脚本）**交错**执行，同一份清单、同一台服务器：
+
+| 轮 | 串行 21 仓 | 并行 21 仓（J=8） |
+|---|---|---|
+| 1 | 154.4 s | 29.6 s |
+| 2 | 183.5 s | 85.3 s |
+| 3 | 267.1 s | 67.6 s |
+| 4 | 194.5 s | 58.3 s |
+| 5 | 206.5 s | 42.6 s |
+| **中位** | **194.5 s** | **58.3 s** |
+| **最坏** | **267.1 s** | **85.3 s** |
+
+**3.34×（中位）/ 3.13×（最坏）**。十轮全部 `rc=3`——**两边都是**：这一夜 codeup 持续抖动
+（`Failed to connect … after 1 ms` / `Could not resolve host`），每轮都有 1–6 个仓在三次
+尝试后仍失败。**并行没有修好 codeup，它修的是窗口**。改前 14 轮 0 次全绿（§9.3），改后
+5 轮仍 0 次全绿——这是同一个上游事实，不是回退。
+
+一个必须说清的边界：`SYNC_JOBS` 只压缩**排队**，不压缩**单仓**的 300 s 超时。一个真挂住的
+仓仍然占一个槽位到 `FETCH_TIMEOUT`，所以上界是 `ceil(N/JOBS) × 600 s`（超时最多重试一次）。
+
+### 10.3 实测二：60 条合成清单（走过失败路径的两条岔路）
+
+「不存在的仓名」会掉进两条不同的岔路，两条都要量：
+
+| 合成场景 | 串行 | 并行（J=8） | 结果 |
+|---|---|---|---|
+| 60 条**没有镜像目录**（rc=4 那条路） | 0.34 s | 0.54 s | 每轮 `FAIL … 目录不存在` ×60，`rc=4` |
+| 60 条**镜像在、上游不存在**（走 fetch + 重试 + 退避） | **604.3 s** | **110.8 s** | `FAIL` ×60，`rc=3` |
+| 90 条同型（= 90 个仓的真实规模，**每个都失败**） | —（外推 906 s） | **189.3 s** | `FAIL` ×90，`rc=3` |
+
+第一行是「缺镜像」的聚合正确性（60 条全归到 `missing`，退出码 4）；第二、三行才是窗口
+证据：**最坏情况（90 个仓全部 fetch 失败并且都重试过）189 s < 300 s**，窗口装得下。
+串行在同一个最坏情况下是 906 s——15 分钟，窗口的 3 倍。
+
+端到端（真清单 66 个仓、服务器上部署的那一份 `/opt/123pan/tools/_ro/sync-flowers-mirror.sh`）：
+
+| 轮 | 耗时 | OK | FAIL | 重试行 | cfg 行 | rc |
+|---|---|---|---|---|---|---|
+| 1 | 94.6 s | 59 | 7 | 45 | 66 | 3 |
+| 2 | 98.2 s | 56 | 10 | 51 | 66 | 3 |
+| 3 | 96.0 s | 59 | 7 | 44 | 66 | 3 |
+| 4（**cron 原样调用**：不带任何环境变量，脚本自己找旁边的 `repos.txt`） | 132.7 s | 56 | 10 | 51 | 66 | 3 |
+
+66 个仓的**全部** `OK`/`FAIL` 行与 66 条 `cfg` 行都在，没有一条被截断或交错（
+`grep -hvE '^(OK|FAIL|RETRY|cfg|NOTE|=== sync)'` 对 66 仓和 60/90 条合成日志均为空）。
+失败率 10.6%（7/66），与 21 仓时的 5–14% 同一水平——**并发没有改变失败率，只是把
+绝对条数按仓数放大了**（见 §10.9 第 1 条）。
+
+`scripts/install-cron.sh --server` 已重装（两边 sha256 一致、cron 行在），
+`--check` 全绿：脚本 + 清单两份 sha256 一致、`5 5 * * *` 在、`com.flowers.index-nightly`
+（05:10）已加载。
+
+一个顺手修掉的坑：`--check` 原来在**漂了**的时候也退 0（清单 21 → 66 那一改，它打了 `✗`
+却仍以 0 收尾）。而这条命令唯一的用法是 `scripts/install-cron.sh --check && echo 装好了`
+——退出码为 0 等于把 `✗` 降级成一句注释。现在三条判据（两份 sha256 / cron 行 / launchd 任务）
+任意一条不成立即 `rc=3`，`--server` 之后 `--check` 回到 0。
+
+### 10.4 四档 rc 与「不重试确定性失败」的回归
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 清单里有仓、服务器上没有镜像 | 4 | **4**（合成 `MIRROR_ROOT`） |
+| 镜像 `config` 里带 `[remote]` | 3 | **3**（`cfg apisrv remotes=1`） |
+| 清单里仓名形状不合法（`bad/name`） | 2 | **2**（一个仓都没动） |
+| `flock` 被别人占着 | 0 | **0** + `skip: another sync is running` |
+| 分支不存在 | 3，且**只试 1 次** | **3**，`试了 1 次: fatal: couldn't find remote ref no-such-branch` |
+| 瞬时失败 | 3，重试到 `FETCH_RETRIES+1` 次 | 3，`试了 3 次` / 中途转确定性时 `试了 2 次` |
+
+最后一行值得单独看：同一条命令在不同时刻会走两条路——先撞上 `Failed to connect`（瞬时，
+重试），重试撞上 `couldn't find remote ref`（确定性，立刻停）。日志里 `试了 2 次` 正是
+「一次瞬时 + 一次确定性」的指纹，说明判定按**错误文本**而不是尝试次数。
+
+### 10.5 排除口径验证：10 个真 Go 仓
+
+口径两条（都在 `mirror.ts` / `code-index.ts`，本轮**一行未改**）：`isNoisePath` 的
+`vendor|third_party|testdata` 目录段 + `_test.go`；生成代码按 `Code generated … DO NOT EDIT.`
+的**注释头**（前 5 行）整类剔除。验证方法是「地面真值 vs 库」：地面真值直接在镜像上
+`git ls-tree` + `git show HEAD:<path> | head -5` 逐文件判，**不经过我们的正则**。
+
+| 仓 | 树文件 | 去噪后 `files_total` | 候选 `.go` | 地面真值生成文件 | `files_skipped_generated` | `files_indexed` | 闭合 |
+|---|---|---|---|---|---|---|---|
+| `api_server` | 961 | 960 | 884 | **298** | **298** | 586 | 884−298=586 ✓ |
+| `upload-server` | 241 | 241 | 225 | 73 | 73 | 152 | ✓ |
+| `123pan-slb` | 285 | 189 | 66 | 12 | 12 | 54 | ✓ |
+| `transcode` | 89 | 89 | 56 | 3 | 3 | 53 | ✓ |
+| `offline-download` | 74 | 73 | 58 | 9 | 9 | 49 | ✓ |
+| `silentDataES` | 41 | 41 | 26 | 7 | 7 | 19 | ✓ |
+| `cdk_manager` | 41 | 41 | 32 | 5 | 5 | 27 | ✓ |
+| `gofs` | 64 | 59 | 21 | 0 | 0 | 21 | ✓ |
+| `mount-disk-ws` | 20 | 19 | 11 | 0 | 0 | 11 | ✓ |
+| `uuidsrv` | 14 | 13 | 8 | 0 | 0 | 8 | ✓ |
+
+**10/10 闭合**：`files_indexed == 候选 .go − 生成文件`，一个不多一个不少。也就是说这 10 个
+仓里「进不了索引的东西」只有两类——`_test.go`（按设计不进）与生成代码（真值 == 库里的数），
+没有第三类沉默丢失。`files_total` 是**去噪之后**的树（`vendor/dist/图片/锁文件` 已被
+`isNoisePath` 去掉），所以它不等于 `ls-tree -r | wc -l`（`123pan-slb` 285 → 189 就是差了
+96 个 png/zip/dist 文件）——这一格以前没写清，容易被当成漏索引。
+
+**两处人工核对（每仓各一个被排除、一个被索引）**：
+
+| 仓 | 被排除的文件（`excludedInIndex=false`） | 被索引的文件（`indexedInIndex=true`） | 判得对不对 |
+|---|---|---|---|
+| `api_server` | `app/dao/internal/abnormal_user.go`：头两行 `// Code generated by GoFrame CLI tool. DO NOT EDIT.`，内容是 `gdb` 的字段映射 | `app/api/activity_goods.go`（手写 handler） | 对：前者是数据库表的镜像，后者是产品 |
+| `upload-server` | `app/dao/internal/abnormal_user.go`（同上） | `app/api/file.go` | 对 |
+| `123pan-slb` | `app/dao/internal/base_config.go` | `app/api/manage.go` | 对 |
+| `transcode` | `app/dao/internal/file.go` | **`app/dao/file.go`**（同目录的孪生文件） | 对，且这一对最能说明问题：见下 |
+| `offline-download` | `app/dao/internal/base_config.go` | `app/api/http_download.go` | 对 |
+| `silentDataES` | `app/dao/internal/cluster.go` | `app/consumer.go` | 对 |
+| `cdk_manager` | `app/dao/internal/cdk_batch_info.go` | `app/api/auth.go` | 对 |
+| `gofs` | —（该仓 0 个生成文件） | `api/api.go` | 对 |
+| `mount-disk-ws` | —（0 个） | `boot/boot.go` | 对 |
+| `uuidsrv` | —（0 个） | `app/grpcserver/server.go` | 对 |
+
+`transcode` 那一对是这套口径的核心证据：
+
+```go
+// app/dao/internal/file.go   ← 被排除（表镜像，开发者不会改）
+// Code generated by GoFrame CLI tool. DO NOT EDIT.
+
+// app/dao/file.go            ← 被索引（28 行的扩展点）
+// This is auto-generated by GoFrame CLI tool only once. Fill this file as you wish.
+type fileDao struct { *internal.FileDao }
+```
+
+GoFrame 的 `dao/*.go` 是「只生成一次、之后由人往里写方法」的壳子，`dao/internal/*.go` 才是
+每次重新生成的表镜像。**我们只剔后者**——这正是「不按目录剔、按文件自己的话说」那条规矩
+想要的结果。
+
+**变体：没有观察到需要扩的，所以一行没改。** 10 个仓 1722 个候选 `.go` 里，被我们的正则
+漏掉、但前 5 行出现 `DO NOT EDIT` 的文件 **0 个**；`protoc-gen-go` / `goctl` 的写法都带
+`// Code generated … DO NOT EDIT.`，本来就在口径内。唯一「像但不是」的是上面那个
+`auto-generated … only once. Fill this file as you wish.`——它**不该**被排除（排除它等于
+丢掉开发者写的那些方法），所以现在的行为是对的。结论：**按观察到的样本，口径够用，未扩**。
+
+**`vendor/`：这一轮仍然没被考验到。** 10 个样本仓 `vendor/` 文件数全为 0；把 66 个镜像
+全扫一遍（`ls-tree -r | grep -cE '(^|/)vendor/'`）也是 **0 个仓**有 `vendor/`。
+123pan 的 Go 服务全部走 modules、没有一个 `go mod vendor` 的产物被提交进来。
+所以 `vendor/` 排除这一条**到现在为止仍是「写了但没被真数据验证过」**——它不会有害
+（没有目录可剔），但它是否剔对，只能等第一个 vendor 仓出现时才知道。这是本轮的一个
+明确缺口，写在这里而不是假装验过。
+
+### 10.6 全量 72 名：45 存在、27 不存在
+
+名单 `.superpowers/sdd/2026-11-08-index-value/go-repos.txt`（72 名，从 2026-04-16 的清单
+抽的）。逐个 `git ls-remote --symref <url> HEAD` 验过；**网络抖动的失败不当结论**，
+对失败项按 3–4 次退避重探，再用 `git clone` 二次确认：
+
+| 分类 | 数量 | 判定依据 | 去向 |
+|---|---|---|---|
+| 存在且在清单里 | **45** | `ls-remote` 成功（其中 2 个默认分支不是 master：`silentDataES`=`dev`、`go-etag-worker`=`main`） | 写进 `config/repos.txt` |
+| **不存在** | **27** | `remote: 未知的仓库路径，请检查仓库路径是否正确`（确定性，不是网络） | 不写清单；`repo_coverage` 各留一行 `ok=false` + 原因原文 |
+| 分支不对 | 0 | — | — |
+| 太大（磁盘闸拦下） | 0 | 磁盘闸从未触发（最大单仓 1.24 GB，可用 43.8 GB） | — |
+| 网络（clone 三次仍失败） | 0（最终） | 中途 7 个仓失败，下一批重跑时全部成功 | — |
+
+27 个不存在的：`artifacts`、`audit-tools`、`beats`、`cdn-admin`、`cdn-agent`、`cdn-dispatch`、
+`cdn-go-proxy`、`cdn-manager`、`cdn-proxy`、`cloud-drive`、`coredns-cdn`、`crontab`、`crypto`、
+`dispatch-monitor`、`download_peed`、`event-tracking`、`go-protobuf`、`gts`、`helper`、`log`、
+`log-agent`、`ploto`、`redis`、`refresh-center-agent`、`sqlstring`、`tl`、`xgo`。
+
+**2026-04-16 的清单在这一批上过期率 37.5%（27/72）。** 这个数本身就是结论：那份文档不能
+当「有哪些仓」用，只能当「曾经有过什么」用。它同时解释了 §9.1 为什么要删 7 个仓——
+同一类错误的第二次出现。27 个里 `cdn-*` 占 6 个、`cloud-drive`/`sqlstring`/`log` 都是
+「名字很像存在」的那种，光看名字判断不了，只有 `ls-remote` 能。
+
+接入过程（`onboard-repos.ts`，四批 + 续跑，能力面全部复用现成路径）：
+第 1 批 12 个（5 个网络失败）、第 2 批 12 个（2 失败）、第 3 批 10 个（1 失败）、第 4 批 1 个
+（0 失败）——最后一次 `rc=0`，`测量 1 个、跳过 65 个`，即 66 个仓全部有 `repo_coverage` 行。
+失败仓在下一批被重试时成功，**没有一个是「静默丢掉」的**。
+
+### 10.7 Go 覆盖率表（51 个仓，按 `files_indexed/files_total` 升序）
+
+`files_indexed == 0` 的仓：**0 个**。这一格是这张表存在的理由（「cloned but invisible」），
+这一轮 51 个 Go 仓一个都没有踩到。
+
+| 仓 | indexed/total | 跳过生成 | 轮廓 | HEAD | HEAD 日期 |
+|---|---|---|---|---|---|
+| `go-async-etag-worker` | 22/114 | 0 | 22 | `75c0e76c` | 2026-08-06 |
+| `gcache-adapter` | 1/5 | 0 | 1 | `81b5b833` | 2024-05-23 |
+| `health_check` | 2/9 | 0 | 2 | `4d809103` | 2026-08-06 |
+| `get_domain` | 2/8 | 0 | 2 | `7aa11b72` | 2026-08-06 |
+| `123pan-slb` | 54/189 | 12 | 52 | `84225237` | 2026-08-28 |
+| `gofs` | 21/59 | 0 | 21 | `f469b09c` | 2023-04-29 |
+| `binlog_go_new` | 7/18 | 0 | 7 | `e4ca89dd` | 2026-02-05 |
+| `getconfig-api` | 28/68 | 0 | 28 | `dc076d64` | 2026-11-03 |
+| `log-agent-client` | 10/23 | 2 | 7 | `e89e355f` | 2023-04-12 |
+| `reference-count-worker` | 22/50 | 0 | 22 | `6aaf3882` | 2026-05-21 |
+| `go-cloud-capacity-worker` | 24/54 | 0 | 24 | `d000f8f2` | 2026-05-19 |
+| `silentDataES` | 19/41 | 7 | 19 | `d4b8dc98` | 2025-06-15 |
+| `go-thumbnail` | 7/15 | 0 | 7 | `7e8f7629` | 2026-04-29 |
+| `go-etag-worker` | 25/52 | 0 | 25 | `4c3fcdca` | 2026-08-06 |
+| `batch-process-data-worker` | 9/18 | 0 | 9 | `5f138731` | 2026-10-10 |
+| `audit-consumer` | 24/43 | 7 | 23 | `a17d509c` | 2026-08-06 |
+| `gf16` | 428/765 | 0 | 412 | `286501fd` | 2026-09-14 |
+| `apisrv` | 352/624 | 231 | 330 | `199cd433` | 2026-11-06 |
+| `usercenter` | 38/67 | 7 | 31 | `2caf4507` | 2023-10-24 |
+| `123pan-traffic` | 144/252 | 52 | 139 | `9965114e` | 2026-11-04 |
+| `silentDataBinlog` | 8/14 | 0 | 8 | `d25f0fb8` | 2025-06-20 |
+| `mount-disk-ws` | 11/19 | 0 | 11 | `c04d125f` | 2026-08-06 |
+| `upload-consumer` | 28/48 | 12 | 26 | `b622410a` | 2026-11-03 |
+| `pay_server` | 174/296 | 95 | 163 | `d1f7c0c8` | 2026-11-03 |
+| `transcode` | 53/89 | 3 | 43 | `24126b6d` | 2026-11-04 |
+| `contentTreeSrv` | 35/58 | 12 | 26 | `b3aed6dd` | 2026-10-19 |
+| `api_server` | 586/960 | 298 | 561 | `90f78f46` | 2026-11-03 |
+| `123pan_manager` | 542/885 | 284 | 532 | `46a73482` | 2026-11-06 |
+| `binlog-srv` | 8/13 | 0 | 7 | `1a509433` | 2026-07-08 |
+| `gf-jwt` | 8/13 | 0 | 7 | `8325f78d` | 2026-05-07 |
+| `uuidsrv` | 8/13 | 0 | 7 | `21d49cae` | 2026-08-06 |
+| `new_audit` | 15/24 | 0 | 14 | `ef11497b` | 2023-05-16 |
+| `upload-server` | 152/241 | 73 | 145 | `1c21122c` | 2026-11-03 |
+| `file-analysis-worker` | 12/19 | 0 | 11 | `0630478e` | 2026-09-11 |
+| `osssrv` | 40/62 | 12 | 33 | `161c3cbc` | 2026-09-18 |
+| `s3-migration` | 20/31 | 7 | 20 | `c691fb1e` | 2023-04-29 |
+| `cdk_manager` | 27/41 | 5 | 25 | `ab413aba` | 2026-08-06 |
+| `resource_manager` | 37/56 | 11 | 35 | `1a985235` | 2026-10-10 |
+| `offline-download` | 49/73 | 9 | 44 | `aa81f6dc` | 2026-10-20 |
+| `binlog-to-elasticsearch` | 25/36 | 3 | 23 | `5763d3ac` | 2026-09-22 |
+| `metrics-consumer` | 21/30 | 3 | 16 | `725809cf` | 2026-08-06 |
+| `cloud-drive-migration` | 62/88 | 2 | 57 | `3aaad51a` | 2026-07-08 |
+| `uncompress_srv` | 43/58 | 6 | 40 | `3fb09f40` | 2026-11-05 |
+| `cloud-disk-ws` | 29/39 | 0 | 24 | `81d83811` | 2026-08-06 |
+| `dispatch` | 41/52 | 0 | 39 | `b17e0c8c` | 2023-03-23 |
+| `123pan-piecehash` | 29/36 | 1 | 27 | `cc15d2fd` | 2026-09-30 |
+| `OpenAPI` | 106/130 | 10 | 100 | `3cdbc576` | 2026-11-03 |
+| `webdav` | 218/262 | 0 | 192 | `717f48d8` | 2026-09-10 |
+| `123pan-pc-go` | 99/114 | 5 | 94 | `a99a8821` | 2026-09-22 |
+| `api_server_restful` | 102/115 | 0 | 99 | `8f81ae7a` | 2026-11-02 |
+| `123pan-dylib-go` | 46/50 | 0 | 35 | `41a9d6fd` | 2023-05-23 |
+
+51 个仓合计：`files_total` 6439、`files_indexed` 3873（60.1%）、`files_skipped_generated` 1169。
+**分母里 18% 是生成代码**（1169/6439），这个数不是「看不见」，是「正当跳过」——`apisrv`
+231 与 `api_server` 298、`123pan_manager` 284 是三个大头，全是 GoFrame 的 `dao/internal`。
+
+底部那几行（`go-async-etag-worker` 22/114、`gcache-adapter` 1/5、`health_check` 2/9）
+不是漏索引：它们的树里多是 `.md`/`.yaml`/`go.mod`/脚本与图片，`.go` 本来就个位数。
+**`imports` 一列在 51 个 Go 仓里全是 0**——`imports` 是「前端模块解析」那条线的产物，
+Go 解析器不产 import 边。§4 写的「`imports = 0` 是解析进去了但连不起来的信号」**对 Go 仓
+不成立**，这一条要在读材料时被记住，否则下一个看表的人会把 51 个 0 当成 51 个故障。
+
+### 10.8 磁盘、行数、以及 7 GB 那个投影
+
+| 项 | 数值 |
+|---|---|
+| 本批新建镜像（45 个 Go 仓） | **4.43 GB**（`du -sk` 合计） |
+| `/srv/123pan-mirror` 全量（66 个仓） | **10.31 GB** |
+| 服务器可用 | 44.72 GB → **42.24 GB**（净减 **4.44 GB**） |
+| `blob_index` 行数 | 3607 → **6639**（+3032） |
+| `blob_index` 体积 | 4.5 MB |
+| 其中 `lang='go'` 的块 | 3757 |
+| `repo_coverage` 行数 | 28 → **100**（66 `ok=true` + 34 `ok=false`：7 个 §9.1 删掉的 + `sqlstring` + 26 个本轮判不存在的） |
+| `requirements` | **815 行**（本轮一行未写；开工前后按 state 的分布完全一致：live 265 / inbox 248 / design 107 / shelved 98 / rejected 73 / queue 17 / test 3 / review 2 / dev 1 / ready 1） |
+
+**7 GB 那个投影：数字上几乎对，但它对得没有意义。** 实测 45 个 Go 仓 4.43 GB，
+按「每个名字的平均字节 × 72 个名字」外推到 7.1 GB——看起来 7 GB 很准。但分布不是均值分布：
+
+```
+中位   1.33 MB
+均值 100.72 MB     ← 中位的 75 倍
+最大   1.24 GB     （binlog_go_new，18 个可索引文件）
+次大   1.11 GB     （getconfig-api，68 个可索引文件）
+前二合计 2.32 GB = 全部 4.43 GB 的 52%
+```
+
+也就是说：**下一批 30 个仓可能是 0.04 GB，也可能是 3 GB**，取决于里面有没有「把二进制/
+构建产物提交进历史」的仓——`binlog_go_new` 只有 18 个可索引文件却有 1.24 GB 的 pack，
+它的体积与代码量完全无关。用均值 7 GB 去预留磁盘，会在「恰好没有重仓」的批次上浪费，
+在「连着两个 binlog_go_new」的批次上撞水位。§4 那条「两簇」的结论在这一批上被第二次
+证实，而且更尖锐：**重仓与否只能 clone 之后量**（`--budget-gb` 的默认外推用的是中位数，
+所以它对这一批给的是 0.1 GB，实际上用了 4.43 GB——外推在这里低估 44 倍）。
+
+磁盘水位没有触发：最紧张的一刻是 40.3 GB 可用（水位 10 GB），离拦截很远。
+
+### 10.9 这个规模下会继续变坏的东西（按「多久会被撞到」排序）
+
+1. **`rc=3` 又要变成「每晚都红」了。** 66 个仓、10.6% 的单仓失败率，意味着**每一轮都有
+   7–10 条 `FAIL`**，3 轮端到端全 `rc=3`（并行前后都一样）。21 个仓时这个数还是 1–6 条，
+   还能一条条看；90 个仓时会是 9–12 条。§9.1 花了一节论证「每晚都红等于没有红」，这一条
+   正在以另一种方式回来：不是残留的不存在仓，而是 codeup 自身的抖动 × 仓数。
+   **该做（未做）**：把「上游整体不可达」（DNS 级、所有仓同时失败）与「个别仓失败」分开
+   ——前者不该是一个需要人看的告警，后者才该。现在的 rc 只有一档 3。
+2. **`imports = 0` 在 Go 仓里是恒真。** 见 §10.7：51 个 0 会让任何「imports=0 就是坏了」的
+   读法失效。材料侧必须按语言分流，或者 Go 仓那一列干脆不显示。
+3. **`files_indexed == 0` 这一格会一直是 0。** 不是因为我们做对了，而是因为 Go 仓的
+   `.go` 一律落 `service`（`classifyKind` 的 `.go` 分支），没有「目录约定」可踩空。
+   真正会踩空的是**非 Go、非前端**的仓（Java/Python 那些）——它们接进来时这一格才会亮。
+4. **`blob_index` 的增长是内容地址的，不是仓数的。** 45 个 Go 仓只多了 3032 行（2.5 KB/仓
+   量级），因为 GoFrame 脚手架在仓之间高度重复。这很好，但它掩盖了一个前提：**生成代码
+   不入库**，所以这 3032 行里没有一块是 `dao/internal`。如果哪天有人把
+   `--force-reparse` 跑一遍，这 1169 个生成文件会以「已解析」的形式重新试图入库（`isGeneratedSource`
+   会让它们再次被跳过，但代价是 1169 次读取）——重扫成本按**树里的文件数**算，不按行数算。
+5. **`repo_coverage` 里 34 行 `ok=false` 会让「覆盖率」这个说法变得含糊。** 66 个 `ok=true`
+   是真实接入面；34 行里 26 个是「这个仓不存在」、7 个是 §9.1 删掉的、1 个是 `sqlstring`。
+   读侧不遍历表，所以不影响判断；但「表 100 行、清单 66 个仓」这个差，下一个人还会问一次。
+6. **`123pan-slb` 那类「镜像 285 个文件、分母只有 189」的仓会持续制造误解。** `files_total`
+   是**去噪后**的树，不是 `ls-tree` 的行数；这一轮把它写进了 §10.5，但表上没有列能区分
+   「噪声 96 个」与「漏索引 96 个」。**该做（未做）**：在 `repo_coverage` 加一列
+   `files_noise`，或者报告里固定打一行「树 N / 去噪 M / 索引 K / 生成 G」。
+
+### 10.10 mutation 表（本轮）
+
+| 文件 | 动作 | 为什么 / 风险 |
+|---|---|---|
+| `scripts/sync-mirrors.sh` | 改（串行 → `xargs -P`，默认 8；逐仓缓冲；rc 聚合；`exec 9>&-`） | 服务器上 05:05 那条 cron 跑的就是它。失败语义、四档 rc、日志行格式**一字未变**；新增只有 `SYNC_JOBS` 与两行 `NOTE`。回滚 = `install-cron.sh --server` 覆盖回旧版 |
+| `config/repos.txt` | +45 行（10 个阶段二样本 + 35 个其余存在的 Go 仓），文件 104 → 169 行 | 纯数据。27 个不存在的**没有**写进来（理由见 §10.6） |
+| `app_settings.code.mirror.repos` | 21 → 66（`repos-apply.ts` 播种，读侧校验一致） | 读侧自动认得新仓；`index-nightly` 从 05:10 起会索引 66 个仓 |
+| `repo_coverage` | +45 行 `ok=true`、+26 行 `ok=false`（不存在）、`sqlstring` 1 行 `ok=false` | 一行未删；§9.1 的 7 个孤儿行原地保留 |
+| `blob_index` | +3032 行 | 内容地址，`on conflict do nothing`，跨仓共享；未做任何 `forgetBlobs` |
+| `requirements` | **未动**（815 行，state 分布与开工前逐项相同） | 不 reseed |
+| `scripts/install-cron.sh` | 改 `--check` 的退出码（漂了 → 3） | 只动 `check()`；`--server` / `--local` / `--remove` 一字未变 |
+| `src/core/locate/*`、解析器规则、通知逻辑、迁移 | **未动** | 本轮改的代码只有 `scripts/sync-mirrors.sh` 与 `install-cron.sh` 的 `--check` |
+
+### 10.11 复现
+
+```bash
+# 1) 同步：并行前后各跑几轮（交错，别串行跑完再并行跑——codeup 有自己的时段）
+ssh dogyun 'SYNC_JOBS=8 SYNC_FLOWERS_LOG=/tmp/x.log REPOS_FILE=/opt/123pan/tools/_ro/repos.txt \
+  /opt/123pan/tools/_ro/sync-flowers-mirror.sh; echo rc=$?'
+
+# 2) 合成 60/90 条（走 fetch 失败路径：先给不存在的上游各建一个空 bare 镜像）
+for i in $(seq -w 1 90); do git init --bare --quiet /tmp/mirror60/no-such-repo-$i.git; done
+MIRROR_ROOT=/tmp/mirror60 SYNC_JOBS=8 scripts/sync-mirrors.sh   # 需在 Linux 上（flock）
+
+# 3) 排除口径的地面真值（不经过我们的正则）
+git --git-dir=/srv/123pan-mirror/<仓>.git ls-tree -r --name-only HEAD \
+  | grep '\.go$' | grep -vE '(^|/)(vendor|third_party|testdata)/' | grep -v '_test\.go$' \
+  | while read f; do git --git-dir=... show "HEAD:$f" | head -5 \
+      | grep -qE '(//|/\*)[[:space:]]*Code generated .*DO NOT EDIT\.' && echo "$f"; done | wc -l
+#   与 select files_skipped_generated from repo_coverage where repo='<仓>' 比
+
+# 4) 覆盖率表
+docker exec flowers-db-1 psql -U postgres -d flowers -c \
+ "select repo, files_indexed||'/'||files_total as ratio, files_skipped_generated, outline_files
+    from repo_coverage where ok order by files_indexed::float/greatest(files_total,1)"
+```

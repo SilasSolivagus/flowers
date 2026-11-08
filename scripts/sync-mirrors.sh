@@ -31,6 +31,43 @@
 # 脚本——那三个仓是 brainboil 的 555 只读影子，这些仓是 root 的 bare 镜像，权限与
 # 失败语义都不同，混在一个脚本里只会让「哪一段坏了」更难读。
 #
+# ── 并行（2026-11-09）：为什么「串行」在 90 个仓上必然坏掉
+#
+# 串行 21 个仓实测中位 **110 s**、最坏 **266 s**，14 轮里 **0 轮全绿**（codeup 持续掉
+# 连接）。这个数不是「网络慢」，而是**串行的等待被加起来了**：每个仓都是一次独立的
+# HTTPS 握手 + 一次 15 s 级的连接失败 + 退避 sleep，串行意味着这些等待一个挨一个地
+# 排队。90 个仓时 `90 × 110 s ≈ 2 小时 45 分`，而 05:05 → 05:10 只有 5 分钟——窗口不是
+# 「紧张」，是**根本不存在**：`index-nightly`（05:10）会开始索引一批还没同步的镜像，
+# 材料上那句「代码快照」就慢一天。
+#
+# 改法只有一条：把「一个仓一次 fetch」变成「N 个仓同时 fetch」。上限 `SYNC_JOBS`
+# （默认 8）不是拍出来的——单个 fetch 是**网络等待**为主（CPU 几乎不占，profile 里
+# 99% 时间在等 TLS 与 codeup），所以并发是近乎线性的收益；但 codeup 是本就不稳定的
+# 对端，N 开太大换来的不是更快的「成功」，而是更多 `Failed to connect`（并发越高，
+# 对端限流/抖动越频繁）。8 是这一夜实测「没有一个仓因为并发而新失败」的最大值，
+# 它把 21 个仓的**最坏**情形从 266 s 压到 1 个批次内（见 docs 报告的实测表）。
+#
+# 窗口的算术因此从 `N × 单仓` 变成 `ceil(N/JOBS) × 单仓`：90 个仓 / 8 = **12 个批次**，
+# 按 110 s 的中位数仍是 22 分钟——但那是「每个仓都慢」的口径；真实的中位数是健康的
+# 仓 2–3 s（§5 实测），110 s 是**整轮**（含抖动）。健康一轮 90 个仓 ≈ 30–60 s。
+# 真正的上界是 `ceil(N/JOBS) × (FETCH_TIMEOUT × 2)`（超时最多重试一次，见 `sync_one`）：
+# 90/8 = 12 批 × 600 s = 2 小时，所以**病态仓的个数**才是要盯的东西，不是一个仓。
+#
+# ── 并行的三条纪律（并行化最容易丢掉的正是这三件事）
+#
+# 1. **日志不许互相插进半行**。N 个 `sync_one` 同时 `echo` 到同一个 fd 时，长行会被
+#    撕开交错成读不懂的垃圾——而这份日志是「哪一晚坏了」的唯一证据。做法是**每仓一个
+#    缓冲文件**（`$JOBDIR/<仓名>.log`），全部跑完后按**清单顺序**整份 `cat` 出来：
+#    一次 `cat` 是一个完整的读写段，行不会交错，顺序还与清单一致（可 diff、可 grep）。
+# 2. **退出码的聚合必须与串行逐字一致**。子进程各自把 `sync_one` 的 rc（0/1/2）写进
+#    `$JOBDIR/<仓名>.rc`，父进程按清单顺序读回来做同样的分档：任一个 1 → 整轮 3、
+#    任一个 2 → `missing++`（只在没有真故障时升级成 4）。**不许**让 `xargs` 的退出码
+#    参与判断：那是「某次调用非零」，与「哪个仓坏了」不是一件事。
+# 3. **失败隔离仍要成立**。一个仓的失败/挂住只影响它自己那一个 job：`timeout` 在子进程
+#    里（函数内），父进程只等 `xargs` 把 N 个槽位跑空。子进程还显式 `exec 9>&-`
+#    ——不把锁的 fd 带进子进程，否则一个挂住的子进程会让下一轮的 `flock -n` 拿到
+#    「另一轮在做」的假象。
+#
 # 每个仓各判各的：一个失败**不许**拖住别人（镜像里一仓新一仓旧是常态），
 # 但整体退出码要非零——cron 的邮件/日志必须能区分「没变」与「坏了」。
 #
@@ -38,6 +75,7 @@
 #   scripts/sync-mirrors.sh              # 正常同步（清单默认在脚本旁边）
 #   REPOS_FILE=/path/repos.txt scripts/sync-mirrors.sh
 #   SYNC_FLOWERS_LOG=/tmp/x.log scripts/sync-mirrors.sh
+#   SYNC_JOBS=16 scripts/sync-mirrors.sh  # 调并发（默认 8）
 #   scripts/sync-mirrors.sh --help
 #
 # 退出码（2026-11-09 起四档，理由见「两个信号不能共用一格」那段）：
@@ -47,7 +85,8 @@
 #   4 = **没有真故障**，但有仓在服务器上没有镜像目录（清单里有、还没 onboard）。
 #       这不是「同步坏了」，下一步是跑 scripts/onboard-repos.ts —— 所以它必须是另一个码，
 #       否则「昨晚加了 5 个仓、还没来得及建镜像」和「codeup 连不上」在 cron 里长得一样。
-#   2 = 环境/清单不对（清单读不到或不合格式 / 建不了日志或锁文件）—— 一个仓都还没动
+#   2 = 环境/清单不对（清单读不到或不合格式 / 建不了日志或锁文件 / SYNC_JOBS 不是正整数）
+#       —— 一个仓都还没动
 #   flock 被人占着时退出 0：那一轮是**另一次同步在做**，不是失败（次数少、且下一次会补上）
 set -euo pipefail
 
@@ -63,6 +102,19 @@ FETCH_TIMEOUT="${FETCH_TIMEOUT:-300}"
 # （同一条故障源、同一份证据），区别只在退避更短：夜间窗口只有 5 分钟。
 FETCH_RETRIES="${FETCH_RETRIES:-2}"
 RETRY_BACKOFF="${RETRY_BACKOFF:-2}"
+
+# 并发上限。默认 8 的理由见文件头「并行」那一节——不是越快越好，而是「快到装进窗口、
+# 又没有因为并发本身制造新失败」的那个点。必须显式给小整数：`xargs -P 0` 是**无限**
+# 并发（90 个同时 fetch 会被 codeup 限流成整轮失败），`-P 空` 在 GNU xargs 里又是另一个
+# 语义，两种都太容易因为一个笔误变成「更糟」。
+SYNC_JOBS="${SYNC_JOBS:-8}"
+case "$SYNC_JOBS" in
+  ''|*[!0-9]*) echo "SYNC_JOBS 必须是正整数（当前「$SYNC_JOBS」）" >&2; exit 2 ;;
+esac
+if [ "$SYNC_JOBS" -lt 1 ] || [ "$SYNC_JOBS" -gt 64 ]; then
+  echo "SYNC_JOBS 只接受 1–64（当前 $SYNC_JOBS）；0 = 无限并发，会把 codeup 打成整轮失败" >&2
+  exit 2
+fi
 
 # 清单位置：默认**脚本旁边那一份**（`install-cron.sh --server` 会把 config/repos.txt
 # rsync 到 `/opt/123pan/tools/_ro/repos.txt`，与脚本同一个目录）。在仓库里直接跑时
@@ -84,6 +136,8 @@ usage() {
 
 读仓清单（默认 $(default_repos_file)），把每个仓的**清单里写的分支**从 codeup
 fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref，然后把写位收回。
+各仓**并行**跑（默认 8 个一批），逐仓日志先在内存盘/临时目录里缓冲，跑完按清单顺序
+整份打出——所以并行不会把日志撕成互相交错的半行。
 
 清单格式：<仓名><TAB 或空格><分支>[<TAB 或空格><stale_after_days>]；
 \`#\` 开头整行是注释；空行忽略。第三格缺省 7 天，写 never = 不因「上游不动了」提醒
@@ -95,6 +149,7 @@ fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref�
   CODEUP_BASE         codeup 的 123pan 根 默认 https://codeup.aliyun.com/.../123pan
   SYNC_FLOWERS_LOG    日志文件          默认 /var/log/sync-flowers-mirror.log
   SYNC_FLOWERS_LOCK   锁文件            默认 /var/lock/sync-flowers-mirror.lock
+  SYNC_JOBS           并发仓数          默认 8（1–64；单仓失败不影响别的仓）
   FETCH_TIMEOUT       单次 fetch 超时（秒） 默认 300
   FETCH_RETRIES       瞬时失败重试次数      默认 2（只重试瞬时错误，见脚本头部）
   RETRY_BACKOFF       重试退避基数（秒）     默认 2（第 n 次失败后等 n×这个数）
@@ -188,7 +243,19 @@ if ! flock -n 9; then
 fi
 
 exec >>"$LOG" 2>&1
-echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} manifest=$REPOS_FILE ==="
+started_at=$(date +%s)
+echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} jobs=$SYNC_JOBS manifest=$REPOS_FILE ==="
+
+# 逐仓缓冲目录：日志与退出码都先落在这里，跑完按清单顺序整份打出。
+# 为什么需要它：并行时 N 个 printf 打同一份日志，长行会被内核写进同一个文件时撕开
+# （>4 K 的写不保证原子），结果就是「FAIL 123pan-pc … OK 123pan-uni-app …」半行交错。
+# 落临时文件再 `cat` 一次，交错的可能性从「取决于行长」变成「不可能」。
+JOBDIR="$(mktemp -d "${TMPDIR:-/tmp}/sync-flowers.XXXXXX")" || {
+  echo "建不了逐仓缓冲目录（mktemp 失败）：并行日志会被撕碎，宁可不跑" >&2
+  exit 2
+}
+cleanup_jobdir() { rm -rf "$JOBDIR"; }
+trap cleanup_jobdir EXIT
 
 # 日志里不出现 userinfo：现在的 BASEURL 本身不带凭据（走 /root/.git-credentials），
 # 但一旦有人顺手把 token 拼进 URL，这一行是最后一道闸。
@@ -282,17 +349,61 @@ sync_one() {
   return 0
 }
 
+# 一个并行槽位里跑的东西：**整仓的输出与退出码都落文件**，自己不往 stdout 写一个字。
+#
+# 为什么不在这里直接 echo：那是串行版本的做法，在 N 个进程同时跑时正是日志交错的来源。
+# 也为什么 `return 0` 恒定：xargs 的退出码只表示「某次调用非零」，把它当聚合信号会让
+# 「哪个仓坏了」这个信息丢掉——聚合只认 `<仓名>.rc`，见下面那段。
+# `exec 9>&-` 把锁的 fd 从子进程里摘掉：子进程挂住时不该继续「持有」这一轮的锁。
+worker() {
+  local line="$1" repo branch st=0
+  exec 9>&- 2>/dev/null || true
+  repo="${line%% *}"
+  branch="${line#* }"
+  [ "$branch" = "$repo" ] && branch=master
+  sync_one "$repo" "$branch" >"$JOBDIR/$repo.log" 2>&1 || st=$?
+  printf '%s\n' "$st" >"$JOBDIR/$repo.rc"
+  return 0
+}
+
+# 子进程要看得见的东西：函数用 export -f，配置用 export。两者缺一个，子进程里的
+# `sync_one` 就会以「未定义」的方式静默地一个仓都不同步。
+export MIRROR_ROOT CODEUP_BASE FETCH_TIMEOUT FETCH_RETRIES RETRY_BACKOFF JOBDIR
+export -f sync_one is_transient mask worker
+
+JOBS_FILE="$JOBDIR/jobs.txt"
+: >"$JOBS_FILE"
+for i in "${!REPOS[@]}"; do
+  printf '%s %s\n' "${REPOS[$i]}" "${BRANCHES[$i]}" >>"$JOBS_FILE"
+done
+
+# 有界并行：`-P SYNC_JOBS` 个槽位，一个仓一个 job。`-I{}` 保证整行（「仓名 分支」）
+# 原样作为**一个**参数交进去——仓名与分支已被清单校验卡过形状，不含空白。
+xargs_rc=0
+xargs -P "$SYNC_JOBS" -I{} bash -c 'worker "$@"' _ {} <"$JOBS_FILE" || xargs_rc=$?
+[ "$xargs_rc" -eq 0 ] || echo "NOTE xargs 收尾非零（rc=$xargs_rc）：可能有槽位被信号杀掉，缺 rc 的仓按失败算"
+
 rc=0
 missing=0
+failed=0
 for i in "${!REPOS[@]}"; do
+  repo="${REPOS[$i]}"
+  # 逐仓日志整份打出：一次 cat 一个文件 = 一个连续的读写段，行不会与别的仓交错。
+  if [ -f "$JOBDIR/$repo.log" ]; then
+    cat "$JOBDIR/$repo.log"
+  fi
   # 逐仓判定，**不许**用 `if ! sync_one`：那样「镜像还没建」（2）与「同步失败」（1）
   # 会合成同一个真值，而这两件事的下一步完全不同（跑 onboard-repos.ts vs 看网络）。
-  st=0
-  sync_one "${REPOS[$i]}" "${BRANCHES[$i]}" || st=$?
+  if [ -f "$JOBDIR/$repo.rc" ]; then
+    st="$(cat "$JOBDIR/$repo.rc" 2>/dev/null || echo 1)"
+  else
+    st=1
+    echo "FAIL $repo: 并行槽位没有留下退出码（被信号杀掉/子进程没起来）"
+  fi
   case "$st" in
     0) ;;
     2) missing=$((missing + 1)) ;;
-    *) rc=3 ;;
+    *) failed=$((failed + 1)); rc=3 ;;
   esac
 done
 
@@ -312,5 +423,6 @@ if [ "$rc" -eq 0 ] && [ "$missing" -gt 0 ]; then
   rc=4
   echo "NOTE $missing 个仓还没有镜像（清单里有）：跑 scripts/onboard-repos.ts 建；本轮 fetch 全绿"
 fi
+echo "NOTE 本轮到 $(( $(date +%s) - started_at ))s repos=${#REPOS[@]} jobs=$SYNC_JOBS 失败=$failed 缺镜像=$missing"
 echo "=== sync done rc=$rc $(date -Iseconds) ==="
 exit "$rc"

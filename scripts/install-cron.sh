@@ -10,6 +10,7 @@
 #   --local   在本机装 launchd 任务（本机没有 crontab；launchd 已在用），05:10 跑
 #             scripts/index-nightly.sh。
 #   --check   只读：比服务器上两个文件的 sha256 与本仓库是否一致、cron 行 / launchd 任务在不在。
+#             任一条不成立退出 3（漂了就该让 `--check && echo ok` 断掉）。
 #   --remove  拆掉：删 cron 行、删服务器上那份副本、卸载并删 plist。
 #
 # 为什么服务器上是**副本**而不是「薄壳 exec 仓库里的脚本」：服务器看不到这台 Mac 的仓库。
@@ -164,28 +165,34 @@ PLIST_EOF
 
 check() {
   echo "== 核对"
+  # 判据是「有没有漂」，所以**漂了就要非零退出**。2026-11-09 实测：清单从 21 行改到 66 行
+  # 之后 `--check` 打了 ✗ 却仍以 0 收尾——而这条命令唯一的使用方式就是
+  # `scripts/install-cron.sh --check && echo 装好了`，退出码为 0 等于把 ✗ 变成一句注释。
+  # 三个判据（两份文件的 sha256、cron 行、launchd 任务）任意一条不成立即 3。
+  local bad=0
   local local_sha remote_sha
   local_sha="$(sha_of_local "$ROOT/scripts/sync-mirrors.sh")"
   remote_sha="$(sha_of_remote)"
   echo "   sync-mirrors.sh 本地 $local_sha"
   echo "   sync-mirrors.sh 远端 $remote_sha"
-  [ "$local_sha" = "$remote_sha" ] && echo "   ✓ 一致" || echo "   ✗ 不一致：跑一次 --server"
+  [ "$local_sha" = "$remote_sha" ] && echo "   ✓ 一致" || { echo "   ✗ 不一致：跑一次 --server"; bad=1; }
   local local_repos_sha remote_repos_sha
   local_repos_sha="$(sha_of_local "$LOCAL_REPOS")"
   remote_repos_sha="$(sha_of_remote_file "$REMOTE_REPOS")"
   echo "   repos.txt 本地 $local_repos_sha"
   echo "   repos.txt 远端 $remote_repos_sha"
-  [ "$local_repos_sha" = "$remote_repos_sha" ] && echo "   ✓ 一致" || echo "   ✗ 不一致：跑一次 --server（改了清单就必须重跑）"
+  [ "$local_repos_sha" = "$remote_repos_sha" ] && echo "   ✓ 一致" || { echo "   ✗ 不一致：跑一次 --server（改了清单就必须重跑）"; bad=1; }
   if ssh "$SSH_HOST" "crontab -l 2>/dev/null | grep -Fq '$REMOTE_SCRIPT'"; then
     echo "   ✓ cron 行在：$CRON_LINE"
   else
-    echo "   ✗ cron 行不在"
+    echo "   ✗ cron 行不在"; bad=1
   fi
   if launchctl print "gui/$(id -u)/$PLIST_LABEL" >/dev/null 2>&1; then
     echo "   ✓ launchd 任务已加载：${PLIST_LABEL}（05:10）"
   else
-    echo "   ✗ launchd 任务未加载（${PLIST}）"
+    echo "   ✗ launchd 任务未加载（${PLIST}）"; bad=1
   fi
+  [ "$bad" -eq 0 ] || return 3
 }
 
 remove_all() {

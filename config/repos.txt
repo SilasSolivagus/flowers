@@ -102,3 +102,68 @@ pay_server	master
 contentTreeSrv	master
 api_server_restful	master
 osssrv	master
+
+# ─── 2026-11-09 第四批：Go 仓全量接入（阶段二先验过的 10 个）───
+#
+# 这一批的仓名来自 `.superpowers/sdd/2026-11-08-index-value/go-repos.txt`（72 个，从
+# 2026-04-16 的清单里抽出来的），**分支一格全部 ls-remote 验过**，不按「大家都叫 master」抄：
+#   silentDataES 的默认分支是 dev（`ref: refs/heads/dev`），写 master 的错法是安静的
+#   ——fetch 成功、HEAD 很新、对着另一个分支的代码。go-etag-worker 同理是 main。
+# 先写这 10 个，是因为它们要在**全量之前**把 vendor / 生成代码两条排除口径验一遍
+# （见 docs/superpowers/plans/2026-11-08-repo-onboarding.md §10.2）。
+api_server	master
+upload-server	master
+offline-download	master
+mount-disk-ws	master
+gofs	master
+uuidsrv	master
+cdk_manager	master
+silentDataES	dev
+transcode	master
+123pan-slb	master
+
+# ─── 2026-11-09 第四批（续）：清单里剩下 35 个**确实存在**的 Go 仓 ───
+#
+# 72 个名字是从 2026-04-16 的清单里抄的，**普遍已过期**：`ls-remote` 逐个验过，只有 45 个
+# 还在 codeup 的 123pan 组下；另外 27 个返回 `未知的仓库路径，请检查仓库路径是否正确`
+# （= 不存在，不是网络问题）。那 27 个不进这份清单：一个永远 not found 的仓每晚都会让
+# sync 以 rc=3 收尾，而「每晚都红」的日志到第 30 天就不是信息了（§9.1 同一个理由）。
+# 名单与证据在 docs/superpowers/plans/2026-11-08-repo-onboarding.md §10.3。
+#
+# 第三格没有写：Go 仓大多在活跃迭代（这批 HEAD 全是 2026 年），用全局 7 天先测一轮，
+# 谁真的停更了再按仓放宽——反过来（先给所有仓放宽）等于把这一列取消掉。
+123pan-dylib-go	master
+123pan-pc-go	master
+123pan-piecehash	master
+123pan-traffic	master
+123pan_manager	master
+OpenAPI	master
+audit-consumer	master
+batch-process-data-worker	master
+binlog-srv	master
+binlog-to-elasticsearch	master
+binlog_go_new	master
+cloud-disk-ws	master
+cloud-drive-migration	master
+dispatch	master
+file-analysis-worker	master
+gcache-adapter	master
+get_domain	master
+getconfig-api	master
+gf-jwt	master
+gf16	master
+go-async-etag-worker	master
+go-cloud-capacity-worker	master
+go-etag-worker	main
+go-thumbnail	master
+health_check	master
+log-agent-client	master
+metrics-consumer	master
+new_audit	master
+reference-count-worker	master
+resource_manager	master
+s3-migration	master
+silentDataBinlog	master
+uncompress_srv	master
+upload-consumer	master
+webdav	master

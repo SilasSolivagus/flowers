@@ -48,6 +48,12 @@ owner root）——这些仓被 flowers 的走查/评审**只读**读取，同�
 - 日志：`/var/log/sync-flowers-mirror.log`（`SYNC_FLOWERS_LOG` 可改）
 - 锁：`/var/lock/sync-flowers-mirror.lock`（`flock -n`，抢不到退出 0 并留一行
   `skip: another sync is running`）
+- **并行**（2026-11-09）：`SYNC_JOBS`（默认 8，1–64）个仓同时 fetch。串行 21 个仓实测
+  中位 194.5 s、最坏 267.1 s；并行 21 个仓中位 58.3 s、最坏 85.3 s（3.3×）。90 个仓
+  **全部失败**的最坏合成场景 189 s，仍 < 05:05→05:10 的 300 s 窗口（串行同型外推 906 s）。
+  并行没有修 codeup 的抖动——它修的是窗口。逐仓日志先落 `$JOBDIR/<仓>.log`、跑完**按清单
+  顺序整份打出**，所以并行不会把日志撕成互相交错的半行；rc 聚合仍按每仓的
+  `$JOBDIR/<仓>.rc`（0/1/2）做，`xargs` 的退出码**不参与**判断（它只知道「某次调用非零」）。
 - 一个仓失败不拖住另一个；**瞬时**失败按 `FETCH_RETRIES`（默认 2）重试，退避
   `RETRY_BACKOFF × 第几次`（默认 2 s）——2026-11-08 夜 14 轮实测里 13 轮有 ≥5 个
   `Could not resolve host` / `Failed to connect … after 1 ms`，全是重试一次就好的
