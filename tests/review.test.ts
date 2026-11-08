@@ -679,6 +679,15 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
     const provider = await useFake();
     const r = await reviewable();
 
+    // 评审这一路也要写「最近改动」（Task 6）。这里先给命中候选的文件插一次合并：
+    // 夹具索引里的候选路径是 `src/utils/clipboard-helper.ts`，日期钉死在 2026-10-01。
+    // 材料里那一行必须出现（去掉 `withRecency` 这一条就红）；另一个候选
+    // `src/pages/search/search.vue` 没有合并记录，所以它那一行**不该出现**。
+    await db.execute(sql`
+      insert into commit_history (repo, commit_sha, merged_at, branch, message, files)
+      values ('123pan-pc', ${'b'.repeat(40)}, '2026-10-01T02:00:00Z'::timestamptz, 'feat-x',
+              'feat: 分享页搜索补齐', '["src/utils/clipboard-helper.ts"]'::jsonb)`);
+
     const job = await db.execute<{ id: string }>(sql`
       insert into uemaster_jobs (requirement_id, stage, status)
       values (${r.id}, 'review', 'running') returning id`);
@@ -744,7 +753,17 @@ describe('评审定位接线（任务 9）：真 expand 走模型 + 留痕 + 记
     expect(banner).toContain('代码快照：123pan-pc @ 2026-11-07');
     expect(banner).toContain('代码快照：123pan-uni-app @ 2026-11-07');
 
-    // (4) 记账：一条 review 行，有候选 → low，候选数 1。
+    // (4) 最近改动（Task 6）：接在快照行之后；查得到的那个文件有一行，查不到的那个
+    //     一个字都没有（不写「未知」）。
+    const bannerLines = banner.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    const snapAt = bannerLines.findIndex((line) => line.startsWith('代码快照：'));
+    const recAt = bannerLines.findIndex((line) => line.startsWith('最近改动：'));
+    expect(recAt).toBeGreaterThan(snapAt);
+    expect(bannerLines.slice(recAt)).toEqual([
+      expect.stringContaining('最近改动：123pan-pc:src/utils/clipboard-helper.ts @ 2026-10-01（'),
+    ]);
+
+    // (5) 记账：一条 review 行，有候选 → low，候选数 1。
     const runs = await db.execute<{ stage: string; outcome: string; candidates: number }>(sql`
       select stage, outcome, candidates from locate_runs`);
     expect(runs.rows.map((row) => [row.stage, row.outcome, row.candidates]))

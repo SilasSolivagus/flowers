@@ -1,4 +1,5 @@
 import type { CodeIndex } from '../codemirror/code-index.js';
+import type { RecentFile } from './recency.js';
 import type { Candidate } from './types.js';
 
 /**
@@ -263,6 +264,86 @@ export function withSimilar(
   items: readonly SimilarPrecedent[],
 ): string {
   const extra = similarLines(items);
+  return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
+}
+
+// ─── 最近改动：这条路上次有人动它是什么时候 ────────────────────────────────
+//
+// 评审读材料时还会问一句「这块代码是不是早就没人管了」。与「同类先例」不同的是，这一句
+// **不涉及任何相似度判断**：它是一次日期查询（`recency.ts` 的 `recencyOf`），查得到就写，
+// 查不到就不写。所以这一段的纪律只有两条：
+//
+// 1. **查不到 = 一个字都不写**（空数组、`withRecency` 原样返回）。绝不写「最近改动：未知」
+//    或「无记录」：读者看到那句会认为「他们查过了，确实没有」——而真实情况往往是
+//    「这个文件没有合并记录」（日常小提交从不进 `commit_history`，见 `recency.ts` 注释）。
+//    把「我们手上没有这条记录」写成「查了没有」，是本仓修过两遍的同一种假话。
+// 2. **一行一个文件，文件必须写出来**。brief 给的单条格式只有日期与天数
+//    （`最近改动：<YYYY-MM-DD>（<N> 天前）`），但材料里一次列 5 条、而且这 5 条与上面的
+//    候选清单**顺序不同**（这里按天数降序）。不带文件的 5 行同一句话，读者无法把日期
+//    对回任何一个文件，也无法核实——那正好毁掉这一行存在的唯一理由。所以日期与天数
+//    照 brief 的格式原样保留，只在前面补「仓:路径」这一格（形状照 `SNAPSHOT_LINE` 的
+//    `<名字> @ <日期>`，读者两行并排看得出是同一类东西）。
+//
+// 3. **超龄那一句单独一个常量**：180 天是产品阈值（半年没人动 ≈ 遗留区），改它是产品决定。
+
+/** 最近改动那一行的前缀。单独一个常量只为让「这一行以什么开头」也能被用例钉住。 */
+export const RECENCY_PREFIX = '最近改动：';
+
+/**
+ * 多少天算「很久没人动过」：**180 天**。
+ *
+ * 这个数没有理论依据，只有一个用途：把「隔了一两个迭代」与「半年没人碰」分开。改它是
+ * 产品决定，改完记得同步 `tests/locate-recency.test.ts` 的边界用例（180 不追加、181 追加）。
+ */
+export const RECENCY_OLD_DAYS = 180;
+
+/** 超龄时追加的那半句。 */
+export const RECENCY_OLD_TAIL = '，已经很久没人动过';
+
+/**
+ * ISO 时刻 → 北京时间的日历日（`YYYY-MM-DD`）。
+ *
+ * 为什么要单独写而不是用 `dayOf`：`dayOf` 直接截 ISO 的前 10 个字符，那是 **UTC** 的那一天。
+ * 这里的 `days` 是按 `Asia/Shanghai` 算的（`recencyOf`），若日期用 UTC、天数用北京时间，
+ * 一份材料里就会出现「2026-11-08（1 天前）」这种自相矛盾的一行——同一句话里的两个值必须
+ * 出自同一套口径。解析不出来返回 `null`（不编日期）。
+ */
+function shanghaiDateOf(iso: string): string | null {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(ms));
+}
+
+/**
+ * 最近改动 → 材料里的那几行（没有已知条目时是空数组，一个字都不写）。
+ *
+ * 单条：`最近改动：123pan-pc:src/pages/Share/Share.tsx @ 2026-09-12（57 天前）`；
+ * 超过 `RECENCY_OLD_DAYS` 天再追加 `，已经很久没人动过`。
+ *
+ * 日期读不出来的条目**跳过**：`recencyOf` 已经挡过一层，这里再挡一次是因为文案层不能相信
+ * 上游永远对——而渲染成 `最近改动：日期未知` 正是本节第 1 条禁止的那种占位。
+ */
+export function recencyLines(items: readonly RecentFile[]): string[] {
+  const lines: string[] = [];
+  for (const item of items) {
+    const day = shanghaiDateOf(item.lastMergedAt);
+    if (day === null) continue;
+    const tail = item.days > RECENCY_OLD_DAYS ? RECENCY_OLD_TAIL : '';
+    lines.push(`${RECENCY_PREFIX}${item.repo}:${item.path} @ ${day}（${item.days} 天前）${tail}`);
+  }
+  return lines;
+}
+
+/**
+ * 快照那几行之后接上「最近改动」；没有已知条目时**原样返回**，连一个空行都不加。
+ *
+ * 与 `withSnapshots` / `withSimilar` 同一个形状、同一个理由：文案层在这里唯一能做的错事，
+ * 就是给「没有」编一句话。
+ */
+export function withRecency(text: string, items: readonly RecentFile[]): string {
+  const extra = recencyLines(items);
   return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
 }
 

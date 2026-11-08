@@ -17,10 +17,11 @@ import {
 import { repoShape, type RepoShape } from '../codemirror/route.js';
 import { ensureHistory, readHistory, type HistoryRow } from '../locate/history-store.js';
 import { locateFromHistory } from '../locate/history.js';
+import { recencyOf, topRecent, type RecentFile } from '../locate/recency.js';
 import { injectBanner } from '../locate/banner.js';
 import {
   ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
-  withSnapshots,
+  withRecency, withSnapshots,
 } from '../locate/copy.js';
 import { recordLocate, type LocateDetail } from '../locate/ledger.js';
 import type { LocateResult } from '../locate/types.js';
@@ -876,7 +877,7 @@ function locateLines(repo: RepoBaseline): string[] {
 /**
  * 材料顶部横幅的文字（`injectBanner` 的输入）。
  *
- * 两件事的次序不能倒：
+ * 三件事的次序不能倒：
  * 1. **结论相同就只说一遍**。两仓都判成 `none`（或都 absent 且原因相同）时，硬按仓各说
  *    一遍，PM 会以为这是两份不同的结论；而且同一句话念两遍，正是「三句变四句」的开头。
  * 2. 结论不同才按仓标出（`[仓]` 一行 + 正文）：那时仓名是信息，不是排版。
@@ -889,8 +890,16 @@ function locateLines(repo: RepoBaseline): string[] {
  * 把规模照抄成 14~150 个文件——比不写更糟（评审会拿错的例子量这次改动）。
  * 理由与数字见 `.superpowers/sdd/2026-11-08-index-value/task-5-report.md`；
  * 检索本身在 `similarMerges`，接回来之前先重跑那张表。
+ *
+ * 「最近改动：…」那几行（Task 6）接在**快照行之后**：顺序是「对着哪一版代码」（快照）
+ * → 「这些位置最近有人动过吗」。两句必须放在一起读：快照说代码整体到哪天为止，最近改动
+ * 说某个文件最后一次被合进来是哪天，后者永远不该晚于前者——晚于就是库或时钟出了问题，
+ * 那时读者会在同一屏里看到两句互相打脸的话（Task 5 被否掉的第二种失败形态）。
  */
-function locateBannerText(repos: readonly RepoBaseline[]): string {
+function locateBannerText(
+  repos: readonly RepoBaseline[],
+  recency: readonly RecentFile[] = [],
+): string {
   const rendered = repos.map((repo) => ({ repo: repo.id, text: renderLocate(repo.locate, 'history') }));
   const first = rendered[0];
   if (first === undefined) return '';
@@ -899,7 +908,7 @@ function locateBannerText(repos: readonly RepoBaseline[]): string {
     ? first.text
     : rendered.map((item) => `[${item.repo}]\n${item.text}`).join('\n');
   // 一行一个仓：用了几个仓就写几行（`RepoBaseline` 自带 `id` / `date`）。
-  return withSnapshots(body, repos);
+  return withRecency(withSnapshots(body, repos), recency);
 }
 
 /**
@@ -1567,6 +1576,22 @@ export async function inspect(
   stats.candidates = Object.fromEntries(repos.map((repo) => [repo.id, repo.candidates.length]));
   stats.locate = Object.fromEntries(repos.map((repo) => [repo.id, repo.locate.kind]));
 
+  // ── 候选文件「最近一次被合进来」是哪天（Task 6）──
+  //
+  // 只查**这一轮定位到的候选**：材料上的「最近改动：…」是在解释上面那份候选清单，
+  // 查别的文件既没人读，也会把材料变成一张报表。一次查询覆盖全部候选（`recencyOf`）。
+  //
+  // 查不到就一条都不出现（`recencyLines` 返回空数组）：写「未知」等于说「我们查过了、
+  // 确实没有」，而真实情况是那个文件没有合并记录（日常小提交从不进 `commit_history`）。
+  // 不 try/catch：这一步紧跟在几仓的 `readHistory` 成功之后，同一个库同一条连接刚刚
+  // 读通过；此时再失败只可能是库真的坏了，把它吞成「没有最近改动」正是本仓修过两遍的
+  // 「失败渲染成一个看起来正常的取值」。
+  const recency = topRecent(await recencyOf(
+    db,
+    repos.flatMap((repo) => repo.candidates.map((item) => ({ repo: repo.id, path: item.path }))),
+    new Date(),
+  ));
+
   // ── 两仓的历史都没读到：**照样出材料**，但材料顶部写明「这一轮不含现状判断」──
   //
   // 这是终审 Blocker 1 的裁决点。旧行为是抛 `locate_absent` 整份不出，理由是「拿不到
@@ -1753,7 +1778,7 @@ export async function inspect(
   // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
   // 于是评审/走查落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，而 `why`（唯一
   // 能拿去催人的线索）丢了。这一段由代码写死、模型不参与——模型在正文里提没提它都一样。
-  const html = injectBanner(built.html, locateBannerText(repos));
+  const html = injectBanner(built.html, locateBannerText(repos, recency));
   await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);

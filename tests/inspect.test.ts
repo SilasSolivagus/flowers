@@ -11,7 +11,7 @@ import { DEFAULT_SSH_HOST, head } from '../src/core/codemirror/mirror.js';
 import { hashMarkdown, saveSnapshot, type Snapshot } from '../src/core/prd/snapshots.js';
 import { CALL_TIMEOUT_MS, DEEP_READ_BUDGET, INSPECT_REPOS, LIVE_LOCATE_DEPS, PRD_PROMPT_MAX, inspect, keywordsFrom, mermaidFromFlows, prdVersionOf, truncatePrd, validateStructure, type Finding, type InspectDeps, type Structure } from '../src/core/uemaster/inspect.js';
 import { normalizeVerdict } from '../src/core/uemaster/shape.js';
-import { ABSENT_HEADLINE, ABSENT_HISTORY_HEADLINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE } from '../src/core/locate/copy.js';
+import { ABSENT_HEADLINE, ABSENT_HISTORY_HEADLINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE, RECENCY_PREFIX, todayInShanghai } from '../src/core/locate/copy.js';
 import type { ProviderConfig, ProviderResult } from '../src/core/uemaster/provider.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
@@ -783,6 +783,36 @@ describe('inspect：PRD ⇄ 真实代码', () => {
       // 横幅在最前面：正文骨架（svg / 三栏）都在它之后
       expect(html.indexOf('locate-banner')).toBeLessThan(html.indexOf('<svg id="flowsvg"'));
       expect(html.indexOf('locate-banner')).toBeLessThan(html.indexOf('class="flow-panel"'));
+    }, 60_000);
+
+    it('最近改动：候选文件的合并日期接在快照行之后，且不与快照日期冲突（Task 6）', async () => {
+      const r = await inspectable();
+      fake.enqueue(STRUCTURE_OK, VERIFY_OK);
+
+      const out = await inspect(db, '吕品', { requirementId: r.id }, deps());
+      const banner = bannerTextOf(await readFile(siteFile(out.url), 'utf8'));
+      const lines = banner.split('\n');
+
+      // 位置：快照行之后（先「对着哪一版代码」，再「这些位置最近有人动过吗」）
+      const snapAt = lines.findIndex((line) => line.startsWith('代码快照：'));
+      const recAt = lines.findIndex((line) => line.startsWith(RECENCY_PREFIX));
+      expect(snapAt).toBeGreaterThanOrEqual(0);
+      expect(recAt).toBeGreaterThan(snapAt);
+
+      // 内容：候选就是那两次合并动的文件，它们的 `merged_at` 就是这次跑出来的提交时间
+      const recLines = lines.filter((line) => line.startsWith(RECENCY_PREFIX));
+      expect(recLines).toContain(
+        `最近改动：123pan-pc:src/pages/Share/Share.tsx @ ${todayInShanghai()}（0 天前）`,
+      );
+      // 一个文件都查不到时这一行根本不出现（不写「未知」）
+      for (const line of recLines) expect(line).toMatch(/^最近改动：\S+:\S+ @ \d{4}-\d{2}-\d{2}（\d+ 天前）/);
+
+      // 两句不许互相打脸：最近改动永远不晚于同一横幅里的代码快照日期
+      const snapDay = lines[snapAt]!.slice('代码快照：'.length).split(' @ ')[1]!;
+      for (const line of recLines) {
+        const recDay = /@ (\d{4}-\d{2}-\d{2})/.exec(line)![1]!;
+        expect(recDay.localeCompare(snapDay)).toBeLessThanOrEqual(0);
+      }
     }, 60_000);
 
     it('读到了但没找到：横幅逐字是「没能定位到」那一句，一个字不多', async () => {

@@ -23,8 +23,9 @@ import { createExpand } from '../locate/expand.js';
 import { recordLocate } from '../locate/ledger.js';
 import { expandedKeywords, locateFromStructure, type ExpandFn } from '../locate/structure.js';
 import type { LocateResult } from '../locate/types.js';
+import { recencyOf, topRecent } from '../locate/recency.js';
 import { keywordsFrom, prdVersionOf, renderLocate } from './inspect.js';
-import { withSnapshots } from '../locate/copy.js';
+import { withRecency, withSnapshots } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig,
@@ -1289,7 +1290,25 @@ export async function reviewRequirement(
   // 横幅 = 结论 + 「代码快照」：一句话说清「这是对着哪一版代码评的」，旧了就写旧
   // （`withSnapshots`，措辞在 `copy.ts`）。没有仓可写时它原样返回结论——那时结论本身
   // 就是「代码没读到」。
-  const html = injectBanner(built.html, withSnapshots(renderLocate(baseline.locate), baseline.repos));
+  //
+  // 「最近改动：…」（Task 6）同口径接在快照行之后：评审这一路的候选来自结构索引，
+  // 路径反查仓用 `repoOf`（索引与树同一个 sha，反查是确定的）；反查不到就跳过——
+  // 那说明候选比树旧，写一个不带仓的日期等于把两仓的日期混在一起。
+  // 与走查同一个理由：查不到一条都不写，绝不写「未知」。
+  const recency = topRecent(await recencyOf(
+    db,
+    baseline.locate.kind === 'candidates'
+      ? baseline.locate.items.flatMap((item) => {
+        const repo = repoOf(item.path, baseline.trees);
+        return repo === null ? [] : [{ repo, path: item.path }];
+      })
+      : [],
+    new Date(),
+  ));
+  const html = injectBanner(
+    built.html,
+    withRecency(withSnapshots(renderLocate(baseline.locate), baseline.repos), recency),
+  );
   await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
