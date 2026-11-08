@@ -428,6 +428,7 @@ const indexOf = (repo: string, paths: string[]): CodeIndex => ({
   // Task 1/2 新增的两列：这份用例钉的是接线，不是页面清单。
   pages: [],
   outline: {},
+  skippedGenerated: 0,
   builtAt: '2026-11-07T00:00:00.000Z',
 });
 

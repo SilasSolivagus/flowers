@@ -208,6 +208,8 @@ type RepoOutcome = {
   headDate: string | null;
   filesTotal: number | null;
   filesIndexed: number | null;
+  /** 因为生成代码被跳过的文件数（`Code generated … DO NOT EDIT.`）。 */
+  filesSkippedGenerated: number | null;
   pages: number | null;
   outlineFiles: number | null;
   imports: number | null;
@@ -226,8 +228,13 @@ function oneLine(row: RepoOutcome): string {
   }
   const sha = (row.headSha ?? '').slice(0, 8).padEnd(8);
   const files = `${String(row.filesIndexed ?? 0)}/${String(row.filesTotal ?? 0)}`.padStart(9);
+  // `跳过生成` 只在非零时出现：一列恒为 0 的数是噪音，而 Go 仓里它常常是几百。
+  const generated = (row.filesSkippedGenerated ?? 0) > 0
+    ? ` 跳过生成 ${String(row.filesSkippedGenerated).padStart(4)}`
+    : '';
   return `${row.repo.padEnd(26)} ${sha} ${row.action === 'skipped' ? '跳过' : '测量'} `
-    + `${files} 页面 ${String(row.pages ?? 0).padStart(3)} 轮廓 ${String(row.outlineFiles ?? 0).padStart(3)} `
+    + `${files}${generated} 页面 ${String(row.pages ?? 0).padStart(3)} `
+    + `轮廓 ${String(row.outlineFiles ?? 0).padStart(3)} `
     + `import ${String(row.imports ?? 0).padStart(4)} ${size.padStart(7)}`;
 }
 
@@ -355,7 +362,11 @@ async function ensureMirror(ctx: Ctx, entry: InventoryLine): Promise<{ ok: true;
 async function measureOne(
   entry: InventoryLine,
   sha: string,
-): Promise<{ ok: true; counts: Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'pages' | 'outlineFiles' | 'imports'> } | { ok: false; error: string }> {
+): Promise<{
+  ok: true;
+  counts: Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'filesSkippedGenerated'
+    | 'pages' | 'outlineFiles' | 'imports'>;
+} | { ok: false; error: string }> {
   const synced = await syncRepoIndex(db, entry.id, sha);
   if (!synced.ok) return { ok: false, error: `索引失败：${synced.message}` };
   // `files_total` 来自 `ls-tree`，与索引不是同一趟 I/O：索引只回答「我记得什么」，
@@ -423,7 +434,8 @@ async function main(): Promise<number> {
   for (const entry of inventory.repos) {
     const base: RepoOutcome = {
       repo: entry.id, branch: entry.branch, action: 'failed', headSha: null, headDate: null,
-      filesTotal: null, filesIndexed: null, pages: null, outlineFiles: null, imports: null,
+      filesTotal: null, filesIndexed: null, filesSkippedGenerated: null,
+      pages: null, outlineFiles: null, imports: null,
       mirrorGb: null, error: null,
     };
 
@@ -441,7 +453,7 @@ async function main(): Promise<number> {
         outcomes.push(base);
         await recordCoverage(db, {
           repo: entry.id, headSha: null, headDate: null, filesTotal: 0, filesIndexed: 0,
-          pages: 0, outlineFiles: 0, imports: 0, ok: false, error: mirror.error,
+          filesSkippedGenerated: 0, pages: 0, outlineFiles: 0, imports: 0, ok: false, error: mirror.error,
         });
         console.error(`[${entry.id}] 失败：${mirror.error}`);
         continue;
@@ -465,7 +477,7 @@ async function main(): Promise<number> {
         outcomes.push(base);
         await recordCoverage(db, {
           repo: entry.id, headSha: null, headDate: null, filesTotal: 0, filesIndexed: 0,
-          pages: 0, outlineFiles: 0, imports: 0, ok: false, error: headRes.message,
+          filesSkippedGenerated: 0, pages: 0, outlineFiles: 0, imports: 0, ok: false, error: headRes.message,
         });
         console.error(`[${entry.id}] 失败：${headRes.message}`);
         continue;
@@ -476,7 +488,7 @@ async function main(): Promise<number> {
         outcomes.push(base);
         await recordCoverage(db, {
           repo: entry.id, headSha: null, headDate: null, filesTotal: 0, filesIndexed: 0,
-          pages: 0, outlineFiles: 0, imports: 0, ok: false, error: '镜像里没有任何提交',
+          filesSkippedGenerated: 0, pages: 0, outlineFiles: 0, imports: 0, ok: false, error: '镜像里没有任何提交',
         });
         console.error(`[${entry.id}] 失败：镜像里没有任何提交`);
         continue;
@@ -492,6 +504,7 @@ async function main(): Promise<number> {
           action: 'skipped',
           filesTotal: existing?.filesTotal ?? null,
           filesIndexed: existing?.filesIndexed ?? null,
+          filesSkippedGenerated: existing?.filesSkippedGenerated ?? null,
           pages: existing?.pages ?? null,
           outlineFiles: existing?.outlineFiles ?? null,
           imports: existing?.imports ?? null,
@@ -508,7 +521,7 @@ async function main(): Promise<number> {
         outcomes.push(base);
         await recordCoverage(db, {
           repo: entry.id, headSha: headRes.data.sha, headDate: headRes.data.date,
-          filesTotal: 0, filesIndexed: 0, pages: 0, outlineFiles: 0, imports: 0,
+          filesTotal: 0, filesIndexed: 0, filesSkippedGenerated: 0, pages: 0, outlineFiles: 0, imports: 0,
           ok: false, error: result.error,
         });
         console.error(`[${entry.id}] 失败：${result.error}`);
@@ -523,10 +536,12 @@ async function main(): Promise<number> {
       measured += 1;
       outcomes.push({
         ...base, action: mirror.cloned ? 'cloned+measured' : 'measured',
-        filesTotal: row.filesTotal, filesIndexed: row.filesIndexed, pages: row.pages,
+        filesTotal: row.filesTotal, filesIndexed: row.filesIndexed,
+        filesSkippedGenerated: row.filesSkippedGenerated, pages: row.pages,
         outlineFiles: row.outlineFiles, imports: row.imports,
       });
-      console.log(`[${entry.id}] ${row.filesIndexed}/${row.filesTotal} 文件、页面 ${row.pages}、`
+      console.log(`[${entry.id}] ${row.filesIndexed}/${row.filesTotal} 文件`
+        + `（跳过生成 ${row.filesSkippedGenerated}）、页面 ${row.pages}、`
         + `轮廓 ${row.outlineFiles}、import ${row.imports}`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

@@ -69,6 +69,15 @@ export type SyncReport = {
   newBlobs: number;
   /** 这一轮直接复用的 blob 数（库里本来就有）。 */
   reusedBlobs: number;
+  /**
+   * 这一轮因为「生成代码」被跳过的**文件**数（`Code generated … DO NOT EDIT.`）。
+   *
+   * 为什么它必须是一份账而不是一句日志：`apisrv` 的 231 个生成文件是 583 个可索引
+   * 文件里的 39.6%——这是**正当的跳过**，与「读不回来」「解析器不认」是三种事。
+   * 覆盖率表要能把它们分开写（`indexed 352 / skipped-generated 231`），
+   * 否则下一次有人会对着一片 0 去修一个没坏的解析器。
+   */
+  skippedGenerated: number;
   /** 整轮耗时（毫秒，含 ssh 往返）。 */
   ms: number;
 };

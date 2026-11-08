@@ -36,6 +36,14 @@ export type CoverageRow = {
   headDate: string | null;
   filesTotal: number;
   filesIndexed: number;
+  /**
+   * 因为「生成代码」被跳过的文件数（迁移 0034）。
+   *
+   * 为什么它就是覆盖率表要的那一格：`filesTotal - filesIndexed` 原本只有一种解释
+   * （「索引看不见」），而 Go 仓里这个差的大头是**正当跳过**。摆在同一行之后，
+   * `352 + 231 = 583` 自己就把话说完了，不用去猜解析器有没有坏。
+   */
+  filesSkippedGenerated: number;
   pages: number;
   outlineFiles: number;
   imports: number;
@@ -52,13 +60,16 @@ export type CoverageRow = {
  * 「要连一次 dogyun 才能复现」。
  */
 export function coverageCounts(
-  index: Pick<CodeIndex, 'files' | 'pages' | 'outline' | 'imports'>,
+  index: Pick<CodeIndex, 'files' | 'pages' | 'outline' | 'imports' | 'skippedGenerated'>,
   treeFiles: number,
-): Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'pages' | 'outlineFiles' | 'imports'> {
+): Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'filesSkippedGenerated' | 'pages' | 'outlineFiles' | 'imports'> {
   const summary = summarize(index as CodeIndex);
   return {
     filesTotal: treeFiles,
     filesIndexed: Object.keys(index.files).length,
+    // 索引自己数的（`CodeIndex.skippedGenerated`），不是拿 treeFiles 减出来的：
+    // 减出来的那个数把「读不回来」也算进去了，正是这一列要分开的东西。
+    filesSkippedGenerated: index.skippedGenerated,
     pages: index.pages.length,
     outlineFiles: Object.keys(index.outline).length,
     imports: summary.imports,
@@ -85,16 +96,18 @@ export function shouldSkip(existing: CoverageRow | null, headSha: string): boole
 export async function recordCoverage(db: Db, row: CoverageRow): Promise<void> {
   await db.execute(sql`
     insert into repo_coverage
-      (repo, head_sha, head_date, files_total, files_indexed, pages, outline_files, imports,
-       ok, error, measured_at)
+      (repo, head_sha, head_date, files_total, files_indexed, files_skipped_generated,
+       pages, outline_files, imports, ok, error, measured_at)
     values
       (${row.repo}, ${row.headSha}, ${row.headDate}, ${row.filesTotal}, ${row.filesIndexed},
-       ${row.pages}, ${row.outlineFiles}, ${row.imports}, ${row.ok}, ${row.error}, now())
+       ${row.filesSkippedGenerated}, ${row.pages}, ${row.outlineFiles}, ${row.imports},
+       ${row.ok}, ${row.error}, now())
     on conflict (repo) do update set
       head_sha = excluded.head_sha,
       head_date = excluded.head_date,
       files_total = excluded.files_total,
       files_indexed = excluded.files_indexed,
+      files_skipped_generated = excluded.files_skipped_generated,
       pages = excluded.pages,
       outline_files = excluded.outline_files,
       imports = excluded.imports,
@@ -109,6 +122,7 @@ type RawRow = {
   head_date: Date | string | null;
   files_total: number;
   files_indexed: number;
+  files_skipped_generated: number;
   pages: number;
   outline_files: number;
   imports: number;
@@ -126,6 +140,7 @@ function toRow(raw: RawRow): CoverageRow {
     headDate: iso(raw.head_date),
     filesTotal: Number(raw.files_total),
     filesIndexed: Number(raw.files_indexed),
+    filesSkippedGenerated: Number(raw.files_skipped_generated),
     pages: Number(raw.pages),
     outlineFiles: Number(raw.outline_files),
     imports: Number(raw.imports),
@@ -138,8 +153,8 @@ function toRow(raw: RawRow): CoverageRow {
 /** 读一仓的上一行（没有就是 null）。 */
 export async function readCoverage(db: Db, repo: string): Promise<CoverageRow | null> {
   const res = await db.execute<RawRow>(sql`
-    select repo, head_sha, head_date, files_total, files_indexed, pages, outline_files, imports,
-           ok, error, measured_at
+    select repo, head_sha, head_date, files_total, files_indexed, files_skipped_generated,
+           pages, outline_files, imports, ok, error, measured_at
       from repo_coverage where repo = ${repo}`);
   const row = res.rows[0];
   return row === undefined ? null : toRow(row);
@@ -148,8 +163,8 @@ export async function readCoverage(db: Db, repo: string): Promise<CoverageRow | 
 /** 读全部（按仓名排序，便于人逐行对照）。 */
 export async function listCoverage(db: Db): Promise<CoverageRow[]> {
   const res = await db.execute<RawRow>(sql`
-    select repo, head_sha, head_date, files_total, files_indexed, pages, outline_files, imports,
-           ok, error, measured_at
+    select repo, head_sha, head_date, files_total, files_indexed, files_skipped_generated,
+           pages, outline_files, imports, ok, error, measured_at
       from repo_coverage order by repo`);
   return res.rows.map(toRow);
 }

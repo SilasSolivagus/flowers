@@ -1,7 +1,7 @@
 import type { Db } from '../../db/client.js';
 import {
-  HEAD_LINES, assembleIndex, isIndexable, parseBlob, summarize,
-  type CodeIndex, type IndexSummary, type KindCounts,
+  HEAD_LINES, assembleIndex, isGeneratedSource, isIndexable, parseBlob, summarize,
+  type AssembledSource, type CodeIndex, type IndexSummary, type KindCounts,
 } from './code-index.js';
 import {
   existingBlobShas, forgetBlobs as forgetBlobRows, readBlobRows, writeBlobRows,
@@ -118,6 +118,8 @@ export type AssembleResult = {
   parsedBlobs: number;
   /** 直接复用的块数。 */
   reusedBlobs: number;
+  /** 因为「生成代码」被跳过的**文件**数（不是块数：同一块内容可能挂两个路径）。 */
+  skippedGenerated: number;
   /** 装配耗时（含 `ls-tree` 的 ssh 往返）。 */
   assembleMs: number;
 };
@@ -288,6 +290,15 @@ export async function assembleFor(
   const stored = await readBlobRows(db, wanted.map((ref) => ref.blobSha));
   const missing = wanted.filter((ref) => !stored.has(ref.blobSha));
   let parsedBlobs = 0;
+  /**
+   * 这几块内容是**生成代码**（`Code generated … DO NOT EDIT.`）：不解析、不落库、不进索引。
+   *
+   * 为什么在这里判、而不是在 `isIndexable` 里判：那一层只看路径，而「这文件是谁写的」
+   * 写在文件自己身上。为什么按 blob id 记：同一块内容可能挂在两个路径上（生成的
+   * `dao/internal/x.go` 与它的副本），而**跳过的计数按路径算**（下面那个循环里加一），
+   * 因为覆盖率表说的「多少个文件」是文件，不是内容块。
+   */
+  const generated = new Set<string>();
 
   if (missing.length > 0) {
     const got = await readBlobsOf(deps)(repo, missing, { maxLines: READ_LINES });
@@ -297,6 +308,12 @@ export async function assembleFor(
       const raw = got.data.get(ref.blobSha);
       // 读不回来的块不进索引（少一个文件比编一个空文件好）；它下一轮还会被当成缺失再试。
       if (raw === undefined) continue;
+      // 生成代码不解析也不落库：落库就等于把「这句话是不是生成出来的」存成了内容事实，
+      // 而 `blob_index` 目前只有内容与形状两列（见 `code-index.ts` 的 `isGeneratedSource`）。
+      if (isGeneratedSource(raw)) {
+        generated.add(ref.blobSha);
+        continue;
+      }
       parseInto(cache, ref.blobSha, ref.path, ref.size, raw);
     }
     parsedBlobs = await writeBlobRows(db, [...cache.values()]);
@@ -308,8 +325,16 @@ export async function assembleFor(
 
   const sources = [];
   let newest = 0;
+  // 按**路径**数被跳过的生成代码：覆盖率表说的是「多少个文件」，不是「多少块内容」。
+  let skippedGenerated = 0;
   for (const entry of tree.data) {
     if (!isIndexable(entry.path)) continue;
+    // 生成代码：这一轮读出来的、判成生成的那几块。它和「读不回来」必须分开数——
+    // 一个是正当跳过（写进 `skipped-generated`），一个是读取失败（该重试）。
+    if (generated.has(entry.oid)) {
+      skippedGenerated += 1;
+      continue;
+    }
     const blob = stored.get(entry.oid);
     // 树里有、库里也没有、这次也没读回来：跳过（见上面那条注释）。
     if (blob === undefined) continue;
@@ -335,6 +360,7 @@ export async function assembleFor(
     sha: clean,
     all: tree.data.map((entry) => entry.path),
     sources,
+    skippedGenerated,
     builtAt: newest > 0 ? new Date(newest).toISOString() : undefined,
   });
   return {
@@ -342,6 +368,7 @@ export async function assembleFor(
     data: {
       index,
       parsedBlobs,
+      skippedGenerated,
       reusedBlobs: Math.max(0, wanted.length - parsedBlobs),
       assembleMs: Date.now() - started,
     },
@@ -420,30 +447,47 @@ export async function buildIndex(
   if (!got.ok) return got;
 
   const cache: ParseCache = new Map();
+  // 生成代码整类跳过（口径见 `code-index.ts` 的 `isGeneratedSource`）。这条纯函数路径
+  // 与 `assembleFor` 必须同口径，否则「量一次全量建索引」会数出与真同步不同的结果。
+  const generated = new Set<string>();
   for (const ref of first) {
     const raw = got.data.get(ref.blobSha);
     if (raw === undefined) continue;
+    if (isGeneratedSource(raw)) {
+      generated.add(ref.blobSha);
+      continue;
+    }
     parseInto(cache, ref.blobSha, ref.path, ref.size, raw);
   }
 
   const bySha = new Map([...cache.values()].map((facts) => [facts.blobSha, facts]));
+  // 先数、再装配：`assembleIndex` 的入参是一份快照，边装配边加等于把 0 交给它。
+  let skippedGenerated = 0;
+  const kept: AssembledSource[] = [];
+  for (const entry of sources) {
+    // 按路径数（与 `assembleFor` 同一个理由）。
+    if (generated.has(entry.oid)) {
+      skippedGenerated += 1;
+      continue;
+    }
+    const facts = bySha.get(entry.oid);
+    if (facts === undefined) continue;
+    kept.push({
+      path: entry.path,
+      size: facts.size,
+      lang: facts.lang,
+      symbols: facts.symbols,
+      refs: facts.refs,
+      outline: facts.outline,
+      pages: facts.pages,
+    });
+  }
   const index = assembleIndex({
     repo,
     sha,
     all: tree.data.map((entry) => entry.path),
-    sources: sources.flatMap((entry) => {
-      const facts = bySha.get(entry.oid);
-      if (facts === undefined) return [];
-      return [{
-        path: entry.path,
-        size: facts.size,
-        lang: facts.lang,
-        symbols: facts.symbols,
-        refs: facts.refs,
-        outline: facts.outline,
-        pages: facts.pages,
-      }];
-    }),
+    sources: kept,
+    skippedGenerated,
   });
   return { ok: true, data: { index, buildMs: Date.now() - started } };
 }
@@ -481,6 +525,7 @@ export async function syncRepoIndex(
       report: {
         newBlobs: assembled.data.parsedBlobs,
         reusedBlobs: assembled.data.reusedBlobs,
+        skippedGenerated: assembled.data.skippedGenerated,
         ms: assembled.data.assembleMs,
       },
     },

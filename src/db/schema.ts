@@ -736,6 +736,14 @@ export const repoCoverage = pgTable('repo_coverage', {
   filesTotal: integer('files_total').notNull().default(0),
   /** 索引里有内容的文件数——**结果**，不是「可索引文件数」那个上限。 */
   filesIndexed: integer('files_indexed').notNull().default(0),
+  /**
+   * 因为「生成代码」（`Code generated … DO NOT EDIT.`）被跳过的文件数（迁移 0034）。
+   *
+   * 与 `filesIndexed` 之和 ≈ `filesTotal`：两者的差原本只能解释成「索引看不见」，
+   * 而 Go 仓里最大的一块差是**正当跳过**（GoFrame 的 model / dao）。少了这一列，
+   * 覆盖率表会把 231 个生成文件写成解析器的锅。
+   */
+  filesSkippedGenerated: integer('files_skipped_generated').notNull().default(0),
   /** 页面清单条数（`pages.json` + 目录约定）。 */
   pages: integer('pages').notNull().default(0),
   /** 有结构轮廓的文件数（`.vue` template / `.tsx` JSX / `.ts` 导出符号）。 */

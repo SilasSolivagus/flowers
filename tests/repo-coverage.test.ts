@@ -50,6 +50,7 @@ function fakeIndex(): CodeIndex {
     routes: [],
     pages: [{ route: 'pages/index/index', source: 'pages.json' }, { route: 'pages/mine/mine', source: 'convention' }],
     outline: { 'src/c.vue': [{ kind: 'component', name: 'SearchBox', line: 3 }] },
+    skippedGenerated: 0,
     builtAt: new Date().toISOString(),
   } as unknown as CodeIndex;
 }
@@ -60,6 +61,25 @@ describe('coverageCounts', () => {
     expect(counts).toEqual({
       filesTotal: 817,
       filesIndexed: 3,
+      // 生成代码是「正当跳过」的一格，与 filesIndexed 分开数（迁移 0034）。
+      filesSkippedGenerated: 0,
+      pages: 2,
+      outlineFiles: 1,
+      imports: 5,
+    });
+  });
+
+  /**
+   * 生成代码那一格必须是**索引自己数的**（`CodeIndex.skippedGenerated`），不是常量 0：
+   * `apisrv` 实测 231/583，而这个数就是覆盖率表上「正当跳过」那一列的全部来源。
+   * 把它写成 0（或写成 `filesTotal - filesIndexed`）都会让表说谎，两种错法各有用例钉。
+   */
+  it('生成代码的跳过数原样带出来（apisrv 这一格是 231，不是 0）', () => {
+    const withGenerated = { ...fakeIndex(), skippedGenerated: 231 } as CodeIndex;
+    expect(coverageCounts(withGenerated, 583)).toEqual({
+      filesTotal: 583,
+      filesIndexed: 3,
+      filesSkippedGenerated: 231,
       pages: 2,
       outlineFiles: 1,
       imports: 5,
@@ -67,9 +87,12 @@ describe('coverageCounts', () => {
   });
 
   it('空索引是 0 而不是抛（mirror_health 一片绿而材料说「没找到」的那一格）', () => {
-    const empty = { files: {}, pages: [], outline: {}, imports: {}, routes: [] } as unknown as CodeIndex;
+    const empty = {
+      files: {}, pages: [], outline: {}, imports: {}, routes: [], skippedGenerated: 0,
+    } as unknown as CodeIndex;
     expect(coverageCounts(empty, 12)).toEqual({
-      filesTotal: 12, filesIndexed: 0, pages: 0, outlineFiles: 0, imports: 0,
+      filesTotal: 12, filesIndexed: 0, filesSkippedGenerated: 0,
+      pages: 0, outlineFiles: 0, imports: 0,
     });
   });
 });
@@ -81,6 +104,7 @@ describe('repo_coverage 落库与续跑判据', () => {
     headDate: '2026-11-07T10:00:00+08:00',
     filesTotal: 100,
     filesIndexed: 40,
+    filesSkippedGenerated: 0,
     pages: 3,
     outlineFiles: 2,
     imports: 9,

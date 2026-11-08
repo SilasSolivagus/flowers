@@ -253,6 +253,13 @@
       "when": 1794108000000,
       "tag": "0033_repo_coverage",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794110000000,
+      "tag": "0034_repo_coverage_generated",
+      "breakpoints": true
     }
   ]
 }

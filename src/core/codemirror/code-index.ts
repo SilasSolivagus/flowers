@@ -108,6 +108,15 @@ export type CodeIndex = {
    * 的 JSX 标签、`.ts` 的导出符号；一个都没有的文件不占键）。
    */
   outline: Record<string, OutlineNode[]>;
+  /**
+   * 这一棵树里**因为「生成代码」被跳过**的文件数（`isGeneratedSource`）。
+   *
+   * 为什么这个数必须挂在索引上、而不是只留在日志里：`files_total - files_indexed` 的差
+   * 本来是「要解释的那部分」，而生成代码是其中**完全正当**的一块。少了这个数，
+   * 覆盖率表会把 231 个文件写成「索引看不见」，于是下一次有人以为解析器漏了半天，
+   * 去调一个没坏的东西。有了它，表上能写 `indexed 352 / skipped-generated 231`。
+   */
+  skippedGenerated: number;
   /** 建索引的时刻（ISO）。第二次读到同一个 `(repo, sha)` 时，这个值不该变。 */
   builtAt: string;
 };
@@ -172,6 +181,41 @@ export const CODE_EXT = /\.(?:ts|tsx|js|jsx|mjs|cjs|vue|go)$/i;
  * 天生小于 1；报告里要把这一条写清，别让人以为是漏索引。
  */
 const GO_TEST_FILE = /_test\.go$/i;
+
+/**
+ * 生成代码的标准头（Go 官方规定的形状：`^// Code generated .* DO NOT EDIT\.$`）。
+ *
+ * 为什么要把它从索引里**整类剔掉**（2026-11-09，接 79 个 Go 仓之前）：
+ * `apisrv` 的 583 个可索引文件里有 231 个（39.6%）是 GoFrame 生成的 model / dao ——
+ * 它们进 outline 之后，材料会把 `UserVip` 这种自动生成的结构体当成「产品已有的能力」。
+ * 那不是信息缺失，是**一句假话**：这些结构体是数据库表的镜像，不是任何人决定要做的功能。
+ *
+ * 口径两条，都照着 Go 自己的定义来（不是我们猜的）：
+ * 1. **只认注释头**，且必须在**前几行**——`go/ast.IsGenerated` 的口径是「package 子句之前、
+ *    整行匹配」。我们读到的只是一块内容的前 80 行，所以按「前 5 行」扫，足够覆盖
+ *    build tag 之后的那个位置（实测 GoFrame 在 `package` 上一行）。
+ * 2. **不认路径**：`model/` `dao/` 里也有手写文件，按目录剔会把真产品代码一起丢掉。
+ *    生成与否写在文件自己身上，就按文件自己的字说。
+ *
+ * 一处技术债：`blob_index` 是内容地址，**这次之前**解析过的块不会有这个判断的结果
+ * （那时还没有这条规则）。要给已有内容重新判定一次，得整表重算（`--rebuild` /
+ * `forgetBlobs`），见报告里的 `apisrv` before/after。
+ */
+const GENERATED_HEADER = /(?:\/\/|\/\*)\s*Code generated .*DO NOT EDIT\./;
+
+/** 扫多少行找那一句：Go 的约定是「package 之前」，实测都在前 3 行。 */
+export const GENERATED_SCAN_LINES = 5;
+
+/**
+ * 这块内容是不是**生成出来的**（`Code generated … DO NOT EDIT.`）。
+ *
+ * 纯函数、只看前 `GENERATED_SCAN_LINES` 行：调用方传进来的是「文件开头」，
+ * 全量细读没有意义（也和索引层的读取预算一致）。
+ */
+export function isGeneratedSource(text: string): boolean {
+  const lines = text.split('\n', GENERATED_SCAN_LINES);
+  return lines.some((line) => GENERATED_HEADER.test(line));
+}
 
 /**
  * 一个路径属于哪一类。**顺序即优先级**：
@@ -1134,6 +1178,11 @@ export type AssembleInput = {
   all: readonly string[];
   /** 进了索引的文件，**顺序 = 树序**（`ls-tree` 是路径字典序，路由的去重依赖它）。 */
   sources: readonly AssembledSource[];
+  /**
+   * 因为「生成代码」被跳过的文件数。装配层自己数不出来（它只看得见 `sources`），
+   * 所以由读内容的那一层传进来（见 `index-store.ts` 的 `assembleFor` / `buildIndex`）。
+   */
+  skippedGenerated?: number;
   builtAt?: string;
 };
 
@@ -1270,6 +1319,9 @@ export function assembleIndex(input: AssembleInput): CodeIndex {
     routes,
     pages,
     outline,
+    // 不传就是 0（纯函数调用方 / 老用例）：这个数的语义是「我们主动跳过了几个」，
+    // 「没说」与「一个都没跳过」在这一层没必要分开。
+    skippedGenerated: input.skippedGenerated ?? 0,
     builtAt: input.builtAt ?? indexTimestamp(),
   };
 }

@@ -381,9 +381,28 @@ function runFailure(run: GitRun, timeoutMs: number, bin: string): MirrorFailure 
 
 // ─── 噪音过滤 ────────────────────────────────────────────────────────────────
 
-/** 目录级排除：出现在**任何**一段路径里都算噪音（最后一段除外，见下）。 */
+/**
+ * 目录级排除：出现在**任何**一段路径里都算噪音（最后一段除外，见下）。
+ *
+ * `vendor` / `third_party` / `testdata` 是 2026-11-09 为 Go 仓补的（接 79 个仓之前）：
+ * - `vendor/`：Go 的依赖目录（`go mod vendor` 的产物，被提交进仓）。它里面的 `.go`
+ *   文件是**别人的代码**，一仓能到几万条；索引进去之后，`apisrv` 的「产品能力」里
+ *   会混着 gin、gorm、grpc 的实现，材料照着说「已有这个能力」——那一句是假话。
+ *   它还有 `vendor/modules.txt`、各层子目录里的 `go.sum` 这类清单，`go.sum` 已在
+ *   `NOISE_FILES` 里，但清单本身也不该进索引（只有 `pages.json` 那种路由表才进）。
+ *   注意 Go 的 vendoring 是**按模块**的：多模块仓里 `cmd/x/vendor/` 也存在，所以按
+ *   「任意一段目录名」判，而不是只看仓根。
+ * - `third_party/`：Bazel 风格的第三方源码目录（不叫 vendor，装的东西一模一样）。
+ * - `testdata/`：Go 工具链**约定**的测试数据目录——`go build` 与 `go vet` 都跳过它，
+ *   里面是 `.json` / `.yaml` / `.go` 形态的夹具（很多还是故意写坏的用例输入）。
+ *   把夹具当产品代码，正是 `_test.go` 那条排除想避免的同一件事。
+ *
+ * 这三条都**不是**「大概像噪音」：它们都有一句可核对的理由（依赖 / 第三方 / 夹具），
+ * 而判断标准与 `_test.go` 一致——**这个文件是不是产品的一部分**。
+ */
 const NOISE_DIRS: ReadonlySet<string> = new Set([
   'dist', 'build', 'out', 'node_modules', 'coverage', '.next', '.nuxt', 'vendor_bundle',
+  'vendor', 'third_party', 'testdata',
 ]);
 
 /** 扩展名级排除：二进制、图片、字体、压缩包、源映射。 */

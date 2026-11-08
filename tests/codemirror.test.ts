@@ -171,6 +171,35 @@ describe('isNoisePath：三个仓里真实存在的形状', () => {
     expect(isNoisePath('scripts/build.js')).toBe(false);
     expect(isNoisePath('src/i18n/zh.ts')).toBe(false);
   });
+
+  /**
+   * Go 生态的三条（2026-11-09，接 79 个仓之前）。
+   *
+   * 这三条的共同点：它们都**不是源码目录**，但里面的文件扩展名与源码一模一样
+   * （`.go`），所以只靠 `CODE_EXT` 挡不住 —— `vendor/gorm.io/gorm/chainable_api.go`
+   * 会被当成 `service`，`testdata/broken.go` 会被当成产品能力。
+   */
+  it('vendor / third_party / testdata 算噪音（Go 仓的依赖与夹具）', () => {
+    // 依赖目录：go mod vendor 的产物，一仓能到几万条
+    expect(isNoisePath('vendor/gorm.io/gorm/chainable_api.go')).toBe(true);
+    expect(isNoisePath('vendor/modules.txt')).toBe(true);
+    // 多模块仓的按模块 vendoring：`cmd/<bin>/vendor/` 也成立
+    expect(isNoisePath('cmd/apisrv/vendor/github.com/gin-gonic/gin/gin.go')).toBe(true);
+    // 第三方源码（Bazel 风格）
+    expect(isNoisePath('third_party/protobuf/any.go')).toBe(true);
+    // Go 工具链约定的测试数据目录（go build / go vet 都跳过它）
+    expect(isNoisePath('service/testdata/case1.go')).toBe(true);
+    expect(isNoisePath('testdata/expected.json')).toBe(true);
+  });
+
+  it('名字像但不该误伤：vendored.go / testdata.go 是文件，不是目录', () => {
+    // 目录判定只看**非最后一段**：同一条规则在 `build.js` 上已经证明过一次。
+    expect(isNoisePath('service/vendored.go')).toBe(false);
+    expect(isNoisePath('service/testdata.go')).toBe(false);
+    expect(isNoisePath('library/third_party.go')).toBe(false);
+    // `vendorinfo/` 不是 `vendor/`（整段匹配，不是前缀匹配）
+    expect(isNoisePath('library/vendorinfo/vendor.go')).toBe(false);
+  });
 });
 
 // ─── lsTree ──────────────────────────────────────────────────────────────────
