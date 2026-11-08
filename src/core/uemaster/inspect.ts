@@ -884,6 +884,11 @@ function locateLines(repo: RepoBaseline): string[] {
  * 文字一律来自 `renderLocate`（再往下是 `copy.ts`），这里**一个字都不自己写**；
  * 末尾那份「代码快照：<仓> @ <日期>」同样来自 `copy.ts`（`withSnapshots`）——材料说
  * 「最可能的位置」时，必须同时说清这是对着哪一版代码说的，旧了也要说旧（2026-11-08）。
+ * 「同类先例：…」那一行（Task 5）**刻意没有接在这里**：实测 44/60 条真需求标题的
+ * 第一名是「更换 work / 更新 web 代码」这类一次性合进来十几个提交的巨型合并，
+ * 把规模照抄成 14~150 个文件——比不写更糟（评审会拿错的例子量这次改动）。
+ * 理由与数字见 `.superpowers/sdd/2026-11-08-index-value/task-5-report.md`；
+ * 检索本身在 `similarMerges`，接回来之前先重跑那张表。
  */
 function locateBannerText(repos: readonly RepoBaseline[]): string {
   const rendered = repos.map((repo) => ({ repo: repo.id, text: renderLocate(repo.locate, 'history') }));

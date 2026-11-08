@@ -213,6 +213,59 @@ export function withSnapshots(
   return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
 }
 
+// ─── 同类先例：上次做类似的事动了几个文件 ──────────────────────────────────
+//
+// 评审读材料时总要问一句「上次做类似的事改了几个文件」。这一句现在没有数据支撑：
+// `commit_history` 里躺着 657 次真实的合并（消息是中文需求标题、`files` 是改动文件
+// 清单），而材料一个字都没用它。补上之后，材料能自己回答「规模大概是几个文件」，
+// 而不是让评审拿一份完全无关的经验去估。
+//
+// 三条口径（改文案之前先读）：
+//
+// 1. **与「代码快照：…」同风格、同位置**：全角冒号、一行、放在横幅末尾那几句旁边。
+//    它和快照是同一类东西——都是「这段话的依据是什么」，不是结论本身。
+// 2. **没有命中就一个字都不写**（`similarLines` 返回空数组，`withSimilar` 原样返回）。
+//    绝不写「上次类似改动的先例：无」：那句读起来是「我们查过了，确实没有先例」，
+//    而真实情况往往是「我们手上没有可比的历史」。把「没数据」写成「查了没有」，
+//    正是本仓修过两遍的同一种病（见 `CANDIDATES_LINE` 的空数组注释）。
+// 3. **不写合计数**：一次一格（`date「标题」N 个文件`）。求和会造出一个没有单位的
+//    「总改动量」，还把被两次合并都碰过的文件数两遍——它解释不了任何一次真实的改动。
+
+/** 先例行的前缀。单独一个常量只为让「这一行以什么开头」也能被用例钉住。 */
+export const SIMILAR_PREFIX = '同类先例：';
+
+/**
+ * 一行先例需要的三格。**故意不用 `SimilarMerge`**：文案层不需要 `sha`，也不该知道
+ * 有 `sha`——它一旦知道，下一个人就会想在这里按 sha 去查点什么。
+ */
+export type SimilarPrecedent = { date: string; subject: string; files: number };
+
+/**
+ * 先例 → 材料里的那一行（没有先例时是空数组）。
+ *
+ * 分隔符用全角分号而不是顿号：每一格都是「日期 + 标题 + 文件数」的完整一句，顿号会把
+ * 三次不同规模的改动连成一串，读者数不出哪几个文件属于哪一次。
+ */
+export function similarLines(items: readonly SimilarPrecedent[]): string[] {
+  if (items.length === 0) return [];
+  const parts = items.map((item) => `${item.date}「${item.subject}」${item.files} 个文件`);
+  return [`${SIMILAR_PREFIX}${parts.join('；')}`];
+}
+
+/**
+ * 结论（+ 快照）之后接上先例那一行；没有先例时**原样返回**，连一个空行都不加。
+ *
+ * 与 `withSnapshots` 同一个形状、同一个理由：文案层在这里唯一能做的错事，就是给
+ * 「没有」编一句话。
+ */
+export function withSimilar(
+  text: string,
+  items: readonly SimilarPrecedent[],
+): string {
+  const extra = similarLines(items);
+  return extra.length === 0 ? text : `${text}\n${extra.join('\n')}`;
+}
+
 // ─── 现有页面清单：评估提示词里「这一步落在哪一页」的唯一依据 ──────────────────
 //
 // 为什么这一段住在这里、而不是 `compose.ts`：它是**给 PM 读的一句话的来源**，

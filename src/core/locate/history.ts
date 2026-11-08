@@ -276,6 +276,84 @@ export function rankMerges(
 }
 
 /**
+ * 「同类先例」里的一次合并：材料上那一行的一格。
+ *
+ * `files` 是**这一次合并**动了几个文件（`row.files.length`），不是前 k 次加起来。
+ * 这两个数看起来差不多，说的却是两件事：加起来得到的是一个「总改动量」，它既没有单位
+ * 也对不上任何一次真实的排期——一个文件被两次合并都碰过时会被数两遍，而评审问的是
+ * 「上次做类似的事动了几个」，问的是一次的量级。所以这里一格一次，绝不求和。
+ *
+ * `date` 是 `MM-DD`（与 `mergeReason` 的「出自 11-03」同一把尺子、同一个 `dayOf`）：
+ * 「上次」这个词必须有日期，否则读者没法判断那次改动是不是还在用的那版口径。
+ * brief 里只写了 `sha / subject / files` 三格，`date` 是为这一行加上的第四格——
+ * 前三个字段一字不差，多出来的一格不影响任何按名字取字段的调用方。
+ */
+export type SimilarMerge = {
+  sha: string;
+  subject: string;
+  files: number;
+  date: string;
+};
+
+/**
+ * 材料里默认给几次先例：**3 次**。
+ *
+ * 一次不够（万一那一次是个 106 个文件的打包合并，读者会以为这条需求也是那个量级），
+ * 太多又变成一份清单——超过 3 行，PM 开始逐条比对文件数，而这一行要回答的只是
+ * 「上次类似的事，是改一个文件还是改十个」。第 4 名往后相似度掉得很快（实测见
+ * `TOP_MERGES` 的注释），多给的每一条都在稀释前三条的可信度。
+ */
+export const SIMILAR_MERGES = 3;
+
+/**
+ * 需求标题 → 最像的那几次合并（先例），给材料写一行「上次做类似的事动了几个文件」。
+ *
+ * **不另写相似度**：排名完全交给 `rankMerges`——同一套切块、同一套 IDF、同一道
+ * `isFeatureMerge` 过滤、同一个全序比较。理由不是省代码：材料上那一行与定位横幅里
+ * 的候选并排放着，两处若用两套打分，就会出现「候选说出自这次合并、先例里没有它」这种
+ * 自相矛盾；而读者没有办法判断该信哪一个。
+ *
+ * `subject` 走 `labelOf`（第一段、压空白、超 40 字截断）：与 `mergeReason` 里那个
+ * 「出自 …「…」」取自同一段文字，读者在两处看到的是同一个标题。
+ *
+ * 没有任何命中 / 查询切不出词 / 全是结构性杂活合并 → 空数组。调用方据此**一个字都不写**
+ * （写「没有先例」会把「我们手上没有可比的历史」说成「查过了、确实没有」，那是假话）。
+ */
+export function similarMerges(
+  rows: readonly HistoryRow[],
+  title: string,
+  k: number = SIMILAR_MERGES,
+): SimilarMerge[] {
+  return rankMerges(rows, title, k).map(({ row }) => ({
+    sha: row.commitSha,
+    subject: labelOf(row.message),
+    files: row.files.length,
+    date: dayOf(row.mergedAt),
+  }));
+}
+
+/**
+ * 进材料的一个合并标题：**第一段非空**的那一段，超 40 字截断，一段都没有时给一句话。
+ *
+ * 与 `firstSegment` 差一步：那一个只看第一段（`mergeReason` 用它，行为不动）。这里多
+ * 扫一段，是因为「第一段为空」真的有——`/ 下载限速风控弹窗` 这种以 ` / ` 开头的消息，
+ * 第一段是空串，直接拿去渲染就是 `11-03「」`，读者会以为我们读坏了消息。也不能退到
+ * `（提交信息为空）`：那句话对这条消息是**假话**（它有内容，只是第一段空）。
+ *
+ * 整条消息都空（库里有 13 行）时才落到 `（提交信息为空）`。这种行在 `rankMerges` 里
+ * 一个二字组都切不出来，永远不会赢，所以这个分支实际上进不了材料；留着它是为了
+ * 这一层不出现「如果没命中就返回空字符串」这种把判断推给文案层的写法。
+ */
+function labelOf(message: string): string {
+  for (const part of message.split(' / ')) {
+    const text = part.replace(/\s+/g, ' ').trim();
+    if (text === '') continue;
+    return text.length > MERGE_LABEL_MAX ? `${text.slice(0, MERGE_LABEL_MAX)}…` : text;
+  }
+  return '（提交信息为空）';
+}
+
+/**
  * 一次合并的出处，一句话、能直接进材料：`出自 11-03「用户权益缩减」`。
  *
  * 三处细节都是有原因的：
