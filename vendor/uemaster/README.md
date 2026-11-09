@@ -73,11 +73,15 @@ cmp /tmp/a.html /tmp/b.html && echo 一致
 
 ## 我们改了什么
 
-**一处，只有一处（2026-11-08）。** 其余部分与上游逐字节一致，可直接 `diff -r` 比对：
+**两处（2026-11-08 一处，2026-11-09 一处）。** 其余部分与上游逐字节一致，可直接
+`diff -r` 比对（`flow-walkthrough` 因为下面两处补丁而不同；`flow-canvas` 与 `_theme`
+仍然一模一样）：
 
 ```
 diff -r vendor/uemaster/flow-canvas/scripts /tmp/uem/skills/flow-canvas/scripts
 diff -r vendor/uemaster/_theme /tmp/uem/skills/_theme
+diff -r vendor/uemaster/flow-walkthrough/scripts /tmp/uem/skills/flow-walkthrough/scripts
+diff -r vendor/uemaster/flow-walkthrough/templates /tmp/uem/skills/flow-walkthrough/templates
 ```
 
 ### 本地补丁：全屏时撤掉中栏与右栏
@@ -94,9 +98,32 @@ diff -r vendor/uemaster/_theme /tmp/uem/skills/_theme
 中文注释）以 `本地补丁（2026-11-08，非上游）` 开头，`tests/walkmap.test.ts` 的字节比对
 靠这两个锚点把它剥掉再比——**补丁变多或变样，那条用例就会红**。
 
+### 本地补丁二：后端流程（时序图）那一格（2026-11-09）
+
+两个文件、三段，都以 `本地补丁（2026-11-09，非上游）` 开头（`build.py` 那一段是括号
+里的注释行，没有结束标记；模板里的两段以 `本地补丁结束（2026-11-09）` 结尾）：
+
+1. `flow-walkthrough/templates/walkthrough.html` 的 CSS 段：`.frame-seq` 与 `.seq-*`
+   （时序图 SVG 的样式，颜色走模板的 CSS 变量，深色模式跟着走）；
+2. 同一文件 `.stage` 里多一个容器 `<div class="frame-seq">__PAGES_SEQ__</div>`；
+3. `flow-walkthrough/scripts/build.py` 的 `html = (...)` 链里多一行
+   `.replace("__PAGES_SEQ__", page_divs("sequence"))`。
+
+为什么：纯后端需求（`PAN-815`「权益发放新增回调机制」那一类）的节点没有页面，中栏原本
+无内容，`assembleWalkmap` 把它们挂到空页面上、整份材料被 `validateWalkmap` 拒收。owner
+的裁定是「没有页面的节点不再强行挂页面，改成挂后端流程区块，页面原型那一栏改放一张
+时序图」。上游只有 `phone` / `wide` 两种 frame，`page_divs` 会**静默**丢掉第三种——静默丢
+在这里是最坏的失败方式（节点点开一片白），所以给它第三种 frame 和一个自己的容器。JS 一个
+字没改：`setViewByNode` 按 frame 收起两格，`frame=sequence` 时两格都收起，剩下的正好是
+这一格里的 `.page.active`。
+
 升级时怎么办：整目录覆盖之后，把这一条规则（连注释）重新贴回同一位置，然后跑
 `npx vitest run tests/walkmap.test.ts`。不要为了省这一步去改那条用例——它是唯一会
 告诉你「上游的模板长什么样、我们差了哪一行」的东西。
+
+（2026-11-09 的补丁同样按这句办：三段按原文贴回 `#frame-wide` 之后、
+`page_divs("wide")` 之后、`.page.active` 之后；字节比对里的剥除表也要跟着加。
+`tests/walkmap.test.ts` 的 `LOCAL_PATCHES` 就是那张表。）
 
 ## 文件
 

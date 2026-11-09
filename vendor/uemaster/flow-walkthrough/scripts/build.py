@@ -208,6 +208,10 @@ def main():
             .replace("__SVG__", svg_blocks(wm, svg_dark))
             .replace("__PAGES_PHONE__", page_divs("phone"))
             .replace("__PAGES_WIDE__", page_divs("wide"))
+            # 本地补丁（2026-11-09，非上游）：后端流程那一格（frame=sequence，时序图）。
+            # 上游只有 phone / wide 两种 frame，page_divs 的过滤会把第三种静默丢掉——
+            # 静默丢是这里最坏的失败方式（节点点开一片白），所以必须显式接上。
+            .replace("__PAGES_SEQ__", page_divs("sequence"))
             .replace("__NODES_JSON__", json.dumps(nodes, ensure_ascii=False))
             .replace("__STATE_GROUPS_JSON__", json.dumps(groups, ensure_ascii=False))
             .replace("__PAGE_FRAME_JSON__", json.dumps(page_frame, ensure_ascii=False))

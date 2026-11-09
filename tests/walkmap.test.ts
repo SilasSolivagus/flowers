@@ -246,13 +246,21 @@ describe('validateWalkmap', () => {
     });
   }
 
-  it('节点引用了不存在的页面 → 中文 rejects：节点 X 没有对应的页面', () => {
+  /**
+   * 这条判据是 `PAN-815` 那次事故的守门人（纯后端流程，六个节点都没有页面 →
+   * `assembleWalkmap` 挂到空页面上 → 整份被拒）。**拒收本身一字不让**，改的只是那句话：
+   * 原来叫「引用了不存在的页面「空」」，读的人不知道下一步该干什么；现在说清两条出路
+   * （给页面，或给时序步骤）——模型与人都能照着改。
+   */
+  it('节点既没有页面也没有后端流程 → 中文 rejects，并说清两条出路', () => {
     const walkmap = base();
     walkmap.nodes['Z'] = { page: 'p-不存在', title: '幽灵节点', anno: [] };
 
     const report = validateWalkmap(walkmap);
     expect(report.ok).toBe(false);
-    expect(report.errors.join('\n')).toContain('节点 Z 没有对应的页面');
+    expect(report.errors.join('\n')).toContain('节点 Z 既没有页面也没有后端流程');
+    expect(report.errors.join('\n')).toContain('steps');
+    expect(report.errors.join('\n')).toContain('p-不存在');
   });
 
   it('状态组只有一个状态 → 中文 rejects：状态组 Y 少于两个状态', () => {
@@ -303,15 +311,46 @@ describe('validateWalkmap', () => {
 const PATCH_START = '/* 本地补丁（2026-11-08，非上游）';
 const PATCH_RULE = '.flow-panel.fs ~ .stage, .flow-panel.fs ~ .anno-panel { display: none; }';
 
+/**
+ * 第二块补丁（2026-11-09）：后端流程那一格。**这段比对仍然只认「补丁」两个字**：
+ * 剥掉之后剩下的必须与上游逐字节相同，所以补丁的边界必须是模板里能唯一认出来的锚点，
+ * 而不是「凡是我们加的都不要」——后者等于把 vendoring 的全部意义让掉。
+ *
+ * 为什么边界用一对标记而不是某条规则：这块补丁在**两个文件的三处**（模板的 CSS 段、
+ * 模板的 `.stage` 容器、`build.py` 的一行 replace）。模板里那两段以
+ * `本地补丁结束（2026-11-09）` 收尾，成对剥除；`build.py` 那一行在模板产物里不留痕
+ * （`__PAGES_SEQ__` 被替换成空串，而空串跟着容器一起被剥掉了），因此不需要额外处理。
+ */
+const PATCH2_START = '本地补丁（2026-11-09，非上游）';
+const PATCH2_END = '本地补丁结束（2026-11-09）';
+
 /** 剥掉那块补丁（含它上面的注释）。找不到就原样返回——让 byte 比对自己去红。 */
 function withoutLocalPatch(html: string): string {
-  const from = html.indexOf(PATCH_START);
-  if (from < 0) return html;
-  const end = html.indexOf(PATCH_RULE, from);
-  if (end < 0) return html;
+  let out = html;
+  // ① 2026-11-09 的两段：整段（标记 → 结束标记所在行）连行尾换行一起剥。
+  for (;;) {
+    const from = out.indexOf(PATCH2_START);
+    if (from < 0) break;
+    const end = out.indexOf(PATCH2_END, from);
+    if (end < 0) break;
+    const lineEnd = out.indexOf('\n', end);
+    const to = lineEnd < 0 ? out.length : lineEnd + 1;
+    // 起点回退到行首：注释是从行首开始的，回退之后剥掉的是整行。
+    let lineStart = from;
+    while (lineStart > 0 && out[lineStart - 1] !== '\n') lineStart -= 1;
+    // 补丁是「空行 + 块」插进去的（读起来才不挤），所以剥的时候把它前面那一行空行一起剥；
+    // 不然剩下的产物比上游多一个换行，字节比对会以「差 1 个字节」的形式红掉。
+    if (lineStart > 0 && (lineStart - 2 < 0 || out[lineStart - 2] === '\n')) lineStart -= 1;
+    out = out.slice(0, lineStart) + out.slice(to);
+  }
+  // ② 2026-11-08 的那一条规则。
+  const start = out.indexOf(PATCH_START);
+  if (start < 0) return out;
+  const end = out.indexOf(PATCH_RULE, start);
+  if (end < 0) return out;
   const to = end + PATCH_RULE.length;
   // 连它后面的那个换行一起剥：上游那一段是「`}` + 换行 + 下一条规则」。
-  return html.slice(0, from) + html.slice(to + (html[to] === '\n' ? 1 : 0));
+  return out.slice(0, start) + out.slice(to + (out[to] === '\n' ? 1 : 0));
 }
 
 describe('与上游 build.py 逐字节一致', () => {
@@ -333,8 +372,10 @@ describe('与上游 build.py 逐字节一致', () => {
     const a = await readFile(path.join(dir, 'mine.html'), 'utf8');
     const b = await readFile(path.join(dir, 'theirs.html'), 'utf8');
 
-    // 1. 补丁真的在产物里（模板 → build.py → 产物这条链没断）
+    // 1. 两块补丁真的在产物里（模板 → build.py → 产物这条链没断）
     expect(a).toContain(PATCH_RULE);
+    expect(a).toContain(PATCH2_END);
+    expect(a).toContain('id="frame-seq"');
     // 2. 剥掉它之后逐字节相同：除了这一块，模板与上游一个字都不差
     expect(withoutLocalPatch(a)).toBe(b);
     // 3. 补丁只多出那几十个字节，不是把整段模板换掉了

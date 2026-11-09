@@ -52,9 +52,21 @@ export const OUTPUT_FILE = 'out.html';
 /** 页面片段目录（`pages[].file` 写成 `pages/<id>.html`）。 */
 export const PAGE_DIR = 'pages';
 
-export type Frame = 'phone' | 'wide';
+/**
+ * 中栏（`.stage`）用哪一种框。
+ *
+ * `phone` / `wide` 是上游契约的两种设备框；`sequence` 是**我们这一侧的扩展**
+ * （2026-11-09，见 `sequence.ts`）：后端节点的页面原型那一栏放的不是页面，是一张时序图。
+ * 之所以要一个新的 frame 值而不是复用 `wide`：`wide` 在模板里是「浏览器窗口」——白底、
+ * 边框、地址栏那一族样式；时序图要的是「一张图」，塞进浏览器窗口里会被读成页面。
+ * 契约里多一个枚举值的代价是 build.py 也要认它（`__PAGES_SEQ__`，见 vendor README）。
+ */
+export type Frame = 'phone' | 'wide' | 'sequence';
 
-/** 节点形态。`page` 有页面片段，`system` / `decision` 只有标注。 */
+/**
+ * 节点形态。`page` 有页面片段；`system` / `decision` 没有页面，它们的原型是时序图
+ * （2026-11-09 起；在此之前它们只有标注，标注还得折进相邻页面——纯后端流程因此整份出不来）。
+ */
 export type NodeKind = 'page' | 'system' | 'decision';
 
 /** 标注的一行：`[小标题, 正文]`，可选的第三格是缺口等级（`p0`/`p1`/`p2`，build.py 支持）。 */
@@ -62,7 +74,14 @@ export type Anno = [string, string] | [string, string, string];
 
 // ─── 契约里的四个结构 ────────────────────────────────────────────────────────
 
-export type WalkmapPage = { id: string; frame: Frame; file: string };
+/**
+ * 一份页面片段。
+ *
+ * `kind: 'sequence'` 的条目**不是页面**：它是后端节点的时序图（`id` 形如 `backend-A`，
+ * `file` 里躺的是我们排好的 SVG）。放在同一个 `pages[]` 里，是因为 build.py 只认这一个
+ * 容器：它按 `frame` 把条目分进中栏的三个框，时序图正好是第三个。
+ */
+export type WalkmapPage = { id: string; frame: Frame; file: string; kind?: 'sequence' };
 export type WalkmapState = { id: string; label: string; node: string };
 export type WalkmapStateGroup = { title: string; states: WalkmapState[] };
 export type WalkmapNode = { page: string; state?: string; title: string; anno: Anno[] };
@@ -80,14 +99,22 @@ export type Walkmap = {
 // ─── 拼装用的输入 ────────────────────────────────────────────────────────────
 
 /** 一份页面片段（模型产出的那块 HTML）。`id` 由调用方定，必须稳定。 */
-export type PageInput = { id: string; frame: Frame; html: string };
+export type PageInput = { id: string; frame: Frame; html: string; kind?: 'sequence' };
 
-/** 一个节点的映射信息。`kind=page` 的节点必须给 `page`。 */
+/**
+ * 一个节点的映射信息。
+ *
+ * 三态（2026-11-09 起）：
+ * - `kind=page` 必须给 `page`（自己的一屏）；
+ * - 后端节点（`system` / `decision`）给了时序步骤时，`page` 是它的伪页面 `backend-<id>`；
+ * - 两者都没有的节点会被 `validateWalkmap` 拒收（那句话原来叫「页面「空」」，现在说清
+ *   「既没有页面也没有后端流程」）。
+ */
 export type NodeInput = {
   id: string;
   title: string;
   kind: NodeKind;
-  /** `kind=page` 时指向 `pages[].id`。 */
+  /** 指向 `pages[].id`（页面或时序伪页面）。 */
   page?: string;
   anno?: Anno[];
 };
@@ -176,6 +203,7 @@ export function buildWalkmap(input: WalkmapInput): Walkmap {
     id: page.id,
     frame: page.frame,
     file: pageFile(page.id),
+    ...(page.kind === 'sequence' ? { kind: 'sequence' as const } : {}),
   }));
 
   const nodes: Record<string, WalkmapNode> = {};
@@ -293,19 +321,30 @@ export function validateWalkmap(
 
   // 3. 页面：id 唯一、frame 合法、片段存在。
   const pageIds = new Set<string>();
+  const seqPages = new Set<string>();
   for (const page of walkmap.pages) {
     if (pageIds.has(page.id)) errors.push(`页面 ${page.id} 定义了两次`);
     pageIds.add(page.id);
-    if (page.frame !== 'phone' && page.frame !== 'wide') {
-      errors.push(`页面 ${page.id} 的 frame 只能是 phone 或 wide（现在是「${String(page.frame)}」）`);
+    if (page.frame !== 'phone' && page.frame !== 'wide' && page.frame !== 'sequence') {
+      errors.push(`页面 ${page.id} 的 frame 只能是 phone、wide 或 sequence（现在是「${String(page.frame)}」）`);
     }
+    if (page.frame === 'sequence' || page.kind === 'sequence') seqPages.add(page.id);
   }
   if (walkmap.pages.length === 0) errors.push('walkmap 里一个页面片段都没有');
 
-  // 4. 每个节点都必须指向一个已定义的页面——「节点 X 没有对应的页面」。
+  // 4. 每个节点都必须落在某个页面或某张后端流程图上——「节点 X 没有对应的页面」。
+  //
+  // 这一条是 2026-11-09 那条事故的守门人：`PAN-815`（纯后端流程）里六个节点都是
+  // 系统/判断步骤，`assembleWalkmap` 把它们挂到空页面上，于是整份材料被这一条拒掉，
+  // 而那句话是「引用了不存在的页面「空」」——没人看得懂。现在挂载规则改了（后端节点
+  // 拿到自己的时序伪页面），**这条判据一字不让**：既没页面也没步骤的节点照旧拒收，
+  // 但话改成能照着改的说法。
   for (const [id, meta] of Object.entries(walkmap.nodes)) {
     if (!pageIds.has(meta.page)) {
-      errors.push(`节点 ${id} 没有对应的页面（引用了不存在的页面「${meta.page || '空'}」）`);
+      errors.push(
+        `节点 ${id} 既没有页面也没有后端流程：要么它落在一张页面上（给 html 与 frame），`
+        + `要么它是一组服务端步骤（给 steps：谁 → 谁 · 做什么）；现在是「${meta.page || '空'}」`,
+      );
     }
     if (meta.title.trim() === '') errors.push(`节点 ${id} 缺少标题`);
     for (const pair of meta.anno) {
@@ -366,6 +405,21 @@ export function validateWalkmap(
       }
       const bad = findEmoji(html);
       if (bad.length > 0) errors.push(`页面 ${page.id} 的片段含 emoji 字符 ${bad.slice(0, 5).join('')}`);
+      /**
+       * 时序图那一格查的是**另一套**：它不是页面片段，不该要求 `wt-*` 组件类
+       * （那是手机/浏览器框里的东西，SVG 图里一个都没有）。替代判据两条：
+       * 图真的画出来了（有 `<svg`）、参与方至少出现一个（`seq-actor` 是参与方框的类名）。
+       * 这两条盯的是「伪页面建了、内容是空的」——那会让节点点开是一片白，
+       * 比整份拒收更难发现。
+       */
+      if (seqPages.has(page.id)) {
+        if (!html.includes('<svg')) {
+          errors.push(`节点页面 ${page.id} 的后端流程图没有画出来（片段里没有 SVG）`);
+        } else if (!html.includes('seq-actor')) {
+          errors.push(`节点页面 ${page.id} 的后端流程图里没有参与方（至少要有一个「谁 → 谁」的角色）`);
+        }
+        continue;
+      }
       if (!WT_CLASS.test(html)) {
         errors.push(`页面 ${page.id} 的片段没有使用 wt- 组件类（模板只提供这套样式，写成别的类名在设备框里没有样式）`);
       }

@@ -34,6 +34,9 @@ import { attachArtifact } from './attach.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import { assembleWalkmap, type PageFragment } from './compose.js';
+import {
+  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, normalizeSteps, type SeqStep,
+} from './sequence.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import {
   complete, extractJson, resolveProviderConfig,
@@ -1356,6 +1359,7 @@ export function verifyPrompt(
     list,
     '',
     ...PRODUCT_BODY_RULE,
+    ...SEQUENCE_RULE,
     '（上面这段正文规则对 findings 的 prd / code 两格与每个节点的 anno 都成立：anno 写在'
       + '右栏给 PM 读，说清「这一步与需求对不对得上」，不要贴路径。'
       + '证据位置由系统写进末尾的「研发参考」。）',
@@ -1369,6 +1373,15 @@ export function verifyPrompt(
     '{ "id": "A", "kind": "page", "frame": "phone", "title": "分享页搜索入口",',
     '  "html": "<div class=\\"wt-screen\\">…</div>",',
     '  "anno": [["一致", "工具栏已换成输入框式入口"], ["内容", "点进独立搜索页"]] }',
+    '',
+    '后端节点（kind=system / decision）没有页面：不要给 html，交一组时序步骤 steps：',
+    '{ "id": "B", "kind": "system", "title": "写分享记录",',
+    '  "steps": [',
+    '    { "from": "页面", "to": "服务端", "what": "提交分享内容" },',
+    '    { "from": "服务端", "to": "服务端", "what": "记录这次分享" },',
+    '    { "from": "服务端", "to": "通知渠道", "what": "给被分享的人提醒" }',
+    '  ],',
+    '  "anno": [["缺失", "代码里没有写分享记录这一步"]] }',
     '',
     '页面片段的规则（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
     ' 1. 设备框就是用户真的会看到的屏幕：只写上线后用户看得见的内容；设计理由、待确认项、',
@@ -1396,7 +1409,11 @@ export function verifyPrompt(
     '    第三格是严重度：p0 = 不定就没法开工，p1 = 会返工，p2 = 可以先绕。',
     '    这两格里**一个实现词都不许有**——不写参数、字段、接口、埋点、状态码，也不写页面',
     '    在代码里的名字。照上面「缺口 + 建议」的正例写，那一对就是从真实材料里拿来的。',
-    ' 5. kind=system / decision 的节点没有页面：不要给 html 和 frame，只给 anno。',
+    ' 5. kind=system / decision 的节点没有页面：不要给 html 和 frame，只给 anno 与 steps。',
+    `    steps 是 1–${MAX_STEPS} 步的数组，每步 { "from": "谁", "to": "对谁", "what": "做了什么" }，`
+      + `每步 ≤${MAX_WHAT_CHARS} 字；参与方只能用：用户 / 页面 / 运营后台 / 服务端 / 支付渠道 / 通知渠道 / 第三方。`,
+    '    这是给 PM 看「这一步后端到底做了什么、跟谁打交道」的那张图——他看不到代码，',
+    '    所以一个方法名、表名、接口地址都不许出现（写了会被机器退回）。',
     '',
     '规则：id 必须与流程节点清单一一对应；全部中文；只输出 JSON 本身。',
   ].join('\n');
@@ -1422,9 +1439,12 @@ export function verifyRepairPrompt(
     flows.map((flow) => `  ${flow.id}  [${flow.kind}]  ${flow.title}`).join('\n'),
     '',
     ...PRODUCT_BODY_RULE,
+    ...SEQUENCE_RULE,
     '',
-    '重发**完整**的 JSON，形状不变：{"findings":[{"verdict","prd","code","evidence":[],"searched":[]}],"nodes":[{"id","kind","frame","title","html","anno"}]}',
-    'kind=page 给 frame 与 html；kind=system / decision 只给 anno，不要给 html。',
+    '重发**完整**的 JSON，形状不变：{"findings":[{"verdict","prd","code","evidence":[],"searched":[]}],'
+      + '"nodes":[{"id","kind","frame","title","html","anno","steps":[{"from","to","what"}]}]}',
+    'kind=page 给 frame 与 html；kind=system / decision 不给 html，给 steps（谁 → 谁 · 做什么，'
+      + `1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）。`,
     '每个节点 anno 的第一条必须是 verdict（一致/缺失/多余/不一致）；',
     '缺口那一对行的严重度只能取 p0 / p1 / p2，且缺口与建议两格不许出现实现词。',
     'html 只用 wt-* 组件类、只写 body 内片段、不用 emoji。只输出 JSON 本身。',
@@ -1440,6 +1460,9 @@ const NodeSchema = z.object({
   frame: z.preprocess(normalizeFrame, z.enum(['phone', 'wide'])).default('phone'),
   html: z.string().default(''),
   anno: z.array(z.array(z.string().min(1)).min(2).max(3)).default([]),
+  // 后端节点的时序步骤（2026-11-09）：形状交给 `sequence.ts` 的 `normalizeSteps`，
+  // 在那里报错才能说清「第几步、哪个参与方不在词表里」（见 compose.ts 同名字段的注释）。
+  steps: z.unknown().optional(),
 });
 
 export const VerifySchema = z.object({
@@ -1492,6 +1515,17 @@ export function readVerify(
     seen.add(node.id);
     const html = node.html.trim();
     if (node.kind === 'page' && html === '') return { ok: false, why: `节点 ${node.id} 是页面，但没有给 html` };
+    /**
+     * 后端节点的时序步骤（2026-11-09）：走查这条路的节点本来也分两类，但原来只有
+     * 「给不给 html」的判据，于是一个纯后端流程（`PAN-815` 那一类）里六个节点全都没有
+     * html，拼装时挂到空页面上、整份被拒。这里把义务说清：没有页面的节点必须给 steps。
+     */
+    let steps: SeqStep[] = [];
+    if (node.kind !== 'page' && node.steps !== undefined && node.steps !== null) {
+      const read = normalizeSteps(node.steps);
+      if (!read.ok) return { ok: false, why: `节点 ${node.id} 的 ${read.why}` };
+      steps = read.steps;
+    }
     const anno = toAnno(node.anno);
     if (!anno.some((row) => VERDICT_TITLES.has(row[0]))) {
       return { ok: false, why: `节点 ${node.id} 的标注里没有 verdict（第一条得是 一致 / 缺失 / 多余 / 不一致 之一）` };
@@ -1503,6 +1537,7 @@ export function readVerify(
       frame: node.frame as Frame,
       html: node.kind === 'page' ? html : '',
       anno,
+      ...(steps.length > 0 ? { steps } : {}),
     });
   }
 

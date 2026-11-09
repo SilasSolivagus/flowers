@@ -88,6 +88,26 @@ html, body { min-height: 100%; background: var(--wt-bg); color: var(--wt-text);
 .page.active { display: block; animation: wt-fade var(--ux-d-fast) var(--ux-e-standard); }
 @keyframes wt-fade { from { opacity: 0 } to { opacity: 1 } }
 
+/* 本地补丁（2026-11-09，非上游）：后端流程（时序图）那一格。
+   纯后端需求（权益发放回调那一类）的节点没有页面，中栏放的是我们自己排的 SVG 时序图
+   （排版在 src/core/uemaster/sequence.ts，无依赖、确定性）。它与手机框、宽窗口并列，
+   作为 `.stage` 的第三格，所以只需要两样东西：一段样式 + 一个容器（见下面 .stage 里那块）。
+   **不需要改 JS**：`setViewByNode` 已经把 phone / wide 两格按 frame 收起，frame=sequence
+   时两格都收起，剩下的正好是这一格里的 `.page.active`——容器常显、空的时候高度为 0，
+   不占版面，也不会在全屏时留下一条边。颜色全走模板的 CSS 变量，深色模式跟着走。 */
+.frame-seq { width: 690px; max-width: 100%; }
+.seq-figure { margin: 0; padding: var(--ux-s-4); background: var(--wt-white);
+  border: 1px solid var(--wt-border); border-radius: var(--ux-r-md); }
+.seq-cap { font-size: var(--ux-fs-body-s); color: var(--wt-dim); margin-bottom: var(--ux-s-3); }
+.seq-svg { width: 100%; height: auto; display: block; }
+.seq-box { fill: var(--wt-fill); stroke: var(--wt-border); }
+.seq-actor { font-family: var(--ux-sans); font-size: 12px; fill: var(--wt-text); }
+.seq-life { stroke: var(--wt-border); stroke-dasharray: 3 4; }
+.seq-arrow { stroke: var(--wt-accent); stroke-width: 1.2; fill: none; }
+.seq-head { fill: var(--wt-accent); stroke: none; }
+.seq-msg { font-family: var(--ux-sans); font-size: 11px; fill: var(--wt-text); }
+/* 本地补丁结束（2026-11-09） */
+
 /* 右：标注 */
 .anno-panel { width: 300px; flex-shrink: 0; position: sticky; top: var(--ux-s-5);
   max-height: calc(100vh - 40px); overflow-y: auto; }
@@ -240,6 +260,13 @@ __PAGES_PHONE__
   <div class="frame-wide hidden" id="frame-wide">
 __PAGES_WIDE__
   </div>
+  <!-- 本地补丁（2026-11-09，非上游）：后端流程（时序图）那一格。
+       后端节点的 page 指向 `backend-<节点id>`（frame=sequence），build.py 把它的片段
+       放进这里。容器不挂 hidden：没有激活的时序页时它是一个 0 高度的空 div。 -->
+  <div class="frame-seq" id="frame-seq">
+__PAGES_SEQ__
+  </div>
+  <!-- 本地补丁结束（2026-11-09） -->
 </div>
 
 <aside class="anno-panel">

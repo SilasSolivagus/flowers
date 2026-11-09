@@ -23,6 +23,10 @@ import {
 } from './provider.js';
 import { ARTIFACT_ROOT, artifactUrl } from './store.js';
 import {
+  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, normalizeSteps, renderSequencePage,
+  type SeqStep,
+} from './sequence.js';
+import {
   buildWalkmap, renderWalkthrough, validateWalkmap,
   type Anno, type BuildResult, type Frame, type NodeInput, type NodeKind,
   type PageInput, type Walkmap, type WalkmapAssets,
@@ -479,6 +483,14 @@ export type PageFragment = {
   /** `kind=page` 时是 body 内的片段；`system` / `decision` 是空串（它们没有页面）。 */
   html: string;
   anno: Anno[];
+  /**
+   * 后端节点（`system` / `decision`）的时序步骤（2026-11-09）。
+   *
+   * 为什么放在同一个结构里而不是另开一份清单：节点的标注、标题、形态都必须成组地
+   * 从模型手里接过来；分成两份就会出现「有步骤的节点没有标注」这种对不上的情形。
+   * `kind=page` 的节点即使给了 steps 也会被忽略（它有页面，页面就是它的原型）。
+   */
+  steps?: SeqStep[];
 };
 
 export type FragmentDoc = { nodes: PageFragment[] };
@@ -491,7 +503,7 @@ export function kindOf(node: FlowNode): NodeKind {
 }
 
 /**
- * 提示词 2：每个节点交一份**页面片段**，不再是我们的私有 JSON。
+ * 提示词 2：每个节点交一份**页面片段**或**一组时序步骤**，不再是我们的私有 JSON。
  *
  * 为什么把 `page-guide.md` 的规则**抄进提示词**：模型读不到仓库里的文件。而这一版
  * 材料要过的关是上游的 `build.py`——它只认 `wt-*` 组件类、只认 375 / 690 两种宽度、
@@ -499,10 +511,16 @@ export function kindOf(node: FlowNode): NodeKind {
  * 校验那一步被整份打回。规则下面那些**会变的部分**（节点清单、状态、编号）才是每次
  * 不同的东西。
  *
- * 为什么 `system` / `decision` 只交标注：上游 SKILL.md 的原则是「无页面的步骤不建
- * 节点」。判断与后台环节本来就没有用户能看到的页面，硬画一个就是编页面。它们的
- * 说明写进标注（`anno`），由 `assembleWalkmap` 折进前一个页面节点——正是上游那句
- * "动作说明写进前一节点的标注"。
+ * 2026-11-09 改了两件事（同一个事故的两面，见 `sequence.ts` 与 plan
+ * `2026-11-09-backend-sequence.md`）：
+ *
+ * 1. **节点分两类**：落在页面上的交页面片段；发生在服务端的（`system` / `decision`）
+ *    交 `steps`（谁 → 谁 · 做什么）。原来的说法是「无页面的步骤只给标注、由系统折进
+ *    前一个页面节点」，那句话对纯后端流程是不成立的：`PAN-815` 六个节点全是后端步骤，
+ *    没有「前一个页面节点」，于是整份材料被 `validateWalkmap` 拒掉。
+ * 2. **时序参与方是封闭词表**（`SEQUENCE_RULE`）：产品级角色，不许出现代码类名。
+ *    这一条是 owner 的硬规矩——时序图是最容易把 `ShareController.refund()` 画进去的
+ *    版式，而它必须读起来像产品文档。
  */
 export function fragmentsPrompt(
   req: RequirementRow,
@@ -522,8 +540,9 @@ export function fragmentsPrompt(
     list,
     ...fragmentsSurfacesBlock(known),
     ...PRODUCT_BODY_RULE,
+    ...SEQUENCE_RULE,
     '',
-    '请为每个节点交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
+    '页面节点（kind=page）请交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
     ' 1. 设备框就是用户的手机屏幕或浏览器窗口：框里每一段文字都必须是上线后用户真的会看到的内容。',
     '    设计理由、边界条件、「本期不做 / 待确认」、演示操作说明一律不写；元素下方不加解释性的小字。',
     ' 2. 手机页面按 375px 宽画（frame 写 phone）；后台与网页页面放 690px 宽的窗口（frame 写 wide）。',
@@ -551,15 +570,26 @@ export function fragmentsPrompt(
       + '<span class=\\"wt-nav-title\\">寄养</span></div><div class=\\"wt-body\\">'
       + '<div class=\\"wt-card\\">…</div></div></div>",',
     '      "anno": [["内容", "按距离列出可寄养门店"], ["操作", "点「立即预约」后判断是否首次预约"]] },',
-    '    { "id": "B", "kind": "decision", "title": "是否登录？",',
+    '    { "id": "B", "kind": "system", "title": "门店接单后台",',
+    '      "steps": [',
+    '        { "from": "服务端", "to": "运营后台", "what": "把订单推给门店" },',
+    '        { "from": "运营后台", "to": "服务端", "what": "门店接单" },',
+    '        { "from": "服务端", "to": "通知渠道", "what": "给用户发接单通知" }',
+    '      ],',
+    '      "anno": [["内容", "门店接单后才有寄养位"]] },',
+    '    { "id": "C", "kind": "decision", "title": "是否登录？",',
+    '      "steps": [',
+    '        { "from": "页面", "to": "服务端", "what": "带上当前登录状态" },',
+    '        { "from": "服务端", "to": "服务端", "what": "判断这个用户有没有登录过" }',
+    '      ],',
     '      "anno": [["判定依据", "会话里有没有用户"]] }',
     '  ]',
     '}',
     '',
     '规则：',
     ' 1. id 必须与清单一一对应，一个不多一个不少；kind 与清单里的形态一致。',
-    ' 2. kind=page 必须给 frame 与 html（html 是完整可渲染的一屏，不是描述）；',
-    '    kind=system / decision **不要**给 html——流程图里它本来就没有页面，只给 anno。',
+    ' 2. kind=page 必须给 frame 与 html（html 是完整可渲染的一屏，不是描述），不要给 steps；',
+    `    kind=system / decision **不要**给 html，必须给 steps（1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）。`,
     ' 3. anno 是右栏标注：每项 ["小标题", "正文"]，小标题 2–6 个字，正文一句话；',
     '    要指页面位置时写成「[A] 顶部状态卡片」，编号只写在标注里、不画进页面。',
     '    每页 1–3 条，只写设计约束、判定依据、边界与风险，不要重复页面里已有的文案。',
@@ -598,10 +628,12 @@ export function fragmentsRepairPrompt(
     nodes.map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`).join('\n'),
     ...fragmentsSurfacesBlock(known),
     ...PRODUCT_BODY_RULE,
+    ...SEQUENCE_RULE,
     '',
     '重发**完整**的 JSON，形状不变：',
-    '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]]}]}',
-    'kind=page 给 frame 与 html；kind=system / decision 只给 anno，不要给 html。',
+    '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]],"steps":[{"from","to","what"}]}]}',
+    'kind=page 给 frame 与 html；kind=system / decision 不给 html，给 steps（谁 → 谁 · 做什么，'
+      + `1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）。`,
     'html 只用 wt-* 组件类、只写 body 内片段、不用 emoji；一个状态一份片段；',
     '页面上推进流程的按钮写 onclick="goNode(\'节点id\')"。全部中文，只输出 JSON 本身。',
   ].join('\n');
@@ -618,6 +650,13 @@ const FragmentSchema = z.object({
   frame: z.preprocess(normalizeFrame, z.enum(['phone', 'wide'])).default('phone'),
   html: z.string().default(''),
   anno: z.array(AnnoSchema).default([]),
+  /**
+   * 后端节点的时序步骤（2026-11-09）。**故意不在这里定形状**：`sequence.ts` 的
+   * `normalizeSteps` 已经把三种写法（对象、三元数组、别名参与方）都收下了，而它有
+   * 自己的中文报错（第几步、哪个词不在词表里）。在 zod 里再编一套形状校验，
+   * 模型会拿到 `steps.0.from：Required` 这种它读不懂的话。
+   */
+  steps: z.unknown().optional(),
 });
 
 export const FragmentsSchema = z.object({ nodes: z.array(FragmentSchema).min(1) });
@@ -633,7 +672,9 @@ function toAnno(pairs: string[][]): Anno[] {
  *
  * 与 `readPages` 同一套覆盖率口径（少一个节点就重来：空壳页面在评审里比「没有这一步」
  * 更误导），多出来的是 kind 的义务：`page` 必须有能看的一屏 html，`system` / `decision`
- * 不许有（它们没有页面，硬画一个就是编）。
+ * 不许有（它们没有页面，硬画一个就是编），而且**必须给时序步骤**（2026-11-09）：
+ * 后端节点没有页面，它的原型就是那张时序图；不给步骤的节点在拼装阶段会挂到空页面上，
+ * 整份材料会被 `validateWalkmap` 拒收——那一次调用就白花了。所以在模型这一侧先说清。
  *
  * 这一层**不查** `wt-*` 类与 emoji：那是 walkmap 契约的事，由 `validateWalkmap` 说，
  * 报错格式也统一在那里（一句话、可重试）。两层分工清楚，错误就不会两处各说一半。
@@ -668,6 +709,22 @@ export function readFragments(
       if (!html.includes('<')) return { ok: false, why: `节点 ${node.id} 的 html 不是 HTML 片段` };
     }
 
+    /**
+     * 后端节点的时序步骤（2026-11-09）。**给了就必须合格，没给不在这里判死**：
+     * 提示词要求后端节点交 steps，但「没有页面」这件事的守门人是 `validateWalkmap`
+     * ——那里才是这条事故（`PAN-815` 整份被拒）的判据所在。在这里再判一次有两个坏处：
+     * 1. 旧材料里那些只有一句标注的判断节点会集体变成硬错（它们原来跟着页面走，是对的）；
+     * 2. 「没有 steps」与「steps 写错」混成同一句话，模型不知道该补还是该改。
+     * 所以：没有 steps → 空数组，拼装时按老办法挂最近的页面（没有页面才会被拒收）；
+     * 有 steps 但写错 → 立刻退回，并把「第几步、哪个词不在词表里」带给模型。
+     */
+    let steps: SeqStep[] = [];
+    if (node.kind !== 'page' && node.steps !== undefined && node.steps !== null) {
+      const read = normalizeSteps(node.steps);
+      if (!read.ok) return { ok: false, why: `节点 ${node.id} 的 ${read.why}` };
+      steps = read.steps;
+    }
+
     nodes.push({
       id: node.id,
       title: node.title,
@@ -675,6 +732,7 @@ export function readFragments(
       frame: node.frame,
       html: node.kind === 'page' ? html : '',
       anno: toAnno(node.anno),
+      ...(steps.length > 0 ? { steps } : {}),
     });
   }
 
@@ -703,6 +761,13 @@ export type Assembly = {
   /** 没有自己的页面、被挂到别的节点页面上的环节（判断 / 系统）。 */
   detached: Array<{ node: string; page: string }>;
   /**
+   * 拿到时序伪页面的节点（2026-11-09）：`page` 是 `backend-<节点id>`。
+   *
+   * 为什么要交出来：材料生成之后要能回答「这一份里到底有几张时序图、每张几步」——
+   * 那是这次改动唯一可数的证据（报告与日志都用它），从 walkmap 里反推反而要猜。
+   */
+  sequences: Array<{ node: string; page: string; steps: number }>;
+  /**
    * 标注里被搬走的技术词原句（2026-11-09 第二轮）。
    *
    * 走查 / 评审把它搬进末尾「研发参考」；评估那条路**不用它**——评估不读代码，被搬走的
@@ -716,18 +781,28 @@ export type Assembly = {
 };
 
 /**
- * 页面片段 → walkmap/1 的 JSON。三条规则，全部写在这里：
+ * 页面片段 → walkmap/1 的 JSON。四条规则，全部写在这里：
  *
  * 1. **一份片段一个页面**：内容完全相同的片段共用同一个 `pages[].id`（id 取第一次
  *    出现的节点 id，前缀 `p-`），所以「同一页」在 walkmap 里只有一个文件。
  * 2. **同一页面被多个页面节点使用 = 一组状态**：组名取这些标题的公共前缀
  *    （「寄养首页 · 未预约」→「寄养首页」），状态的 label 就是节点标题；单状态不建组
  *    （上游硬规则：右侧不放按钮）。推导在 `deriveStateGroups`。
- * 3. **判断 / 系统环节没有自己的页面**：它们不建 `pages` 条目，而是挂到**前一个**
- *    页面节点的页面上（没有前一个就挂后一个），标注留在自己身上——所以点它不会
- *    变成死点，右栏写的正是「这一步为什么在这里」。上游口径是「无页面的步骤不建
- *    节点、动作说明写进前一节点的标注」；我们的流程图里这种节点已经画出来了，
- *    能做的只有把它挂到它发生的那个页面上，而不是替它编一个页面。
+ * 3. **后端节点有自己的时序伪页面**（2026-11-09，本次改动的核心）：`system` / `decision`
+ *    节点带了步骤时，给它建一个 `id: backend-<节点id>`、`frame: sequence`、`kind: sequence`
+ *    的伪页面，里面是我们确定性排出来的 SVG。点这个节点，中栏换的就是这张图。
+ *
+ *    这条规则替换掉了原来那句「挂到**前一个**页面节点的页面上」。为什么原来那样做、
+ *    现在为什么不做了：原来上游的口径是「无页面的步骤不建节点、动作说明写进前一节点的
+ *    标注」；我们的流程图里这种节点已经画出来了，只能挂一个页面上去。但那句话在
+ *    **一个页面节点都没有**的流程里是空的——`PAN-815`（纯后端回调）六个节点全是
+ *    系统/判断步骤，于是六个节点都挂到空字符串上，`validateWalkmap` 整份拒收
+ *    （「引用了不存在的页面「空」」，连试两轮都出不来）。owner 的裁定是「没有页面的
+ *    节点不再强行挂页面，改成挂后端流程区块，页面原型那一栏放一张时序图」。
+ * 4. **既没有页面也没有步骤的节点**才退回老办法（挂最近的页面节点），一个页面节点都
+ *    没有时它会以空页面身份留下来，由 `validateWalkmap` 用一句能照着改的中文拒收。
+ *    保留这一条是为了「旧材料不因本次改动而变样」：走查里那些只有一句标注的判断节点，
+ *    照旧跟着它所在的那个页面走。
  *
  * 纯函数：不读磁盘、不看时钟。同一份片段永远得到同一份 walkmap。
  */
@@ -756,6 +831,7 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
   const nodes: NodeInput[] = [];
   const pageNode = new Map<string, NodeInput>();
   const detached: Array<{ node: string; page: string }> = [];
+  const sequences: Array<{ node: string; page: string; steps: number }> = [];
 
   /** 折标注用：离这个下标最近的页面节点（先往前找、再往后找）。 */
   const nearestPage = (index: number): NodeInput | undefined => {
@@ -772,6 +848,25 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
 
   nodes0.forEach((fragment, index) => {
     if (fragment.kind !== 'page' || fragment.html === '') {
+      // ① 后端节点带步骤 → 它自己的时序伪页面（本次改动的核心，见上面规则 3）。
+      const steps = fragment.steps ?? [];
+      if (steps.length > 0) {
+        const pageId = `backend-${fragment.id}`;
+        const html = renderSequencePage(steps, fragment.title);
+        pages.push({ id: pageId, frame: 'sequence', html, kind: 'sequence' });
+        fragments[pageId] = html;
+        sequences.push({ node: fragment.id, page: pageId, steps: steps.length });
+        nodes.push({
+          id: fragment.id,
+          title: fragment.title,
+          kind: fragment.kind,
+          page: pageId,
+          anno: fragment.anno,
+        });
+        return;
+      }
+
+      // ② 没有步骤 → 老办法：挂最近的页面节点（规则 4）。
       const host = nearestPage(index);
       // 没有任何页面节点时校验会说「一个页面片段都没有」；这里先按无页面记。
       if (host === undefined) {
@@ -807,6 +902,7 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
     walkmap: buildWalkmap({ title: opts.title, svg: opts.svg, nodes, pages }),
     fragments,
     detached,
+    sequences,
     moved,
     annoRaw,
     annoLeft,
