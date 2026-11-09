@@ -12,3 +12,12 @@
 # 格式：<组路径><TAB><理由>
 cdn-groups/artifacts	artifacts 的另一个副本：保留 artifacts（lastActivityAt 2026-10-30T15:28:18+08:00 更新），本行是 lastActivityAt 2026-01-13T19:55:08+08:00
 cdn-groups/go-protobuf	go-protobuf 的另一个副本：保留 go-protobuf（lastActivityAt 2026-11-09T09:28:06+08:00 更新），本行是 lastActivityAt 2026-01-13T19:55:08+08:00
+
+# ── GitLab（2026-11-09 接入时的两个例外）──────────────────────────────────────
+#
+# 判据：`git ls-remote` 对它们返回 permission denied（不是 404、不是网络故障，
+# 重试没有意义）。它们仍在 GitLab 上、仍是产品仓，只是我们的凭据读不到。
+# 一旦有人给了权限，把它们从本文件挪进 `config/repos.txt`（source=gitlab）即可。
+fre/pc/ai	GitLab 返回 permission denied（2026-11-09 实测，重试无意义）；接入后用 source=gitlab + path=fre/pc/ai
+fre/pc/Code Review Agent	GitLab 返回 permission denied（同上）；仓名带空格，接入时要给它一个合法 id（如 gl-code-review-agent）
+gocron	codeup 组织根下的 gocron 是**空仓**（`git ls-remote` 返回零 refs，2026-11-09 实测）：每晚 fetch master 都会以「couldn't find remote ref」收尾，等于给铃铛装一条永远不会消失的红点。真正的 gocron 在 GitLab（`go/gocron`，已作为 gl-gocron 接入）。本地 ~/code-mirrors/gocron.git 仍留着（空 bare），只是不再进清单。

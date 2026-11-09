@@ -1,8 +1,12 @@
 # 代码镜像仓清单 —— 「哪些仓」的唯一一份名单。
 #
 # 谁读它：
-#   scripts/sync-mirrors.sh   服务器上跑，按这里的「仓名 + 分支 + path」从 codeup fetch
-#                             （本文件由 scripts/install-cron.sh --server 一并 rsync 到服务器）
+#   scripts/sync-mirrors.sh   按这里的「仓名 + 分支 + 来源 + path」从 codeup / GitLab fetch。
+#                             2026-11-09 起**在本机跑**（`com.flowers.index-nightly` 的
+#                             第一步），镜像落在 `~/code-mirrors` 与 `~/code-mirrors-gl`。
+#                             `install-cron.sh --server` 会把副本 rsync 到 dogyun，但
+#                             那条 `5 5 * * *` 的 cron 已在 cutover 时停用——服务器上
+#                             那份只剩「拆之前长什么样」的参考价值。
 #   scripts/repos-apply.ts    把这份清单**播种**成 app_settings.code.mirror.repos
 #   scripts/onboard-repos.ts  批量建镜像 + 索引 + 写 repo_coverage 的批量入口
 #   src/core/codemirror/repo-inventory.ts  解析器（TS 侧唯一一份）
@@ -13,9 +17,17 @@
 # 的和索引读的就不是同一批仓（2026-11-08 的 `123pan-cross-frontend` 正是这么漏掉的：
 # 它在设置里、不在数组里，于是「代码快照较旧」挂了十几天没人知道）。
 #
-# ─── 格式（2026-11-09 起：多了 path= 一格）────────────────────────────────────
+# ─── 格式（2026-11-09 起：多了 source= 一格）─────────────────────────────────
 #
-#   <仓名><空白><分支>[<空白>path=<组路径>][<空白>stale=<天数>|never]
+#   <仓名><空白><分支>[<空白>source=codeup|gitlab][<空白>path=<组路径>]
+#            [<空白>stale=<天数>|never]
+#
+#   source=  这个仓从哪台机器抓，只有两个值。它同时决定**克隆基址**与**本地 bare 根**
+#            （codeup → `CODEUP_ORG` + `~/code-mirrors`；gitlab → `ssh://git@gitlab.
+#            123245.com:2222` + `~/code-mirrors-gl`）。缺省 codeup——2026-11-09 之前
+#            的清单只有两格，那批全是 codeup 的仓。
+#            为什么不写 `dir=` 绝对路径：那是一份**部署事实**（盘挂在哪），不是仓的属性。
+#            217 条绝对路径意味着换机 = 217 行手改，漏一行就是一次静默的换仓。
 #
 #   `#` 开头整行是注释；空行忽略；一行坏了整份作废（半份仓库列表比没有更糟）。
 #
@@ -75,151 +87,255 @@
 # 这七个之外**一律不写这一格**（= 全局 7 天）：给所有仓放宽阈值等于把这一列取消掉。
 
 # ── 组织根下的仓（path 就是仓名；这批正是被「拼 /123pan/」拼错的那一批）──
-123pan-ssr	master	path=123pan-ssr
-123pan-video	master	path=123pan-video
-123pan-windowsPro	master	path=123pan-windowsPro
-artifacts	master	path=artifacts
-ats-9.0.2	master	path=ats-9.0.2
-audit-tools	master	path=audit-tools
-cdn-admin	master	path=cdn-admin
-cdn-cp	master	path=cdn-cp
-cdn-proxy	master	path=cdn-proxy
-cloud-drive	master	path=cloud-drive
-crontab	master	path=crontab
-crypto	master	path=crypto
-dispatch-monitor	master	path=dispatch-monitor
-download_peed	main	path=download_peed
-go-protobuf	master	path=go-protobuf
-gocron	master	path=gocron
-helper	master	path=helper
-kong-2.5.0	master	path=kong-2.5.0
-log	master	path=log
-log-agent	master	path=log-agent
-redis	master	path=redis
-trafficserver	master	path=trafficserver
-Web-Nexus	master	path=Web-Nexus
-xgo	master	path=xgo
+123pan-ssr	master	source=codeup	path=123pan-ssr
+123pan-video	master	source=codeup	path=123pan-video
+123pan-windowsPro	master	source=codeup	path=123pan-windowsPro
+artifacts	master	source=codeup	path=artifacts
+ats-9.0.2	master	source=codeup	path=ats-9.0.2
+audit-tools	master	source=codeup	path=audit-tools
+cdn-admin	master	source=codeup	path=cdn-admin
+cdn-cp	master	source=codeup	path=cdn-cp
+cdn-proxy	master	source=codeup	path=cdn-proxy
+cloud-drive	master	source=codeup	path=cloud-drive
+crontab	master	source=codeup	path=crontab
+crypto	master	source=codeup	path=crypto
+dispatch-monitor	master	source=codeup	path=dispatch-monitor
+download_peed	main	source=codeup	path=download_peed
+go-protobuf	master	source=codeup	path=go-protobuf
+helper	master	source=codeup	path=helper
+kong-2.5.0	master	source=codeup	path=kong-2.5.0
+log	master	source=codeup	path=log
+log-agent	master	source=codeup	path=log-agent
+redis	master	source=codeup	path=redis
+trafficserver	master	source=codeup	path=trafficserver
+Web-Nexus	master	source=codeup	path=Web-Nexus
+xgo	master	source=codeup	path=xgo
 
 # ── 123pan 组 ──
-123pan-agent-tracker	master	path=123pan/123pan-agent-tracker	stale=365
-123pan-cross-frontend	master	path=123pan/123pan-cross-frontend
-123pan-dylib-go	master	path=123pan/123pan-dylib-go
-123pan-ele-react	master	path=123pan/123pan-ele-react	stale=730
-123pan-gateway	master	path=123pan/123pan-gateway	stale=180
-123pan-image-hosting	master	path=123pan/123pan-image-hosting
-123pan-pc	master	path=123pan/123pan-pc
-123pan-pc-go	master	path=123pan/123pan-pc-go
-123pan-piecehash	master	path=123pan/123pan-piecehash
-123pan-resource-library	master	path=123pan/123pan-resource-library
-123pan-slb	master	path=123pan/123pan-slb
-123pan-traffic	master	path=123pan/123pan-traffic
-123pan-uni-app	master	path=123pan/123pan-uni-app
-123pan-virtuallist-antd	master	path=123pan/123pan-virtuallist-antd	stale=never
-123pan_app_package	main	path=123pan/123pan_app_package
-123pan_manager	master	path=123pan/123pan_manager
-123pan_manager_frontend	master	path=123pan/123pan_manager_frontend
-api_server	master	path=123pan/api_server
-api_server_restful	master	path=123pan/api_server_restful
-apisrv	master	path=123pan/apisrv
-app	main	path=123pan/app
-app_plugin	main	path=123pan/app_plugin
-app_tv	master	path=123pan/app_tv
-audit-consumer	master	path=123pan/audit-consumer
-backup-disk	dev	path=123pan/backup-disk
-batch-process-data-worker	master	path=123pan/batch-process-data-worker
-binlog-srv	master	path=123pan/binlog-srv
-binlog-to-elasticsearch	master	path=123pan/binlog-to-elasticsearch
-binlog_go_new	master	path=123pan/binlog_go_new
-cdk_manager	master	path=123pan/cdk_manager
-cloud-disk-ws	master	path=123pan/cloud-disk-ws
-cloud-drive-migration	master	path=123pan/cloud-drive-migration
-contentTreeSrv	master	path=123pan/contentTreeSrv
-copy-file-schedule-worker	master	path=123pan/copy-file-schedule-worker
-copy-file-worker	master	path=123pan/copy-file-worker
-cron-scripts	master	path=123pan/cron-scripts
-defense-nginx	master	path=123pan/defense-nginx
-devops	master	path=123pan/devops
-dispatch	master	path=123pan/dispatch
-eslint-config	master	path=123pan/eslint-config	stale=365
-file-analysis-worker	master	path=123pan/file-analysis-worker
-frontend	master	path=123pan/frontend
-gcache-adapter	master	path=123pan/gcache-adapter
-get_domain	master	path=123pan/get_domain
-getconfig-api	master	path=123pan/getconfig-api
-gf-jwt	master	path=123pan/gf-jwt
-gf16	master	path=123pan/gf16
-go-async-etag-worker	master	path=123pan/go-async-etag-worker
-go-cloud-capacity-worker	master	path=123pan/go-cloud-capacity-worker
-go-direct-link-worker	master	path=123pan/go-direct-link-worker
-go-etag-worker	main	path=123pan/go-etag-worker
-go-kafka-service	master	path=123pan/go-kafka-service
-go-share	master	path=123pan/go-share
-go-thumbnail	master	path=123pan/go-thumbnail
-gofs	master	path=123pan/gofs
-health_check	master	path=123pan/health_check
-log-agent-client	master	path=123pan/log-agent-client
-metrics-consumer	master	path=123pan/metrics-consumer
-minio_deploy	master	path=123pan/minio_deploy
-mount-disk	master	path=123pan/mount-disk
-mount-disk-ws	master	path=123pan/mount-disk-ws
-mq_consumer	master	path=123pan/mq_consumer
-mq_consumer_v5	master	path=123pan/mq_consumer_v5
-mq_copy	master	path=123pan/mq_copy
-new-year-worker	master	path=123pan/new-year-worker
-new_audit	master	path=123pan/new_audit
-nginx-proxy	master	path=123pan/nginx-proxy
-Nimbus	master	path=123pan/Nimbus
-offline-download	master	path=123pan/offline-download
-OpenAPI	master	path=123pan/OpenAPI
-osssrv	master	path=123pan/osssrv
-pay_server	master	path=123pan/pay_server
-phoenix-share	master	path=123pan/phoenix-share
-php-audit	master	path=123pan/php-audit
-reference-count-worker	master	path=123pan/reference-count-worker
-resource_manager	master	path=123pan/resource_manager
-review	master	path=123pan/review	stale=never
-s3-migration	master	path=123pan/s3-migration
-save-copy-worker	master	path=123pan/save-copy-worker
-share	master	path=123pan/share	stale=540
-share-consumer	master	path=123pan/share-consumer
-silentDataBinlog	master	path=123pan/silentDataBinlog
-silentDataES	dev	path=123pan/silentDataES
-thumbnail	master	path=123pan/thumbnail
-track-consumer	master	path=123pan/track-consumer
-transcode	master	path=123pan/transcode
-transcode-proxy	master	path=123pan/transcode-proxy
-transfer-schedul-worker	master	path=123pan/transfer-schedul-worker
-uncompress_srv	master	path=123pan/uncompress_srv
-upload-consumer	master	path=123pan/upload-consumer
-upload-server	master	path=123pan/upload-server
-usercenter	v1	path=123pan/usercenter
-uuidsrv	master	path=123pan/uuidsrv
-video_audit_work	master	path=123pan/video_audit_work
-webdav	master	path=123pan/webdav
-windows-component	master	path=123pan/windows-component
+123pan-agent-tracker	master	source=codeup	path=123pan/123pan-agent-tracker	stale=365
+123pan-cross-frontend	master	source=codeup	path=123pan/123pan-cross-frontend
+123pan-dylib-go	master	source=codeup	path=123pan/123pan-dylib-go
+123pan-ele-react	master	source=codeup	path=123pan/123pan-ele-react	stale=730
+123pan-gateway	master	source=codeup	path=123pan/123pan-gateway	stale=180
+123pan-image-hosting	master	source=codeup	path=123pan/123pan-image-hosting
+123pan-pc	master	source=codeup	path=123pan/123pan-pc
+123pan-pc-go	master	source=codeup	path=123pan/123pan-pc-go
+123pan-piecehash	master	source=codeup	path=123pan/123pan-piecehash
+123pan-resource-library	master	source=codeup	path=123pan/123pan-resource-library
+123pan-slb	master	source=codeup	path=123pan/123pan-slb
+123pan-traffic	master	source=codeup	path=123pan/123pan-traffic
+123pan-uni-app	master	source=codeup	path=123pan/123pan-uni-app
+123pan-virtuallist-antd	master	source=codeup	path=123pan/123pan-virtuallist-antd	stale=never
+123pan_app_package	main	source=codeup	path=123pan/123pan_app_package
+123pan_manager	master	source=codeup	path=123pan/123pan_manager
+123pan_manager_frontend	master	source=codeup	path=123pan/123pan_manager_frontend
+api_server	master	source=codeup	path=123pan/api_server
+api_server_restful	master	source=codeup	path=123pan/api_server_restful
+apisrv	master	source=codeup	path=123pan/apisrv
+app	main	source=codeup	path=123pan/app
+app_plugin	main	source=codeup	path=123pan/app_plugin
+app_tv	master	source=codeup	path=123pan/app_tv
+audit-consumer	master	source=codeup	path=123pan/audit-consumer
+backup-disk	dev	source=codeup	path=123pan/backup-disk
+batch-process-data-worker	master	source=codeup	path=123pan/batch-process-data-worker
+binlog-srv	master	source=codeup	path=123pan/binlog-srv
+binlog-to-elasticsearch	master	source=codeup	path=123pan/binlog-to-elasticsearch
+binlog_go_new	master	source=codeup	path=123pan/binlog_go_new
+cdk_manager	master	source=codeup	path=123pan/cdk_manager
+cloud-disk-ws	master	source=codeup	path=123pan/cloud-disk-ws
+cloud-drive-migration	master	source=codeup	path=123pan/cloud-drive-migration
+contentTreeSrv	master	source=codeup	path=123pan/contentTreeSrv
+copy-file-schedule-worker	master	source=codeup	path=123pan/copy-file-schedule-worker
+copy-file-worker	master	source=codeup	path=123pan/copy-file-worker
+cron-scripts	master	source=codeup	path=123pan/cron-scripts
+defense-nginx	master	source=codeup	path=123pan/defense-nginx
+devops	master	source=codeup	path=123pan/devops
+dispatch	master	source=codeup	path=123pan/dispatch
+eslint-config	master	source=codeup	path=123pan/eslint-config	stale=365
+file-analysis-worker	master	source=codeup	path=123pan/file-analysis-worker
+frontend	master	source=codeup	path=123pan/frontend
+gcache-adapter	master	source=codeup	path=123pan/gcache-adapter
+get_domain	master	source=codeup	path=123pan/get_domain
+getconfig-api	master	source=codeup	path=123pan/getconfig-api
+gf-jwt	master	source=codeup	path=123pan/gf-jwt
+gf16	master	source=codeup	path=123pan/gf16
+go-async-etag-worker	master	source=codeup	path=123pan/go-async-etag-worker
+go-cloud-capacity-worker	master	source=codeup	path=123pan/go-cloud-capacity-worker
+go-direct-link-worker	master	source=codeup	path=123pan/go-direct-link-worker
+go-etag-worker	main	source=codeup	path=123pan/go-etag-worker
+go-kafka-service	master	source=codeup	path=123pan/go-kafka-service
+go-share	master	source=codeup	path=123pan/go-share
+go-thumbnail	master	source=codeup	path=123pan/go-thumbnail
+gofs	master	source=codeup	path=123pan/gofs
+health_check	master	source=codeup	path=123pan/health_check
+log-agent-client	master	source=codeup	path=123pan/log-agent-client
+metrics-consumer	master	source=codeup	path=123pan/metrics-consumer
+minio_deploy	master	source=codeup	path=123pan/minio_deploy
+mount-disk	master	source=codeup	path=123pan/mount-disk
+mount-disk-ws	master	source=codeup	path=123pan/mount-disk-ws
+mq_consumer	master	source=codeup	path=123pan/mq_consumer
+mq_consumer_v5	master	source=codeup	path=123pan/mq_consumer_v5
+mq_copy	master	source=codeup	path=123pan/mq_copy
+new-year-worker	master	source=codeup	path=123pan/new-year-worker
+new_audit	master	source=codeup	path=123pan/new_audit
+nginx-proxy	master	source=codeup	path=123pan/nginx-proxy
+Nimbus	master	source=codeup	path=123pan/Nimbus
+offline-download	master	source=codeup	path=123pan/offline-download
+OpenAPI	master	source=codeup	path=123pan/OpenAPI
+osssrv	master	source=codeup	path=123pan/osssrv
+pay_server	master	source=codeup	path=123pan/pay_server
+phoenix-share	master	source=codeup	path=123pan/phoenix-share
+php-audit	master	source=codeup	path=123pan/php-audit
+reference-count-worker	master	source=codeup	path=123pan/reference-count-worker
+resource_manager	master	source=codeup	path=123pan/resource_manager
+review	master	source=codeup	path=123pan/review	stale=never
+s3-migration	master	source=codeup	path=123pan/s3-migration
+save-copy-worker	master	source=codeup	path=123pan/save-copy-worker
+share	master	source=codeup	path=123pan/share	stale=540
+share-consumer	master	source=codeup	path=123pan/share-consumer
+silentDataBinlog	master	source=codeup	path=123pan/silentDataBinlog
+silentDataES	dev	source=codeup	path=123pan/silentDataES
+thumbnail	master	source=codeup	path=123pan/thumbnail
+track-consumer	master	source=codeup	path=123pan/track-consumer
+transcode	master	source=codeup	path=123pan/transcode
+transcode-proxy	master	source=codeup	path=123pan/transcode-proxy
+transfer-schedul-worker	master	source=codeup	path=123pan/transfer-schedul-worker
+uncompress_srv	master	source=codeup	path=123pan/uncompress_srv
+upload-consumer	master	source=codeup	path=123pan/upload-consumer
+upload-server	master	source=codeup	path=123pan/upload-server
+usercenter	v1	source=codeup	path=123pan/usercenter
+uuidsrv	master	source=codeup	path=123pan/uuidsrv
+video_audit_work	master	source=codeup	path=123pan/video_audit_work
+webdav	master	source=codeup	path=123pan/webdav
+windows-component	master	source=codeup	path=123pan/windows-component
 
 # ── cdn-groups 组 ──
-beats	master	path=cdn-groups/beats
-cdn	master	path=cdn-groups/cdn
-cdn-agent	master	path=cdn-groups/cdn-agent
-cdn-dispatch	master	path=cdn-groups/cdn-dispatch
-cdn-go-proxy	master	path=cdn-groups/cdn-go-proxy
-cdn-manager	master	path=cdn-groups/cdn-manager
-coredns-cdn	master	path=cdn-groups/coredns-cdn
-event-tracking	master	path=cdn-groups/event-tracking
-grpc	master	path=cdn-groups/grpc
-gts	master	path=cdn-groups/gts
-openresty-cdn-gateway	master	path=cdn-groups/openresty-cdn-gateway
-refresh-center-agent	master	path=cdn-groups/refresh-center-agent
+beats	master	source=codeup	path=cdn-groups/beats
+cdn	master	source=codeup	path=cdn-groups/cdn
+cdn-agent	master	source=codeup	path=cdn-groups/cdn-agent
+cdn-dispatch	master	source=codeup	path=cdn-groups/cdn-dispatch
+cdn-go-proxy	master	source=codeup	path=cdn-groups/cdn-go-proxy
+cdn-manager	master	source=codeup	path=cdn-groups/cdn-manager
+coredns-cdn	master	source=codeup	path=cdn-groups/coredns-cdn
+event-tracking	master	source=codeup	path=cdn-groups/event-tracking
+grpc	master	source=codeup	path=cdn-groups/grpc
+gts	master	source=codeup	path=cdn-groups/gts
+openresty-cdn-gateway	master	source=codeup	path=cdn-groups/openresty-cdn-gateway
+refresh-center-agent	master	source=codeup	path=cdn-groups/refresh-center-agent
 
 # ── test-groups 组 ──
-ai-test-agent	master	path=test-groups/ai-test-agent
-app-ui-test	master	path=test-groups/app-ui-test
-coverage	master	path=test-groups/coverage
-crazy-api	master	path=test-groups/crazy-api
-jmeter-offline	master	path=test-groups/jmeter-offline
-performance_front_test	lighthouse_v1	path=test-groups/performance_front_test
-platform-api	master	path=test-groups/platform-api
-platform-fontend	master	path=test-groups/platform-fontend
-tl	master	path=test-groups/tl
-web-ui-test	master	path=test-groups/web-ui-test
+ai-test-agent	master	source=codeup	path=test-groups/ai-test-agent
+app-ui-test	master	source=codeup	path=test-groups/app-ui-test
+coverage	master	source=codeup	path=test-groups/coverage
+crazy-api	master	source=codeup	path=test-groups/crazy-api
+jmeter-offline	master	source=codeup	path=test-groups/jmeter-offline
+performance_front_test	lighthouse_v1	source=codeup	path=test-groups/performance_front_test
+platform-api	master	source=codeup	path=test-groups/platform-api
+platform-fontend	master	source=codeup	path=test-groups/platform-fontend
+tl	master	source=codeup	path=test-groups/tl
+web-ui-test	master	source=codeup	path=test-groups/web-ui-test
+
+# ── GitLab 组（2026-11-09 接入：产品仓，与 codeup 那批同一个清单）──────────────
+#
+# 为什么它们也进这份清单：`mirror.ts` 只认一份仓列表，材料/走查/评审读的是
+# `code.mirror.repos`。把它们放进另一份清单 = 再长出一条会漂的「哪些仓」的缝
+# （2026-11-08 的 `123pan-cross-frontend` 就是掉在这种缝里十几天）。
+#
+# 来源只有一格 `source=gitlab`：克隆基址 `ssh://git@gitlab.123245.com:2222`、
+# bare 根 `~/code-mirrors-gl`（都写在 repo-inventory.ts 的 sourceBase/mirrorRootGitlab）。
+# 分支是 `git symbolic-ref HEAD` 读出来的（GitLab 那边 7 个仓的默认分支不是 master：
+# main×5、`feature_v1`（github-api-demo）、`feature-transcode-refactor`（transcode），
+# 三条都用 `git ls-remote --symref` 复核过）。
+#
+# 重名 5 个：GitLab 的 `123pan-agent-tracker` / `cron-scripts` / `gocron` / `share` /
+# `transcode` 与 codeup 的仓同名但**不是同一个仓**。改的是 GitLab 这边（加 `gl-`
+# 前缀）：codeup 那批在库里已有索引/覆盖率/健康度的行，改 id 等于丢历史；
+# GitLab 这 75 个是本轮新接入，改 id 没有代价。镜像目录同步改成 `gl-<名字>.git`。
+#
+# 两个仓（`fre/pc/ai`、`fre/pc/Code Review Agent`）没有接进来：GitLab 对它们返回
+# permission denied，重试没有意义。记在 `config/repos-excluded.txt`。
+#
+# stale=：接入时按 HEAD 年龄定一次（>365 天 → never，90–365 天 → 365，其余缺省 7）。
+# 这不是拍出来的阈值，而是「接入这一刻它已经停了多久」的事实；不写它，75 个新仓里
+# 27 个会从第一晚起就在铃铛里常驻一条永远不会消失的红点。
+
+# ── GitLab / frontend ──
+123pan-landing	master	source=gitlab	path=fre/web/123pan-landing
+123pan-login-center	master	source=gitlab	path=fre/web/123pan-login-center
+123pan-mobile	master	source=gitlab	path=fre/web/123pan-mobile
+123pan-preview	main	source=gitlab	path=fre/web/123pan-preview
+123pan-website	master	source=gitlab	path=fre/web/123pan-website
+e-transform	master	source=gitlab	path=fre/web/e-transform	stale=365
+fe-tool	master	source=gitlab	path=fre/admin/fe-tool
+gl-123pan-agent-tracker	master	source=gitlab	path=fre/admin/123pan-agent-tracker	stale=365
+
+# ── GitLab / proto ──
+activity	master	source=gitlab	path=proto/activity
+adverte	master	source=gitlab	path=proto/adverte	stale=365
+audit	master	source=gitlab	path=proto/audit
+auth	master	source=gitlab	path=proto/auth
+bconf	master	source=gitlab	path=proto/bconf
+benefit	master	source=gitlab	path=proto/benefit
+ftree	master	source=gitlab	path=proto/ftree
+gl-share	master	source=gitlab	path=proto/share	stale=365
+gl-transcode	feature-transcode-refactor	source=gitlab	path=proto/transcode
+ip	master	source=gitlab	path=proto/ip
+k2m	master	source=gitlab	path=proto/k2m
+metrics	master	source=gitlab	path=proto/metrics	stale=365
+push	master	source=gitlab	path=proto/push
+risk	master	source=gitlab	path=proto/risk
+rule	master	source=gitlab	path=proto/rule
+s3x	master	source=gitlab	path=proto/s3x
+traffic	master	source=gitlab	path=proto/traffic
+transform	master	source=gitlab	path=proto/transform	stale=365
+uuid	master	source=gitlab	path=proto/uuid	stale=365
+
+# ── GitLab / backend ──
+admin-adm	master	source=gitlab	path=go/cloud-driver/admin-adm	stale=365
+admin-cdk	master	source=gitlab	path=go/cloud-driver/admin-cdk	stale=365
+admin-job	master	source=gitlab	path=go/cloud-driver/admin-job	stale=365
+api-123cloud	master	source=gitlab	path=go/cloud-driver/api-123cloud	stale=365
+api-advert	master	source=gitlab	path=go/cloud-driver/api-advert	stale=365
+api-go-base	master	source=gitlab	path=go/base/api
+api-login	master	source=gitlab	path=go/cloud-driver/api-login
+api-open	master	source=gitlab	path=go/cloud-driver/api-open	stale=365
+api-pay	main	source=gitlab	path=go/cloud-driver/api-pay	stale=365
+api-share	master	source=gitlab	path=go/cloud-driver/api-share
+api-transcode-gateway	master	source=gitlab	path=go/cloud-driver/transcode/api-transcode-gateway
+api-uc	master	source=gitlab	path=go/cloud-driver/api-uc
+api-ufs	master	source=gitlab	path=go/cloud-driver/api-ufs
+blank	master	source=gitlab	path=go/base/blank	stale=365
+cdn-safety	master	source=gitlab	path=go/cdn-safety
+demo	main	source=gitlab	path=go/demo	stale=365
+ets	master	source=gitlab	path=go/ets
+fix-worker	master	source=gitlab	path=go/cloud-driver/worker/fix
+flow-gate	main	source=gitlab	path=go/cloud-driver/flow-gate
+github-api-demo	feature_v1	source=gitlab	path=go/cloud-driver/api-transcode-demo	stale=365
+gl-cron-scripts	master	source=gitlab	path=go/cloud-driver/scripts/cron-scripts	stale=never
+gl-gocron	master	source=gitlab	path=go/gocron
+grpc-activity	master	source=gitlab	path=go/cloud-driver/grpc-activity
+grpc-adverte	master	source=gitlab	path=go/cloud-driver/grpc-adverte	stale=365
+grpc-audit	master	source=gitlab	path=go/cloud-driver/grpc-audit
+grpc-auth	master	source=gitlab	path=go/cloud-driver/grpc-auth
+grpc-bconf	master	source=gitlab	path=go/cloud-driver/grpc-bconf
+grpc-benefit	master	source=gitlab	path=go/cloud-driver/grpc-benefit
+grpc-ftree	master	source=gitlab	path=go/cloud-driver/grpc-ftree
+grpc-go-base	master	source=gitlab	path=go/base/grpc	stale=365
+grpc-ip	master	source=gitlab	path=go/cloud-driver/grpc-ip
+grpc-metrics	master	source=gitlab	path=go/cloud-driver/grpc-metrics
+grpc-push	master	source=gitlab	path=go/cloud-driver/grpc-push
+grpc-risk	master	source=gitlab	path=go/cloud-driver/grpc-risk
+grpc-rule	master	source=gitlab	path=go/cloud-driver/grpc-rule
+grpc-s3x	master	source=gitlab	path=go/cloud-driver/grpc-s3x
+grpc-share	master	source=gitlab	path=go/cloud-driver/grpc-share	stale=365
+grpc-traffic	master	source=gitlab	path=go/cloud-driver/grpc-traffic
+grpc-transcode-master	master	source=gitlab	path=go/cloud-driver/transcode/grpc-transcode-master
+grpc-transcode-worker	master	source=gitlab	path=go/cloud-driver/transcode/grpc-transcode-worker	stale=365
+grpc-uuid	master	source=gitlab	path=go/cloud-driver/grpc-uuid	stale=365
+k2m-worker	master	source=gitlab	path=go/cloud-driver/worker/k2m
+log-collect	master	source=gitlab	path=go/log-collect	stale=365
+m2m	master	source=gitlab	path=go/cloud-driver/worker/m2m	stale=365
+merge-table	master	source=gitlab	path=go/cloud-driver/worker/merge-table
+monitor	master	source=gitlab	path=go/monitor
+s3-gateway	main	source=gitlab	path=go/cloud-driver/s3-gateway
+worker-go-base	master	source=gitlab	path=go/base/worker	stale=365

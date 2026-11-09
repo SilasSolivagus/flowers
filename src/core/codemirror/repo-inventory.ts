@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { REPO_ROOT } from '../runtime-dir.js';
@@ -80,8 +81,74 @@ import type { MirrorResult, RepoRef } from './mirror.js';
  * 而把后者一起吞掉。
  */
 
-/** 服务器上 bare 镜像的根目录。与 `scripts/sync-mirrors.sh` 的 `MIRROR_ROOT` 同一个默认值。 */
-export const DEFAULT_MIRROR_ROOT = '/srv/123pan-mirror';
+/**
+ * ── 来源（`source=`）：2026-11-09 传输从 ssh 换回本地盘时多出来的一格
+ *
+ * 镜像原来只有一处：`dogyun:/srv/123pan-mirror`。换成本地盘之后**有两处**——codeup 的
+ * 140 个仓在 `~/code-mirrors`、GitLab 的 75 个仓在 `~/code-mirrors-gl`。这两处不是
+ * 「同一个根的两种拼法」：主机不同、克隆协议不同（https vs ssh:2222）、仓名还会撞。
+ *
+ * 所以清单里每行带一个来源，读侧只用一个表把 `source → 根目录 / 克隆基址` 翻出来。
+ * **不写 217 条绝对路径**：那会把「部署在哪台机器、盘挂在哪」写死进一份仓属性表，
+ * 换机或换挂载点就是 217 行手改（漏一行就是一次静默的换仓）。
+ *
+ * 默认仍是 `codeup`：清单里 140 行 `source=codeup` 是显式写的，但这个默认值保证
+ * 「2026-11-09 之前只有两格的旧清单」逐行读出来仍然指向 codeup——见 `parseRepoInventory`。
+ */
+export type RepoSource = 'codeup' | 'gitlab';
+
+export const DEFAULT_SOURCE: RepoSource = 'codeup';
+
+/** 清单里认的来源；写别的一律整份失败（拼错的来源会安静地落到默认根上）。 */
+export const REPO_SOURCES: readonly RepoSource[] = ['codeup', 'gitlab'];
+
+/**
+ * 每个来源的 bare 镜像根目录。
+ *
+ * 默认值现在是**本机**路径（`~/code-mirrors` / `~/code-mirrors-gl`）：2026-11-09 起
+ * 镜像就住在这台 Mac 上，磁盘是唯一的一份。写 `~/` 而不是 `/Users/silas/...` 是为了
+ * 「换个用户/换台 Mac」不需要改代码——而 HOME 之下的相对位置是这台机器的部署约定。
+ *
+ * 环境变量仍可覆盖（`MIRROR_ROOT` / `MIRROR_ROOT_GITLAB`）：走查、用例、以及**迁移前**
+ * 对着服务器那份做对比时都要能把根挪走。名字保留 `MIRROR_ROOT`（codeup）是为了
+ * `sync-mirrors.sh` 与服务器上那份旧副本仍然读同一个变量。
+ */
+export const DEFAULT_MIRROR_ROOT = path.join(homedir(), 'code-mirrors');
+export const DEFAULT_MIRROR_ROOT_GITLAB = path.join(homedir(), 'code-mirrors-gl');
+
+export const MIRROR_ROOT_ENV = 'MIRROR_ROOT';
+export const MIRROR_ROOT_GITLAB_ENV = 'MIRROR_ROOT_GITLAB';
+
+/** 两个根。`MirrorRoots` 是 `inventoryToRepos()` 的唯一入参形状。 */
+export type MirrorRoots = Record<RepoSource, string>;
+
+/**
+ * GitLab 的克隆基址：**ssh，端口 2222**。
+ *
+ * 为什么不拼 https：GitLab 那边的仓只开了 ssh 的匿名读（`git@gitlab.123245.com:2222`），
+ * 而 codeup 走的是 https + 凭据。两种协议的地址没有共同的拼法，所以基址必须在
+ * `source` 上分叉，而不是在 `path` 上多写一层。
+ */
+export const GITLAB_ORG = 'ssh://git@gitlab.123245.com:2222';
+
+/** `source` → 克隆基址（codeup 是 `CODEUP_ORG`，gitlab 是 `GITLAB_ORG`）。 */
+export function sourceBase(source: RepoSource): string {
+  return source === 'gitlab' ? GITLAB_ORG : CODEUP_ORG;
+}
+
+/**
+ * 重名时的改名前缀。
+ *
+ * 为什么要改名：`code.mirror.repos` 的 `id` 是**身份**——`repo_coverage` /
+ * `mirror_health` / `commit_history` / `blob_index` 都按它存行，两行同一个 id 就是
+ * 两份仓的数据互相覆盖。而 codeup 与 GitLab 确实各有一个 `share`、`transcode`、
+ * `gocron`、`cron-scripts`、`123pan-agent-tracker`（五个不同的仓，不是同一个仓的副本）。
+ *
+ * 改哪一边：**改 GitLab 这边**。codeup 那 140 个仓在库里已经有一批行（索引、覆盖率、
+ * 健康度），改 id 等于把它们的历史丢掉；GitLab 的 75 个是本轮新接入，改 id 没有历史代价。
+ * 前缀 `gl-` 一眼能看出「这个仓来自 GitLab」，也解释了它为什么和上游仓名不一样。
+ */
+export const COLLISION_PREFIX = 'gl-';
 
 /**
  * codeup 的**组织根**（不是 `123pan` 组）。克隆地址 = `CODEUP_ORG/<path>.git`。
@@ -118,10 +185,21 @@ export function inventoryPath(env: Record<string, string | undefined> = process.
   return path.join(REPO_ROOT, 'config', 'repos.txt');
 }
 
-/** 镜像根目录：`MIRROR_ROOT` 与 shell 侧同名同义（服务器上那份脚本也读这个变量）。 */
+/** codeup 的镜像根目录：`MIRROR_ROOT` 与 shell 侧同名同义（`sync-mirrors.sh` 读同一个变量）。 */
 export function mirrorRoot(env: Record<string, string | undefined> = process.env): string {
-  const value = (env.MIRROR_ROOT ?? '').trim();
+  const value = (env[MIRROR_ROOT_ENV] ?? '').trim();
   return value === '' ? DEFAULT_MIRROR_ROOT : value;
+}
+
+/** GitLab 的镜像根目录（`MIRROR_ROOT_GITLAB`，缺省 `~/code-mirrors-gl`）。 */
+export function mirrorRootGitlab(env: Record<string, string | undefined> = process.env): string {
+  const value = (env[MIRROR_ROOT_GITLAB_ENV] ?? '').trim();
+  return value === '' ? DEFAULT_MIRROR_ROOT_GITLAB : value;
+}
+
+/** 两个根一起取：读侧不该关心「哪几个来源各有一个环境变量」这件事。 */
+export function mirrorRoots(env: Record<string, string | undefined> = process.env): MirrorRoots {
+  return { codeup: mirrorRoot(env), gitlab: mirrorRootGitlab(env) };
 }
 
 /**
@@ -178,6 +256,8 @@ export const STALE_NEVER = 'never';
  */
 export type InventoryLine = {
   id: string;
+  /** 这个仓从哪个来源抓：决定克隆基址与本地 bare 根的**唯一一格**（缺省 `codeup`）。 */
+  source: RepoSource;
   branch: string;
   /**
    * **组织相对的克隆路径**（清单第二格 `path=`），与 `real-repos.tsv` 的第二列逐字相同：
@@ -272,6 +352,8 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
     // 兼容：第三格如果**光着**写 `never` 或正整数，仍按 `stale_after_days` 读
     // （历史格式）。这个兼容是安全的：没有任何组路径是「全数字」或「never」。
     let path = '';
+    let source: RepoSource = DEFAULT_SOURCE;
+    let sourceSeen = false;
     let staleAfterDays: number | null = DEFAULT_STALE_AFTER_DAYS;
     let staleSeen = false;
     for (let k = 2; k < cells.length; k += 1) {
@@ -301,6 +383,22 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
             };
           }
           path = value;
+        } else if (key === 'source') {
+          if (sourceSeen) {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行写了两个 source=：（「${trimmed}」）`,
+            };
+          }
+          sourceSeen = true;
+          if (!REPO_SOURCES.includes(value as RepoSource)) {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行的 source「${value}」不合法：只认 ${REPO_SOURCES.join(' / ')}`
+                + '（写错的来源会安静地落到默认根上——那种错法是「目录里躺着另一个仓」）',
+            };
+          }
+          source = value as RepoSource;
         } else if (key === 'stale') {
           if (staleSeen) {
             return {
@@ -322,7 +420,7 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
         } else {
           return {
             ok: false, code: 'bad_config',
-            message: `第 ${lineNo} 行有认不出的格子「${cell}」：第三格起只认 path= 与 stale=`
+            message: `第 ${lineNo} 行有认不出的格子「${cell}」：第三格起只认 source= / path= / stale=`
               + '（注释只能整行）',
           };
         }
@@ -348,25 +446,50 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
       return {
         ok: false, code: 'bad_config',
         message: `第 ${lineNo} 行多了 ${cells.length - 3} 格：「${trimmed}」`
-          + '（格式是「仓名<空白>分支[<空白>path=<组路径>][<空白>stale=<天数>|never]」，'
-          + '注释只能整行）',
+          + '（格式是「仓名<空白>分支[<空白>source=codeup|gitlab][<空白>path=<组路径>]'
+          + '[<空白>stale=<天数>|never]」，注释只能整行）',
       };
     }
     if (path === '') {
+      if (source === 'gitlab') {
+        // GitLab 的组路径是多级的（`go/cloud-driver/grpc-share`），**没有一个能猜的默认值**：
+        // 猜出来的地址会以「仓不存在」的形式失败，而真正的原因是「这一行少了 path=」。
+        return {
+          ok: false, code: 'bad_config',
+          message: `第 ${lineNo} 行是 source=gitlab 却没写 path=：GitLab 的仓必须给出组路径`
+            + '（如 path=go/cloud-driver/grpc-share；组路径抄 gitlab-repos.tsv 的第二列）',
+        };
+      }
       // 旧清单（只有「仓名 分支」）逐行读出来仍然指向历史地址 `123pan/<仓名>`：**不静默**，
       // 留一条提示——本次改格式的全部理由就是「地址不能再靠拼」。
       path = `${DEFAULT_GROUP}/${id}`;
       notes.push(`第 ${lineNo} 行「${id}」没写 path=，按历史默认 ${path} 处理`);
     }
-    // 镜像目录名（id）与路径最后一段必须是同一个名字：同步脚本按 id 找目录、按 path 拼
-    // 克隆地址，两者不一致时错法是**安静的**——目录里躺着 A 仓的镜像，而每晚去 fetch B。
+    // 镜像目录名（id）与路径最后一段**默认**必须是同一个名字：同步脚本按 id 找目录、按
+    // path 拼克隆地址，两者不一致时错法是**安静的**——目录里躺着 A 仓的镜像，而每晚去
+    // fetch B 仓。
+    //
+    // 但 GitLab 那一批里有 4 个仓的**本地名与上游名本来就不一样**（接入时刻意起的名字，
+    // 因为上游名太泛：`go/base/api` → `api-go-base`、`go/base/grpc` → `grpc-go-base`、
+    // `go/base/worker` → `worker-go-base`、`go/cloud-driver/api-transcode-demo` →
+    // `github-api-demo`），另加 5 个**重名改名**（`gl-` 前缀，见 `COLLISION_PREFIX`）。
+    //
+    // 所以规则收成两条：
+    // - codeup（142 行）：仍然必须是同名。那批目录一个都没改过名，任何不一致都是笔误。
+    // - gitlab：允许不一致，但**每一行都留一条提示**（`notes`）。改名是被允许的，但
+    //   「悄悄改名」不允许——读这份清单的人得能一行一行看见哪几个仓的目录名不是上游名。
     const lastSegment = path.slice(path.lastIndexOf('/') + 1);
     if (lastSegment !== id) {
-      return {
-        ok: false, code: 'bad_config',
-        message: `第 ${lineNo} 行 path「${path}」的最后一段「${lastSegment}」不等于仓名「${id}」：`
-          + '镜像目录按仓名建，克隆地址按 path 拼，两者必须是同一个仓',
-      };
+      if (source !== 'gitlab') {
+        return {
+          ok: false, code: 'bad_config',
+          message: `第 ${lineNo} 行 path「${path}」的最后一段「${lastSegment}」不等于仓名「${id}」：`
+            + 'codeup 的镜像目录按仓名建、克隆地址按 path 拼，两者必须是同一个仓',
+        };
+      }
+      notes.push(`第 ${lineNo} 行「${id}」的本地目录名与上游名「${lastSegment}」不同`
+        + `（${id === `${COLLISION_PREFIX}${lastSegment}` ? '重名改名' : '本地起名'}；`
+        + `镜子在 ~/code-mirrors-gl/${id}.git，上游是 ${path}）`);
     }
     const firstLine = seen.get(id);
     if (firstLine !== undefined) {
@@ -380,7 +503,7 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
       };
     }
     seen.set(id, lineNo);
-    repos.push({ id, branch, path, line: lineNo, staleAfterDays });
+    repos.push({ id, source, branch, path, line: lineNo, staleAfterDays });
   }
   if (repos.length === 0) {
     return { ok: false, code: 'bad_config', message: '清单里一个仓都没有（全空或是全注释）' };
@@ -410,15 +533,26 @@ export async function readRepoInventory(
 /**
  * 清单 → 设置里那种 `{id, path}` 形状。
  *
- * path 由 `MIRROR_ROOT` 拼出来，而不是清单里再写一列：镜像位置是**部署事实**
- * （服务器上的约定），不是「这个仓的属性」。写两列只会让两个值有机会不一致。
+ * path 由**来源对应的根目录**拼出来，而不是清单里写 217 条绝对路径：镜像位置是
+ * **部署事实**（镜像住在哪块盘上），不是「这个仓的属性」。写两列只会让两个值有机会
+ * 不一致，而且换机就是 217 行手改。
+ *
+ * `roots` 可以是：
+ * - 两个根的对象（正式路径，`mirrorRoots()` 给的就是它）；
+ * - 一个字符串——**单根**写法，两个来源都落到这个根上。只有「对着服务器那一份做对比」
+ *   与用例会用（那时没有 GitLab 的镜像），所以它保留但不作为默认。
  */
 export function inventoryToRepos(
   lines: readonly InventoryLine[],
-  root: string = mirrorRoot(),
+  roots: MirrorRoots | string = mirrorRoots(),
 ): RepoRef[] {
-  const base = root.replace(/\/+$/, '');
-  return lines.map((entry) => ({ id: entry.id, path: `${base}/${entry.id}.git` }));
+  const bySource: MirrorRoots = typeof roots === 'string'
+    ? { codeup: roots, gitlab: roots }
+    : roots;
+  return lines.map((entry) => {
+    const base = bySource[entry.source].replace(/\/+$/, '');
+    return { id: entry.id, path: `${base}/${entry.id}.git` };
+  });
 }
 
 /** `code.mirror.repos` 的规范 JSON：键顺序固定、无空白，便于 diff 与「两边是否相等」的判断。 */
@@ -440,9 +574,16 @@ export function cloneUrlOf(path: string, org: string = CODEUP_ORG): string {
   return `${org.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}.git`;
 }
 
-/** 一个清单行的克隆地址（`path` + 默认 org）。 */
-export function cloneUrl(entry: Pick<InventoryLine, 'path'>): string {
-  return cloneUrlOf(entry.path);
+/**
+ * 一个清单行的克隆地址：**基址看来源**，路径看 `path`（与 `mirrorRoots()` 同一条分叉）。
+ *
+ * 这里是 TS 侧唯一一次拼地址；bash 侧（`scripts/sync-mirrors.sh`）用同一套
+ * `source → 基址` 表。两处各写一遍的理由与 2026-11-09 那次事故相反：那次是同一个拼法
+ * 在两处各写一次、**错得一模一样**；这次是两种语言各读一张表，表本身写在清单的
+ * `source=` 上，所以两边不可能选出不同的主机。
+ */
+export function cloneUrl(entry: Pick<InventoryLine, 'path' | 'source'>): string {
+  return cloneUrlOf(entry.path, sourceBase(entry.source));
 }
 
 /**
@@ -482,14 +623,17 @@ export function diffRepos(current: readonly RepoRef[] | null, next: readonly Rep
 
 /** 把一份清单变成 shell 可消费的行（`仓名<TAB>分支<TAB>path=…`），测试与文档里的示例用。 */
 export function formatInventoryLine(entry: InventoryLine): string {
-  // `path=` 永远写出来：它是「这个仓在哪」的唯一记录，省掉它就等于把地址退回给拼装。
+  // `source=` 与 `path=` 都永远写出来：一个是「从哪台机器抓」，一个是「抓哪条路径」。
+  // 省掉任何一个，读者都得回到默认值去猜——而猜错的两种结果（抓错主机 / 抓错仓）
+  // 都不会在当场报错。
+  const sourceCell = `\tsource=${entry.source}`;
   const pathCell = `\tpath=${entry.path}`;
   // 只写**偏离默认**的第三格：一份 30 行的清单里 24 行写着 7 只是噪音，而第三格存在的
   // 理由是「这几个仓要单独定阈值」——不偏离就不该出现。
   const stale = entry.staleAfterDays === DEFAULT_STALE_AFTER_DAYS
     ? ''
     : `\tstale=${entry.staleAfterDays === null ? STALE_NEVER : String(entry.staleAfterDays)}`;
-  return `${entry.id}\t${entry.branch}${pathCell}${stale}`;
+  return `${entry.id}\t${entry.branch}${sourceCell}${pathCell}${stale}`;
 }
 
 /**

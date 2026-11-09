@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import { parseRepos } from '../src/core/codemirror/mirror.js';
 import {
-  CODEUP_ORG, DEFAULT_STALE_AFTER_DAYS, FALLBACK_BRANCH, STALE_NEVER, cloneUrl, cloneUrlOf,
+  CODEUP_ORG, DEFAULT_STALE_AFTER_DAYS, FALLBACK_BRANCH, GITLAB_ORG, STALE_NEVER,
+  cloneUrl, cloneUrlOf,
   diffRepos, formatInventoryLine, inventoryToRepos, parseRepoInventory, readRepoInventory,
   reposSettingJson, staleThresholdsOf,
 } from '../src/core/codemirror/repo-inventory.js';
@@ -43,15 +44,15 @@ describe('parseRepoInventory', () => {
     // 没写 path= 的三行都落在**历史默认** `123pan/<仓名>` 上：旧清单读出来仍然指向原地址。
     expect(parsed.data.repos).toEqual([
       {
-        id: '123pan-pc', branch: 'master', path: '123pan/123pan-pc', line: 2,
+        id: '123pan-pc', source: 'codeup', branch: 'master', path: '123pan/123pan-pc', line: 2,
         staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
       },
       {
-        id: '123pan-uni-app', branch: 'master', path: '123pan/123pan-uni-app', line: 3,
+        id: '123pan-uni-app', source: 'codeup', branch: 'master', path: '123pan/123pan-uni-app', line: 3,
         staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
       },
       {
-        id: '123pan-gateway', branch: FALLBACK_BRANCH, path: '123pan/123pan-gateway', line: 6,
+        id: '123pan-gateway', source: 'codeup', branch: FALLBACK_BRANCH, path: '123pan/123pan-gateway', line: 6,
         staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
       },
     ]);
@@ -64,8 +65,57 @@ describe('parseRepoInventory', () => {
   it('连续空格当一格（有人用对齐）', () => {
     const parsed = parseRepoInventory('a    dev\n');
     expect(parsed.ok && parsed.data.repos[0]).toEqual({
-      id: 'a', branch: 'dev', path: '123pan/a', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      id: 'a', source: 'codeup', branch: 'dev', path: '123pan/a', line: 1,
+      staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
     });
+  });
+
+  it('source= 决定根与基址；只认 codeup / gitlab，写错整份失败', () => {
+    const ok = parseRepoInventory('a master source=gitlab path=go/a\n');
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.data.repos[0]!.source).toBe('gitlab');
+    // 写错的来源必须**当场**失败：它会有默认根兜着，于是错法是「目录里躺着另一个仓」。
+    const bad = parseRepoInventory('a master source=gitlab2 path=go/a\n');
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.message).toContain('source');
+    expect(bad.message).toContain('gitlab');
+    const twice = parseRepoInventory('a master source=gitlab source=codeup path=go/a\n');
+    expect(twice.ok).toBe(false);
+  });
+
+  it('source=gitlab 必须给 path=（组路径没有可猜的默认值）', () => {
+    const parsed = parseRepoInventory('a master source=gitlab\n');
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toContain('path=');
+    expect(parsed.message).toContain('gitlab');
+  });
+
+  it('本地目录名与上游名不同：codeup 仍然整份失败，gitlab 放行但留一条提示', () => {
+    // GitLab 的 share 与 codeup 的 share 是两个仓：只能有一方改 id（`gl-` 前缀）。
+    const renamed = parseRepoInventory(
+      'share master source=codeup path=123pan/share\n'
+      + 'gl-share master source=gitlab path=proto/share\n',
+    );
+    expect(renamed.ok).toBe(true);
+    if (!renamed.ok) return;
+    expect(renamed.data.repos.map((entry) => entry.id)).toEqual(['share', 'gl-share']);
+    expect(renamed.data.notes.join('')).toContain('gl-share');
+
+    // codeup 那 141 行一个都没改过名：目录名与 path 最后一段不一致就是笔误。
+    const codeupTypo = parseRepoInventory('apisrv master source=codeup path=123pan/api_server\n');
+    expect(codeupTypo.ok).toBe(false);
+    if (codeupTypo.ok) return;
+    expect(codeupTypo.message).toContain('最后一段');
+
+    // GitLab 允许本地起名（`go/base/api` → `api-go-base`），但**改名必须看得见**。
+    const localName = parseRepoInventory('api-go-base master source=gitlab path=go/base/api\n');
+    expect(localName.ok).toBe(true);
+    if (!localName.ok) return;
+    expect(localName.data.repos[0]!.id).toBe('api-go-base');
+    expect(localName.data.notes.join('')).toContain('上游名「api」');
   });
 
   it('重名整份失败，并点名两行', () => {
@@ -196,14 +246,34 @@ describe('inventoryToRepos / reposSettingJson', () => {
   it('path 由 MIRROR_ROOT 拼出来（尾斜杠不影响）', () => {
     const lines = [
       {
-        id: 'a', branch: 'master', path: '123pan/a', line: 1,
+        id: 'a', source: 'codeup' as const, branch: 'master', path: '123pan/a', line: 1,
         staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
       },
-      { id: 'b', branch: 'dev', path: 'cdn-groups/b', line: 2, staleAfterDays: null },
+      { id: 'b', source: 'codeup' as const, branch: 'dev', path: 'cdn-groups/b', line: 2, staleAfterDays: null },
     ];
+    // 单根写法（服务器那一份 / 用例）：两个来源都落到同一个根上。
     expect(inventoryToRepos(lines, '/srv/x/')).toEqual([
       { id: 'a', path: '/srv/x/a.git' },
       { id: 'b', path: '/srv/x/b.git' },
+    ]);
+  });
+
+  it('两个根：来源决定仓落在哪个目录（不许 217 条绝对路径）', () => {
+    const lines = parseRepoInventory(
+      'apisrv master source=codeup path=123pan/apisrv\n'
+      + 'grpc-benefit master source=gitlab path=go/cloud-driver/grpc-benefit\n',
+    );
+    expect(lines.ok).toBe(true);
+    if (!lines.ok) return;
+    const roots = { codeup: '/m/code-mirrors/', gitlab: '/m/code-mirrors-gl' };
+    expect(inventoryToRepos(lines.data.repos, roots)).toEqual([
+      { id: 'apisrv', path: '/m/code-mirrors/apisrv.git' },
+      { id: 'grpc-benefit', path: '/m/code-mirrors-gl/grpc-benefit.git' },
+    ]);
+    // 克隆地址跟着来源分叉：codeup 走 https，gitlab 走 ssh:2222。
+    expect(lines.data.repos.map(cloneUrl)).toEqual([
+      `${CODEUP_ORG}/123pan/apisrv.git`,
+      `${GITLAB_ORG}/go/cloud-driver/grpc-benefit.git`,
     ]);
   });
 
@@ -271,16 +341,17 @@ describe('readRepoInventory', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.file).toBe(file);
-    expect(formatInventoryLine(result.data.inventory.repos[0]!)).toBe('shop-web\tmain\tpath=123pan/shop-web');
+    expect(formatInventoryLine(result.data.inventory.repos[0]!))
+      .toBe('shop-web\tmain\tsource=codeup\tpath=123pan/shop-web');
     // 偏离默认的第三格才写出来（一份 30 行的清单里 24 行写 7 只是噪音）。
     const withStale = parseRepoInventory('a master 365\nb main never\nc dev\n');
     expect(withStale.ok).toBe(true);
     if (!withStale.ok) return;
     // `path=` 永远写出来（它才是「这个仓在哪」的记录）；stale 只在偏离默认时写。
     expect(withStale.data.repos.map(formatInventoryLine)).toEqual([
-      'a\tmaster\tpath=123pan/a\tstale=365',
-      `b\tmain\tpath=123pan/b\tstale=${STALE_NEVER}`,
-      'c\tdev\tpath=123pan/c',
+      'a\tmaster\tsource=codeup\tpath=123pan/a\tstale=365',
+      `b\tmain\tsource=codeup\tpath=123pan/b\tstale=${STALE_NEVER}`,
+      'c\tdev\tsource=codeup\tpath=123pan/c',
     ]);
   });
 

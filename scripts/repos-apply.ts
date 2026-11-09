@@ -29,7 +29,7 @@
 import { db, pool } from '../src/db/client.js';
 import { MIRROR_REPOS_KEY, parseRepos, resolveMirrorConfig, type RepoRef } from '../src/core/codemirror/mirror.js';
 import {
-  diffRepos, inventoryPath, inventoryToRepos, readRepoInventory, reposSettingJson,
+  diffRepos, inventoryPath, inventoryToRepos, mirrorRoots, readRepoInventory, reposSettingJson,
 } from '../src/core/codemirror/repo-inventory.js';
 import { readSetting, writeSetting } from '../src/core/uemaster/settings.js';
 
@@ -48,8 +48,9 @@ function parseArgs(argv: readonly string[]): Args {
       console.log([
         '用法：tsx scripts/repos-apply.ts [--dry-run] [--json] [--file <清单路径>]',
         '',
-        `读 ${inventoryPath()}（一行「仓名<TAB>分支」），把仓名播种成`,
-        `${MIRROR_REPOS_KEY} 的 [{"id","path"}]（path = $MIRROR_ROOT/<仓名>.git）。`,
+        `读 ${inventoryPath()}（一行「仓名<TAB>分支<TAB>source=<来源><TAB>path=<组路径>」），`,
+        `把仓名播种成 ${MIRROR_REPOS_KEY} 的 [{"id","path"}]`,
+        '（path = 该来源的根目录/<仓名>.git；根由 MIRROR_ROOT / MIRROR_ROOT_GITLAB 决定）。',
         '--dry-run 只打印 diff，不写库。',
         '退出码：0 成功 / 2 清单或现状不合法 / 1 写库失败。',
       ].join('\n'));
@@ -70,7 +71,11 @@ async function main(): Promise<number> {
   const { inventory } = loaded.data;
   for (const note of inventory.notes) console.error(`提示：${note}`);
 
-  const next = inventoryToRepos(inventory.repos);
+  // 两个根：来源是**仓的属性**（清单里的 `source=`），根是**部署事实**（环境变量或默认
+  // 的本机目录）。这一行把两者合起来，之后的路径就是 217 条绝对路径——但它们是**算出来**的，
+  // 换机只要改环境变量，不用手改 217 行。
+  const roots = mirrorRoots();
+  const next = inventoryToRepos(inventory.repos, roots);
 
   // 先自检：这份东西写进去之后，`resolveMirrorConfig()` 必须能原样读回来。
   // 这是「一个来源」的守卫——清单多一列、path 写成相对路径，都会在这里当场失败，
@@ -128,7 +133,11 @@ async function main(): Promise<number> {
   }
 
   console.log(`清单      ${loaded.data.file}（${inventory.repos.length} 个仓，跳过 ${inventory.skipped} 行注释/空行）`);
-  console.log(`去向      app_settings.${MIRROR_REPOS_KEY}（path 前缀 ${next[0]?.path.replace(/\/[^/]+\.git$/, '') ?? '(空)'}）`);
+  // 两个根各报一次：一份清单现在跨两台主机，只打「第一个仓的前缀」会让人以为
+  // 另一种来源也落在同一个根下（那正是换机时最容易看漏的一句）。
+  console.log(`去向      app_settings.${MIRROR_REPOS_KEY}`);
+  console.log(`  根      codeup=${roots.codeup}`);
+  console.log(`  根      gitlab=${roots.gitlab}`);
   if (currentJson === '') console.log('现状      设置里还没有这一格（第一次播种）');
   else console.log(`现状      设置里 ${current.length} 个仓`);
 
