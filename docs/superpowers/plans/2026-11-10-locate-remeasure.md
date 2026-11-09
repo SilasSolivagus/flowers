@@ -144,7 +144,9 @@ C 回包：`user-info.vue`、`member-validity-dialog.vue`、`user-vip-detail.vue
 
 **#742 用户部分权益缩减调整**（答案 2 个，C 第 1 名）
 答案：`src/pages/video/video.vue`、`src/utils/questions.ts`；C 第 1、2 条正好是它们。
-→ 与 #5 同一次合并（第 2 名，动 11 个文件），查询只改了一个词就从「一条都不中」变成「前两条都中」——
+→ 真答案那次合并（11-03，动 11 个文件）在这句查询里排第 2 名，它带的文件正好成了 C 的第 1、2 条。
+这与 #5 不是同一次合并（#5 那条是 10-19、动 10 个文件）：一个全落空、一个全中，
+差别只在「并列文件的宽度」——10 个文件时真答案被路径升序挤出前 6，11 个时反而排进前 2。
 
 **#259 专业空间**（答案 30 个，其中 4 个已删，C 第 1 名）
 答案（节选）：`alert-modal.vue`、`capacity-card.vue`、`file-card.vue`、`file-filter.vue` …
