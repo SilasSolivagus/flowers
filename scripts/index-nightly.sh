@@ -1,10 +1,17 @@
 #!/bin/bash
-# 索引夜间增量同步（Mac，05:10）。镜像 05:05 在 dogyun 上更新完，这里把**新提交**的
-# 静态索引补进本地 Postgres——索引不是被查时才建的吗？是懒建的，但懒建意味着
-# 「第一个打开材料的人」替所有人付那 200–400 ms 的装配；更重要的是：**索引里有哪个
-# sha，是材料上那句「代码快照」诚实的前提**（docs/superpowers/plans/2026-11-08-mirror-freshness.md）。
+# 索引夜间增量同步（Mac，05:10）。**两步**：
 #
-# 这一层只做三件事：锁、日志目录、把退出码原样带出去。真正的工作在
+#   1. `scripts/sync-mirrors.sh` —— 把 codeup 与 GitLab 的新提交抓进本地 bare 镜像
+#      （`~/code-mirrors` / `~/code-mirrors-gl`）。2026-11-09 的 mirror cutover 之前，
+#      这一步在 dogyun 上（05:05 的 cron）；镜像搬回本机之后，它必须跟索引在**同一台
+#      机器、同一个 job** 里跑——分成两个 job 就又要靠「05:05 那台醒着没有」来保证顺序。
+#   2. `scripts/index-nightly.ts` —— 把新提交的静态索引补进本地 Postgres。
+#
+# 索引为什么不是被查时才建：懒建意味着「第一个打开材料的人」替所有人付那 200–400 ms
+# 的装配；更重要的是：**索引里有哪个 sha，是材料上那句「代码快照」诚实的前提**
+# （docs/superpowers/plans/2026-11-08-mirror-freshness.md）。
+#
+# 这一层做四件事：锁、日志目录、先同步后索引、把退出码原样带出去。真正的工作在
 # `scripts/index-nightly.ts`（仓列表来自 `app_settings.code.mirror.repos`，
 # 解析复用 `resolveMirrorConfig()`，不硬编码仓名）。
 #
@@ -32,6 +39,7 @@ usage() {
 环境变量：
   FLOWERS_INDEX_LOG   日志文件  默认 ~/Library/Application Support/flowers/logs/index-nightly.log
   FLOWERS_INDEX_LOCK  锁目录    默认 ${TMPDIR:-/tmp}/flowers-index-nightly.lock
+  FLOWERS_MIRROR_LOG  镜像同步日志  默认 与索引日志同目录的 mirror-sync.log
 
 退出码：0 成功（含 0 块新内容）/ 2 配置或环境不对 / 3 至少一个仓失败 / 4 上一轮还在跑。
 USAGE
@@ -102,8 +110,38 @@ if [ ! -x "$TSX" ]; then
   exit 2
 fi
 
+# ─── 第一步：同步镜像（2026-11-09 起在这里，不再在 dogyun 上）──────────────
+#
+# 用**默认**的本地根与来源表（`MIRROR_ROOT` / `MIRROR_ROOT_GITLAB` 在
+# `sync-mirrors.sh` 里缺省为 `~/code-mirrors` / `~/code-mirrors-gl`），清单就是仓库里
+# 那一份——不另抄一份仓列表。同步日志单独一份文件名：它和索引日志是两种证据
+# （「抓到了什么」vs「索引了什么」），混在一个文件里 grep 起来要多看一半。
+SYNC_SH="$ROOT/scripts/sync-mirrors.sh"
+SYNC_LOG="${FLOWERS_MIRROR_LOG:-$(dirname "$LOG")/mirror-sync.log}"
+sync_rc=0
+if [ -x "$SYNC_SH" ] || [ -f "$SYNC_SH" ]; then
+  set +e
+  REPOS_FILE="$ROOT/config/repos.txt" SYNC_FLOWERS_LOG="$SYNC_LOG" bash "$SYNC_SH"
+  sync_rc=$?
+  set -e
+  case "$sync_rc" in
+    0) echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mirror-sync ok" >>"$LOG" ;;
+    # 3 = 有仓 fetch 失败；4 = 有仓还没有镜像；2 = 清单/环境不对。三种都**不拦索引**：
+    # 索引读的是镜像里现有的 HEAD，抓不到新提交时索引旧提交仍然是对的（材料上那句
+    # 「代码快照较旧」会照实说）。但退出码要带出去，否则「同步坏了」这件事在 launchd
+    # 那边看不见——它会一直「绿」到有人发现材料对着半个月前的代码。
+    *) echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mirror-sync FAIL rc=$sync_rc（详见 $SYNC_LOG）" >>"$LOG" ;;
+  esac
+else
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) mirror-sync SKIP 找不到 $SYNC_SH（只跑索引）" >>"$LOG"
+fi
+
+# ─── 第二步：索引 ─────────────────────────────────────────────────────────────
 set +e
 "$NODE" "$TSX" "$ROOT/scripts/index-nightly.ts" --log "$LOG"
 rc=$?
 set -e
+# 索引自己的退出码优先（它说「哪个仓的索引坏了」，比「网络抖了一下」更需要人看）；
+# 索引全绿而同步红了，就把同步的码带出去。
+if [ "$rc" -eq 0 ] && [ "$sync_rc" -ne 0 ]; then rc="$sync_rc"; fi
 exit "$rc"

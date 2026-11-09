@@ -1,10 +1,19 @@
 #!/bin/bash
-# 123pan 镜像仓（/srv/123pan-mirror/*.git）每日同步——**仓清单来自文件，不写死在脚本里**。
+# 123pan 镜像仓（`~/code-mirrors/*.git` 与 `~/code-mirrors-gl/*.git`）每日同步——
+# **仓清单来自文件，不写死在脚本里**。
 #
-# 谁在跑：dogyun 上 root 的 cron（`5 5 * * *`），由 `scripts/install-cron.sh --server`
-# 安装。**仓库里这一份是源头**；服务器上那份是 `--server` rsync 过去的副本（安装时会
-# 打两边的 sha256，`--check` 一比就知道有没有漂）。为什么是副本而不是薄壳：
-# 服务器看不到这台 Mac 的仓库，而镜像的时效性不该取决于「05:05 时 Mac 醒着没有」。
+# 谁在跑（2026-11-09 起）：**本机**的 `com.flowers.index-nightly`（launchd，05:10）第一步。
+# 在这之前是 dogyun 上 root 的 cron（`5 5 * * *`）——那条已经在 cutover 时停用并备份
+# （见 `docs/superpowers/plans/2026-11-08-mirror-cutover.md`）：镜像搬回本机之后，
+# 服务器上那条 cron 只会把 26 GB 重新抓回一台不再提供镜像的机器。
+#
+# 为什么现在是本机：镜像的消费者（走查/评审/材料/夜间索引）全部在这台 Mac 上。走 ssh
+# 读远端镜像的代价是每次读多一次往返（实测装配 150–370 ms，本地是个位数到几十毫秒），
+# 而收益（「笔记本睡了也能同步」）在镜像不再被远端消费者读之后就不存在了。
+#
+# `scripts/install-cron.sh --server` 仍然能把这份脚本 + 清单 rsync 到 dogyun 的
+# `/opt/123pan/tools/_ro/`（sha256 可对），那是**回滚**用的：把 `code.mirror.transport`
+# 改回 ssh 之前，得先在服务器上重新抓回一批镜像。
 #
 # ## 仓清单：config/repos.txt（与 `--server` 一起发到同一目录）
 #
@@ -90,7 +99,40 @@
 #   flock 被人占着时退出 0：那一轮是**另一次同步在做**，不是失败（次数少、且下一次会补上）
 set -euo pipefail
 
-MIRROR_ROOT="${MIRROR_ROOT:-/srv/123pan-mirror}"
+# ── 两个来源、两个根（2026-11-09：镜像从服务器搬回本机）
+#
+# 这是本脚本最大的一次假设变化。原来只有**一个**根、**一台**对端：dogyun 上的
+# `/srv/123pan-mirror`，从 codeup 拉。换成本地盘之后：
+#
+#   source=codeup  → 根 $MIRROR_ROOT          缺省 ~/code-mirrors     对端 $CODEUP_ORG
+#   source=gitlab  → 根 $MIRROR_ROOT_GITLAB   缺省 ~/code-mirrors-gl  对端 $GITLAB_ORG
+#
+# 两个根不能合成一个：`share`/`transcode`/`gocron`/`cron-scripts`/`123pan-agent-tracker`
+# 这五个仓名在两边**各有一个不同的仓**，合在一个目录里就是互相覆盖（GitLab 那边已改名
+# 成 `gl-<名字>`，那是 `config/repos.txt` 的事，不是这里的）。对端也不能合并：一个走
+# https + 凭据，一个走 ssh:2222 匿名读。
+#
+# 缺省值改成 `~/…` 而不是 `/srv/…`：盘就在这台 Mac 上，服务器那份已经删了（拆之前
+# 每个镜像 HEAD 的 sha256 记在 docs/superpowers/plans/2026-11-08-mirror-cutover.md）。
+#
+# `SYNC_READONLY`（缺省：root 装上 = 1，否则 0）：服务器上那批镜像归 root 所有、
+# 目录 555 / 文件 444，因为读它的是另一个进程；本机是同一个用户在读写，收写位会让
+# **下一次 fetch 自己失败**。所以「收写位」这件事变成一个显式开关，而不是无条件的收尾。
+MIRROR_ROOT="${MIRROR_ROOT:-$HOME/code-mirrors}"
+MIRROR_ROOT_GITLAB="${MIRROR_ROOT_GITLAB:-$HOME/code-mirrors-gl}"
+GITLAB_ORG="${GITLAB_ORG:-ssh://git@gitlab.123245.com:2222}"
+if [ "${SYNC_READONLY:-}" = "" ]; then
+  if [ "$(id -u)" = "0" ]; then SYNC_READONLY=1; else SYNC_READONLY=0; fi
+fi
+case "$SYNC_READONLY" in
+  0|1) ;;
+  *) echo "SYNC_READONLY 只能是 0 或 1（当前「$SYNC_READONLY」）" >&2; exit 2 ;;
+esac
+# 缺镜像时要不要就地 clone（见 sync_one）：本机缺了没人能替它建，服务器上由
+# `onboard-repos.ts` 负责（它还要顺带写覆盖率），所以缺省跟着 SYNC_READONLY 走。
+if [ "${SYNC_CLONE_MISSING:-}" = "" ]; then
+  if [ "$SYNC_READONLY" = "1" ]; then SYNC_CLONE_MISSING=0; else SYNC_CLONE_MISSING=1; fi
+fi
 # 组织根（**不是** `123pan` 组）：克隆地址 = $CODEUP_ORG/<清单里的 path>.git。
 #
 # 为什么不再拼 `/123pan/`：144 个仓里多数就在组织根下（`…/artifacts.git`），少数在
@@ -112,8 +154,19 @@ case "$CODEUP_ORG" in
     ;;
 esac
 CODEUP_ORG="${CODEUP_ORG%/}"
-LOG="${SYNC_FLOWERS_LOG:-/var/log/sync-flowers-mirror.log}"
-LOCK="${SYNC_FLOWERS_LOCK:-/var/lock/sync-flowers-mirror.lock}"
+# 日志与锁：root（服务器）走 /var/log、/var/lock；本机（非 root）走
+# ~/Library/Application Support/flowers/logs 与 TMPDIR。写死 /var/log 在 Mac 上会以
+# 「建不了日志目录」退出 2——一句听起来像权限问题、实际是「这台机器没有 /var/log 的写权」
+# 的话，每晚一次。
+if [ "$(id -u)" = "0" ]; then
+  DEFAULT_LOG=/var/log/sync-flowers-mirror.log
+  DEFAULT_LOCK=/var/lock/sync-flowers-mirror.lock
+else
+  DEFAULT_LOG="$HOME/Library/Application Support/flowers/logs/mirror-sync.log"
+  DEFAULT_LOCK="${TMPDIR:-/tmp}/flowers-mirror-sync.lock"
+fi
+LOG="${SYNC_FLOWERS_LOG:-$DEFAULT_LOG}"
+LOCK="${SYNC_FLOWERS_LOCK:-$DEFAULT_LOCK}"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-300}"
 # 重试：2026-11-08 夜在 dogyun 上跑了 14 次整轮，**13 次**出现 ≥5 个瞬时 fetch 失败
 # （`Could not resolve host` / `Failed to connect … port 443 after 1 ms`），而仓本身全是好的。
@@ -154,24 +207,30 @@ usage() {
   cat <<USAGE
 用法：sync-mirrors.sh [--help]
 
-读仓清单（默认 $(default_repos_file)），把每个仓的**清单里写的分支**从 codeup
-fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref，然后把写位收回。
+读仓清单（默认 $(default_repos_file)），把每个仓的**清单里写的分支**从它的来源
+（codeup / GitLab）fetch 进 $MIRROR_ROOT/<仓名>.git 或 $MIRROR_ROOT_GITLAB/<仓名>.git
+（bare），用 CAS 更新本地同名 ref；root 下才把写位收回。
 各仓**并行**跑（默认 8 个一批），逐仓日志先在内存盘/临时目录里缓冲，跑完按清单顺序
 整份打出——所以并行不会把日志撕成互相交错的半行。
 
-清单格式：<仓名><TAB 或空格><分支>[<TAB 或空格><stale_after_days>]；
-\`#\` 开头整行是注释；空行忽略。第三格缺省 7 天，写 never = 不因「上游不动了」提醒
-（本脚本只认这一格，判定在 src/core/codemirror/health.ts）。
+清单格式：<仓名><TAB 或空格><分支>[<TAB 或空格>source=codeup|gitlab]
+          [<TAB 或空格>path=<组路径>][<TAB 或空格>stale=<天数>|never]；
+\`#\` 开头整行是注释；空行忽略。source 缺省 codeup，stale 缺省 7 天
+（本脚本只认这两格、不解释它们，判定在 src/core/codemirror/health.ts）。
 
 环境变量：
-  REPOS_FILE          仓清单            默认 脚本旁边的 repos.txt（或 ../config/repos.txt）
-  MIRROR_ROOT         bare 仓根目录     默认 /srv/123pan-mirror
-  CODEUP_ORG          codeup 的组织根   默认 https://codeup.aliyun.com/60f9...750
-                     （克隆地址 = $CODEUP_ORG/<清单里的 path>.git；CODEUP_BASE 仍认，
-                       但它现在也必须给组织根，旧值以 /123pan 结尾会被剥掉并记一行）
-  SYNC_FLOWERS_LOG    日志文件          默认 /var/log/sync-flowers-mirror.log
-  SYNC_FLOWERS_LOCK   锁文件            默认 /var/lock/sync-flowers-mirror.lock
-  SYNC_JOBS           并发仓数          默认 8（1–64；单仓失败不影响别的仓）
+  REPOS_FILE           仓清单           默认 脚本旁边的 repos.txt（或 ../config/repos.txt）
+  MIRROR_ROOT          codeup 的 bare 根  默认 ~/code-mirrors（root 下是 /srv/123pan-mirror）
+  MIRROR_ROOT_GITLAB   GitLab 的 bare 根  默认 ~/code-mirrors-gl
+  CODEUP_ORG           codeup 的组织根   默认 https://codeup.aliyun.com/60f9...750
+                      （克隆地址 = $CODEUP_ORG/<清单里的 path>.git；CODEUP_BASE 仍认，
+                        但它现在也必须给组织根，旧值以 /123pan 结尾会被剥掉并记一行）
+  GITLAB_ORG           GitLab 的基址     默认 ssh://git@gitlab.123245.com:2222
+  SYNC_READONLY        收写位（chown root + 555/444）  默认：root 下 1，否则 0
+  SYNC_CLONE_MISSING   目录缺失时就地 clone --bare     默认：root 下 0，否则 1
+  SYNC_FLOWERS_LOG     日志文件           默认 /var/log/...（root）/ ~/Library/Application Support/flowers/logs/mirror-sync.log
+  SYNC_FLOWERS_LOCK    锁文件             默认 /var/lock/...（root）/ $TMPDIR/flowers-mirror-sync.lock
+  SYNC_JOBS            并发仓数           默认 8（1–64；单仓失败不影响别的仓）
   FETCH_TIMEOUT       单次 fetch 超时（秒） 默认 300
   FETCH_RETRIES       瞬时失败重试次数      默认 2（只重试瞬时错误，见脚本头部）
   RETRY_BACKOFF       重试退避基数（秒）     默认 2（第 n 次失败后等 n×这个数）
@@ -187,10 +246,40 @@ case "${1:-}" in
   *) echo "未知参数：$1（--help 看用法）" >&2; exit 2 ;;
 esac
 
-# 这个脚本跑在 dogyun 上（Linux）；macOS 没有 flock，直接说清楚，不要假装「已经有一轮在跑」。
-command -v flock >/dev/null 2>&1 || {
-  echo "sync-mirrors.sh 需要 flock（util-linux）：它是服务器上的脚本（dogyun 上那条 05:05 的 cron），本机请用 scripts/index-nightly.sh" >&2
-  exit 2
+# ── 可移植性（2026-11-09：这台脚本从 Linux 挪到 macOS 上跑）
+#
+# 三处 GNU 专用写法必须换掉，否则「搬回本机」第一天就以一个看起来像别的问题的方式失败：
+#   1. `date -Iseconds` —— macOS 的 date 不认（`date: illegal time format`），而它出现在
+#      每一条日志行里，于是整轮同步在写第一行日志时就退出。
+#   2. `flock` —— macOS 没有。锁的意义（同一时刻只允许一轮）不变，换成 mkdir 的原子性，
+#      pid 判活清陈旧锁（与 `index-nightly.sh` 同一套写法）。
+#   3. `timeout` —— macOS 没有（brew 的 coreutils 才给 gtimeout）。而 fetch 的挂起保护
+#      正靠它，没有它一个挂住的仓会把整轮拖到天亮。
+# 注意 bash 是 **3.2**（Apple 最后一代 GPLv2）：没有关联数组，所以下面的重名去重
+# 用的是「一行一个名字」的字符串，不是 `declare -A`。
+iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# 一次带超时的调用：有 timeout / gtimeout 就用它（Linux 与装了 coreutils 的 Mac），
+# 否则用「后台跑 + 看门狗 kill」的便携版。超时统一报 124——调用方（`is_transient`）
+# 只认这一个数，两种实现的差别不该漏到判定里。
+run_with_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  "$@" &
+  local pid=$! wd rc=0
+  # 看门狗的三个 fd 必须**离开调用者的管道**：`out=$(run_with_timeout …)` 会一直读到
+  # 所有写端关闭为止，而 `sleep` 是看门狗的子进程、会继承这个管道——不重定向的话
+  # 命令替换会等到 sleep 自然结束（实测：10 s 的「超时」把 3 个仓拖成 120 s，
+  # 而每个 fetch 其实 2 s 就回来了）。
+  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  wd=$!
+  wait "$pid" || rc=$?
+  kill -TERM "$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null || true
+  # 被看门狗 TERM 掉：128+15。映射成 124，与 timeout(1) 同一个约定。
+  if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then return 124; fi
+  return "$rc"
 }
 
 # ─── 读清单 ──────────────────────────────────────────────────────────────────
@@ -198,7 +287,8 @@ command -v flock >/dev/null 2>&1 || {
 REPOS=()
 BRANCHES=()
 PATHS=()
-declare -A SEEN=()
+SOURCES=()
+SEEN_LIST=""   # 换行分隔的一串仓名；bash 3.2 没有关联数组
 if [ ! -f "$REPOS_FILE" ]; then
   echo "读不到仓清单：$REPOS_FILE（它是 config/repos.txt，用 install-cron.sh --server 随脚本发过来）" >&2
   exit 2
@@ -232,6 +322,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   # 校验与 `parseRepoInventory()` 逐条对齐——一边能读、一边报错退出 2，那一晚整份清单
   # 都不同步。
   path="123pan/${name}"   # 没写 path= 时按历史默认（与 TS 侧 DEFAULT_GROUP 同一个值）
+  source="codeup"         # 没写 source= 时按历史默认（2026-11-09 之前只有 codeup）
   stale=""
   shift 2 || true         # 前两格（仓名、分支）已经取走，剩下的格子按 key=value 逐个看
   for cell in "$@"; do
@@ -248,6 +339,17 @@ while IFS= read -r line || [ -n "$line" ]; do
           exit 2
         fi
         ;;
+      source=*)
+        source="${cell#source=}"
+        case "$source" in
+          codeup|gitlab) ;;
+          *)
+            # 来源写错会安静地落到默认根上（目录里躺着另一个仓），所以当场失败。
+            echo "清单里「$name」的 source「$source」不合法：只认 codeup / gitlab" >&2
+            exit 2
+            ;;
+        esac
+        ;;
       stale=*)
         if [ -n "$stale" ]; then
           echo "清单里「$trimmed」写了两个 stale=" >&2
@@ -260,7 +362,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         if [ -z "$stale" ] && printf '%s' "$cell" | grep -Eqi '^(never|[1-9][0-9]{0,5})$'; then
           stale="$cell"
         else
-          echo "清单里「$trimmed」有认不出的格子「$cell」（第三格起只认 path= 与 stale=）" >&2
+          echo "清单里「$trimmed」有认不出的格子「$cell」（第三格起只认 source= / path= / stale=）" >&2
           exit 2
         fi
         ;;
@@ -272,6 +374,12 @@ while IFS= read -r line || [ -n "$line" ]; do
       exit 2
     fi
   fi
+  if [ "$source" = "gitlab" ] && [ "$path" = "123pan/${name}" ]; then
+    # 没写 path= 时这里填的是 codeup 的历史默认值。GitLab 的组路径是多级的，没有可猜的
+    # 默认值——拿 `123pan/<名字>` 去问 GitLab 只会得到「仓不存在」，而真正的原因是漏了 path=。
+    echo "清单里「$name」是 source=gitlab 却没写 path=（GitLab 必须给组路径，如 path=go/cloud-driver/grpc-share）" >&2
+    exit 2
+  fi
   if [ -z "$branch" ]; then
     branch=master   # 与 TS 侧 FALLBACK_BRANCH 同一个值；TS 会给一行提示，这里只记日志
   fi
@@ -281,18 +389,25 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
   # 镜像目录名与 path 的最后一段必须是同一个名字：目录按 name 建、地址按 path 拼，
   # 两者不一致时错法是安静的（目录里是 A 仓，每晚去 fetch B 仓）。
-  if [ "${path##*/}" != "$name" ]; then
-    echo "清单里「$name」的 path「$path」最后一段不是它自己：镜像目录按仓名建，两者必须同一个仓" >&2
+  # 本地目录名与上游名默认必须一致（错法是安静的：目录里是 A 仓，每晚去 fetch B 仓）。
+  # GitLab 那批允许不一致——4 个刻意起的本地名（`go/base/api` → `api-go-base` 等）+ 5 个
+  # 重名改名（`gl-` 前缀）；codeup 那 142 行一个都不许改（目录全是裸仓名）。
+  # 与 TS 侧 `parseRepoInventory` 同一条规则（那边对 gitlab 的不一致留一条 notes）。
+  if [ "${path##*/}" != "$name" ] && [ "$source" != "gitlab" ]; then
+    echo "清单里「$name」的 path「$path」最后一段不是它自己：codeup 的镜像目录按仓名建，两者必须同一个仓" >&2
     exit 2
   fi
-  if [ -n "${SEEN[$name]:-}" ]; then
-    echo "清单里仓「$name」出现了两次" >&2
-    exit 2
-  fi
-  SEEN[$name]=1
+  case "$SEEN_LIST" in
+    *$'\n'"$name"$'\n'*)
+      echo "清单里仓「$name」出现了两次" >&2
+      exit 2
+      ;;
+  esac
+  SEEN_LIST="$SEEN_LIST"$'\n'"$name"$'\n'
   REPOS+=("$name")
   BRANCHES+=("$branch")
   PATHS+=("$path")
+  SOURCES+=("$source")
 done <"$REPOS_FILE"
 
 if [ "${#REPOS[@]}" -eq 0 ]; then
@@ -304,15 +419,39 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || { echo "建不了日志目录：$(di
 mkdir -p "$(dirname "$LOCK")" 2>/dev/null || { echo "建不了锁目录：$(dirname "$LOCK")" >&2; exit 2; }
 
 # 同一时刻只允许一轮。抢不到锁不算失败：那一轮是别人在做。
-exec 9>"$LOCK"
-if ! flock -n 9; then
-  echo "$(date -Iseconds) skip: another sync is running" >>"$LOG"
-  exit 0
+#
+# 两种实现：服务器（Linux，glibc 的 flock 是 fcntl 锁）用 flock；本机（macOS，没有
+# flock）用 mkdir 的原子性 + pid 判活。语义完全一样，差别只在「怎么知道锁是谁的」——
+# mkdir 版把 pid 写进目录里，上一轮被杀掉留下的目录会在下一次被清掉，而不是把
+# 后续每一轮都挡在门外（那是一个永久性的假故障）。
+LOCK_DIR=""
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    echo "$(iso_now) skip: another sync is running" >>"$LOG"
+    exit 0
+  fi
+else
+  LOCK_DIR="$LOCK.d"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    other="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
+      echo "$(iso_now) skip: another sync is running (pid $other)" >>"$LOG"
+      exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      echo "$(iso_now) skip: lock is held by someone else ($LOCK_DIR)" >>"$LOG"
+      exit 0
+    fi
+    echo "$(iso_now) note: cleared a stale lock (pid ${other:-?})" >>"$LOG"
+  fi
+  printf '%s\n' "$$" >"$LOCK_DIR/pid"
 fi
 
 exec >>"$LOG" 2>&1
 started_at=$(date +%s)
-echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} jobs=$SYNC_JOBS manifest=$REPOS_FILE org=$CODEUP_ORG ==="
+echo "=== sync start $(iso_now) repos=${#REPOS[@]} jobs=$SYNC_JOBS manifest=$REPOS_FILE codeup=$CODEUP_ORG root=$MIRROR_ROOT gitlab=$GITLAB_ORG root_gl=$MIRROR_ROOT_GITLAB readonly=$SYNC_READONLY ==="
 if [ "$LEGACY_ORG_BASE" -eq 1 ]; then
   echo "NOTE CODEUP_BASE 给的是旧的「组」地址（以 /123pan 结尾）：已剥成组织根 $CODEUP_ORG；下次把它改成 CODEUP_ORG"
 fi
@@ -325,7 +464,11 @@ JOBDIR="$(mktemp -d "${TMPDIR:-/tmp}/sync-flowers.XXXXXX")" || {
   echo "建不了逐仓缓冲目录（mktemp 失败）：并行日志会被撕碎，宁可不跑" >&2
   exit 2
 }
-cleanup_jobdir() { rm -rf "$JOBDIR"; }
+cleanup_jobdir() {
+  rm -rf "$JOBDIR"
+  # mkdir 版锁要自己收：漏掉它，下一轮会看到「锁被占着」——而占着它的正是上一轮自己。
+  [ -n "$LOCK_DIR" ] && rm -rf "$LOCK_DIR"
+}
 trap cleanup_jobdir EXIT
 
 # 日志里不出现 userinfo：现在的 BASEURL 本身不带凭据（走 /root/.git-credentials），
@@ -350,16 +493,46 @@ is_transient() {
 sync_one() {
   local repo="$1"
   local branch="$2"
-  # 第三格：组织相对的克隆路径。地址 = 组织根 + path —— 两段，且**只在这里拼**。
+  # 第三格：组织相对的克隆路径。地址 = 该来源的基址 + path —— 两段，且**只在这里拼**。
   local path="${3:-123pan/$repo}"
-  local dir="$MIRROR_ROOT/$repo.git"
+  local source="${4:-codeup}"
+  # 根与基址**按来源分叉**（见文件头「两个来源、两个根」）：同一个仓名在两个来源下
+  # 是两个不同的仓，合错根 = 把 B 仓的 ref 写进 A 仓的目录。
+  local root base
+  case "$source" in
+    gitlab) root="$MIRROR_ROOT_GITLAB"; base="$GITLAB_ORG" ;;
+    *)      root="$MIRROR_ROOT";        base="$CODEUP_ORG" ;;
+  esac
+  local dir="$root/$repo.git"
   local g=(git -c safe.directory='*' -C "$dir")
   local before after out st
 
   if [ ! -d "$dir" ]; then
-    # 镜像不存在不是「同步失败」而是「还没接入」：说清楚下一步（onboard-repos 建它），
-    # 而不是让人去猜为什么一个目录凭空该存在。
+    # 镜像不存在不是「同步失败」而是「还没接入」（返回 2，聚合时算 rc=4）。
+    #
+    # 但 2026-11-09 之后「接入」这一步只能在这里做：`scripts/onboard-repos.ts` 是给
+    # **服务器**写的（它要求 transport=ssh、还要 df 服务器的盘），镜像搬回本机之后它
+    # 一进来就说「批量接入只支持 ssh」。所以本机模式下这里顺手 clone（`SYNC_CLONE_MISSING`，
+    # 缺省：非 root = 1，root = 0）：加一个仓 = 清单加一行 + `repos-apply` + 跑这一轮。
+    if [ "${SYNC_CLONE_MISSING:-0}" = "1" ]; then
+      echo "CLONE $repo: 目录不存在，从 $base/$path.git 建 bare 镜像（${dir}）"
+      # 先建到临时目录再 mv：中途失败不该留下一个「看起来存在」的半仓——那会让下一轮
+      # 走 fetch 分支，然后以一句「拿不到 FETCH_HEAD」收场。
+      local tmp="${dir}.clone-$$"
+      rm -rf "$tmp"
+      local crc=0
+      out=$(run_with_timeout "$FETCH_TIMEOUT" git clone --bare --quiet "$base/$path.git" "$tmp" 2>&1) || crc=$?
+      if [ "$crc" -ne 0 ]; then
+        echo "FAIL clone $repo (rc=$crc): $(printf '%s' "$out" | mask | tail -3 | tr '\n' ' ')"
+        rm -rf "$tmp"
+        return 1
+      fi
+      mv "$tmp" "$dir"
+      echo "CLONE $repo: 完成（$(git -c safe.directory='*' -C "$dir" rev-parse --short HEAD 2>/dev/null || echo '没有 HEAD')）"
+      return 0
+    fi
     echo "FAIL $repo: 目录不存在（${dir}）——先跑 scripts/onboard-repos.ts 建这个镜像"
+    echo "       （本机模式可设 SYNC_CLONE_MISSING=1 让它在这里 clone）"
     return 2
   fi
 
@@ -371,8 +544,8 @@ sync_one() {
   while :; do
     attempt=$((attempt + 1))
     set +e
-    out=$(timeout "$FETCH_TIMEOUT" "${g[@]}" fetch --quiet --no-tags --prune \
-      "$CODEUP_ORG/$path.git" "$branch" 2>&1)
+    out=$(run_with_timeout "$FETCH_TIMEOUT" "${g[@]}" fetch --quiet --no-tags --prune \
+      "$base/$path.git" "$branch" 2>&1)
     st=$?
     set -e
     [ "$st" -eq 0 ] && break
@@ -405,7 +578,7 @@ sync_one() {
     local old_full
     old_full=$("${g[@]}" rev-parse "refs/heads/$branch" 2>/dev/null) || old_full=""
     # CAS：期望旧值还指着我们刚读到的那个提交；并发写会在这里失败，而不是悄悄覆盖。
-    if ! "${g[@]}" update-ref -m "sync-flowers-mirror $(date -Iseconds)" \
+    if ! "${g[@]}" update-ref -m "sync-flowers-mirror $(iso_now)" \
       "refs/heads/$branch" "$new_full" ${old_full:+"$old_full"}; then
       echo "FAIL update-ref ${repo}@${branch}（$before -> ${after}）"
       return 1
@@ -413,12 +586,16 @@ sync_one() {
     echo "OK $repo@$branch $before -> $after moved=1（$("${g[@]}" log -1 --format=%cd --date=format:'%F %T' "$after")）"
   fi
 
-  # 只读权限：这些仓被另一个进程（flowers 的走查/评审）**只读**读取，所以同步完
-  # 立刻收回写位——目录 555 / 文件 444，owner root。root 自己下一次 fetch 不受影响
-  # （CAP_DAC_OVERRIDE），非 root 谁都改不动。
-  chown -R root:root "$dir"
-  find "$dir" -type d -exec chmod 555 {} +
-  find "$dir" -type f -exec chmod 444 {} +
+  # 只读权限（`SYNC_READONLY=1`，缺省只在 root 下成立）：服务器上这些仓被另一个进程
+  # （flowers 的走查/评审）**只读**读取，所以同步完立刻收回写位——目录 555 / 文件 444，
+  # owner root；root 自己下一次 fetch 不受影响（CAP_DAC_OVERRIDE），非 root 谁都改不动。
+  #
+  # 本机关掉：读写同一个用户，收写位等于让**下一次** fetch 在 .git 上失败。
+  if [ "$SYNC_READONLY" = "1" ]; then
+    chown -R root:root "$dir"
+    find "$dir" -type d -exec chmod 555 {} +
+    find "$dir" -type f -exec chmod 444 {} +
+  fi
   return 0
 }
 
@@ -429,28 +606,33 @@ sync_one() {
 # 「哪个仓坏了」这个信息丢掉——聚合只认 `<仓名>.rc`，见下面那段。
 # `exec 9>&-` 把锁的 fd 从子进程里摘掉：子进程挂住时不该继续「持有」这一轮的锁。
 worker() {
-  local line="$1" repo branch path st=0
+  local line="$1" repo branch path source st=0
   exec 9>&- 2>/dev/null || true
   repo="${line%% *}"
   line="${line#* }"
   branch="${line%% *}"
-  path="${line#* }"
+  line="${line#* }"
+  path="${line%% *}"
+  source="${line#* }"
   [ "$branch" = "$repo" ] && branch=master
   [ "$path" = "$branch" ] && path="123pan/$repo"
-  sync_one "$repo" "$branch" "$path" >"$JOBDIR/$repo.log" 2>&1 || st=$?
+  [ "$source" = "$path" ] && source=codeup
+  sync_one "$repo" "$branch" "$path" "$source" >"$JOBDIR/$repo.log" 2>&1 || st=$?
   printf '%s\n' "$st" >"$JOBDIR/$repo.rc"
   return 0
 }
 
 # 子进程要看得见的东西：函数用 export -f，配置用 export。两者缺一个，子进程里的
 # `sync_one` 就会以「未定义」的方式静默地一个仓都不同步。
-export MIRROR_ROOT CODEUP_ORG FETCH_TIMEOUT FETCH_RETRIES RETRY_BACKOFF JOBDIR
-export -f sync_one is_transient mask worker
+export MIRROR_ROOT MIRROR_ROOT_GITLAB CODEUP_ORG GITLAB_ORG FETCH_TIMEOUT FETCH_RETRIES RETRY_BACKOFF JOBDIR SYNC_READONLY SYNC_CLONE_MISSING
+export -f sync_one is_transient mask worker run_with_timeout
 
 JOBS_FILE="$JOBDIR/jobs.txt"
 : >"$JOBS_FILE"
 for i in "${!REPOS[@]}"; do
-  printf '%s %s %s\n' "${REPOS[$i]}" "${BRANCHES[$i]}" "${PATHS[$i]}" >>"$JOBS_FILE"
+  # 四格：仓名 分支 path 来源。来源**必须**跟着 job 走——worker 在另一个进程里，
+  # 它没有 REPOS/SOURCES 这两个数组可查（bash 3.2 也不能导出数组）。
+  printf '%s %s %s %s\n' "${REPOS[$i]}" "${BRANCHES[$i]}" "${PATHS[$i]}" "${SOURCES[$i]}" >>"$JOBS_FILE"
 done
 
 # 有界并行：`-P SYNC_JOBS` 个槽位，一个仓一个 job。`-I{}` 保证整行（「仓名 分支」）
@@ -483,14 +665,26 @@ for i in "${!REPOS[@]}"; do
   esac
 done
 
-# 与 sync-repos-ro.sh 同一条收尾检查：镜像不许有 remote、config 里不许有带凭据的 URL。
-for repo in "${REPOS[@]}"; do
-  dir="$MIRROR_ROOT/$repo.git"
+# 与 sync-repos-ro.sh 同一条收尾检查，但**按模式分叉**：
+#
+# - 服务器（`SYNC_READONLY=1`）：镜像不许有 remote、config 里不许有带凭据的 URL。
+#   那批目录归 root 所有、别的进程只读挂进来，一个可写的 remote 就是一条「谁都能改」的路。
+# - 本机（`SYNC_READONLY=0`）：只查**带凭据的 URL**。本地这批是 `git clone --bare` 出来的，
+#   每个仓都带 `remote.origin.url`（记录「它从哪来」），按 server 那条判据会 217 行全红；
+#   而带凭据的 URL 是真问题——`.git/config` 里躺着 token，任何读到这个目录的东西都拿到了它。
+for i in "${!REPOS[@]}"; do
+  repo="${REPOS[$i]}"
+  root="$MIRROR_ROOT"
+  [ "${SOURCES[$i]}" = "gitlab" ] && root="$MIRROR_ROOT_GITLAB"
+  dir="$root/$repo.git"
   [ -f "$dir/config" ] || continue
   c=$(grep -c '^\[remote' "$dir/config" || true)
-  u=$(grep -c '://[^/]*@' "$dir/config" || true)
+  # 只把「URL 里带口令」当问题：`ssh://git@host` 的 `git@` 是**用户名**不是凭据，
+  # 按 `://[^/]*@` 判会把 75 个 GitLab 镜像全部误报成凭据泄漏——那种闸会被人关掉。
+  u=$(grep -cE '://[^/@:]+:[^/@]+@' "$dir/config" || true)
   echo "cfg $repo remotes=$c userinfo_urls=$u"
-  if [ "$c" -ne 0 ] || [ "$u" -ne 0 ]; then rc=3; fi
+  if [ "$u" -ne 0 ]; then rc=3; fi
+  if [ "$SYNC_READONLY" = "1" ] && [ "$c" -ne 0 ]; then rc=3; fi
 done
 
 # 只有「没有真故障」时，缺镜像才升级成 rc=4：一个既连不上 codeup、又有仓没建镜像的夜里，
@@ -500,5 +694,5 @@ if [ "$rc" -eq 0 ] && [ "$missing" -gt 0 ]; then
   echo "NOTE $missing 个仓还没有镜像（清单里有）：跑 scripts/onboard-repos.ts 建；本轮 fetch 全绿"
 fi
 echo "NOTE 本轮到 $(( $(date +%s) - started_at ))s repos=${#REPOS[@]} jobs=$SYNC_JOBS 失败=$failed 缺镜像=$missing"
-echo "=== sync done rc=$rc $(date -Iseconds) ==="
+echo "=== sync done rc=$rc $(iso_now) ==="
 exit "$rc"

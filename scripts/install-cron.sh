@@ -11,6 +11,9 @@
 #             scripts/index-nightly.sh。
 #   --check   只读：比服务器上两个文件的 sha256 与本仓库是否一致、cron 行 / launchd 任务在不在。
 #             任一条不成立退出 3（漂了就该让 `--check && echo ok` 断掉）。
+#   --server-off  只停服务器那条 `5 5 * * *` cron 行，别的行一个字节都不动，先备份 crontab。
+#             2026-11-09 的 mirror cutover 用它：镜像搬回本机之后，那一条只会在
+#             服务器上把 26 GB 重新抓回一台不再提供镜像的机器。
 #   --remove  拆掉：删 cron 行、删服务器上那份副本、卸载并删 plist。
 #
 # 为什么服务器上是**副本**而不是「薄壳 exec 仓库里的脚本」：服务器看不到这台 Mac 的仓库。
@@ -43,9 +46,10 @@ PLIST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
 usage() {
   cat <<'USAGE'
-用法：install-cron.sh [--server|--local|--all|--check|--remove] [--help]
+用法：install-cron.sh [--server|--server-off|--local|--all|--check|--remove] [--help]
 
   --server  安装服务器端同步脚本 + 仓清单 + cron 行（先备份 crontab）
+  --server-off  只停服务器那条 cron 行（先备份 crontab；脚本与清单留着当回滚材料）
   --local   安装本机 launchd 任务（05:10 跑 index-nightly.sh）
   --all     两者都装
   --check   只读核对（sha256 / cron 行 / launchd 任务）
@@ -116,6 +120,24 @@ install_server() {
   echo "   撤销：ssh $SSH_HOST \"crontab -l | grep -vF '$REMOTE_SCRIPT' | crontab - && rm -f '$REMOTE_SCRIPT'\""
 }
 
+# 只停服务器那条 cron 行。为什么单独一个动作而不是复用 `--remove`：
+# `--remove` 会连本地 launchd 任务一起卸掉——而 cutover 之后**本地那个才是要留的**。
+# 为什么按整条脚本体 `grep -vF` 而不是按时间字段：相邻有一条 `0 5 * * *` 是另一个任务
+# （brainboil 的只读影子），按字段删会连它一起删掉。
+server_off() {
+  echo "== 停服务器 cron（${SSH_HOST}）"
+  local backup
+  backup="/root/crontab.bak.$(date +%Y%m%d-%H%M%S)"
+  ssh "$SSH_HOST" "crontab -l > '$backup' 2>/dev/null || true; echo \"   备份 crontab → $backup（\$(wc -l < '$backup') 行）\""
+  ssh "$SSH_HOST" "crontab -l 2>/dev/null | grep -vF '$REMOTE_SCRIPT' | crontab -"
+  local left
+  left="$(ssh "$SSH_HOST" "crontab -l 2>/dev/null | grep -cF '$REMOTE_SCRIPT' || true")"
+  echo "   剩余的 $REMOTE_SCRIPT 行数：$left（应为 0）"
+  echo "   脚本与清单**没有删**：$REMOTE_SCRIPT / $REMOTE_REPOS（回滚材料）"
+  echo "   回滚：先重抓镜像，再把 transport 改回 ssh，然后 run --server 或从 $backup 恢回那一行"
+  [ "$left" = "0" ] || return 3
+}
+
 install_local() {
   echo "== 本机（launchd）"
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -170,22 +192,35 @@ check() {
   # `scripts/install-cron.sh --check && echo 装好了`，退出码为 0 等于把 ✗ 变成一句注释。
   # 三个判据（两份文件的 sha256、cron 行、launchd 任务）任意一条不成立即 3。
   local bad=0
+  # 服务器那份现在是什么角色：cron 行还在 = 它仍在被调度（漂了就是故障）；cron 行不在 =
+  # 它只是回滚材料（漂了只是「比仓库旧」，不该让 `--check && echo ok` 永远断）。
+  local server_active=0
+  if ssh "$SSH_HOST" "crontab -l 2>/dev/null | grep -Fq '$REMOTE_SCRIPT'"; then server_active=1; fi
   local local_sha remote_sha
   local_sha="$(sha_of_local "$ROOT/scripts/sync-mirrors.sh")"
   remote_sha="$(sha_of_remote)"
   echo "   sync-mirrors.sh 本地 $local_sha"
   echo "   sync-mirrors.sh 远端 $remote_sha"
-  [ "$local_sha" = "$remote_sha" ] && echo "   ✓ 一致" || { echo "   ✗ 不一致：跑一次 --server"; bad=1; }
+  [ "$local_sha" = "$remote_sha" ] && echo "   ✓ 一致" || {
+    if [ "$server_active" -eq 1 ]; then echo "   ✗ 不一致：跑一次 --server"; bad=1
+    else echo "   ! 不一致（服务器那一份已停用，只是回滚材料，不影响判定）"; fi
+  }
   local local_repos_sha remote_repos_sha
   local_repos_sha="$(sha_of_local "$LOCAL_REPOS")"
   remote_repos_sha="$(sha_of_remote_file "$REMOTE_REPOS")"
   echo "   repos.txt 本地 $local_repos_sha"
   echo "   repos.txt 远端 $remote_repos_sha"
-  [ "$local_repos_sha" = "$remote_repos_sha" ] && echo "   ✓ 一致" || { echo "   ✗ 不一致：跑一次 --server（改了清单就必须重跑）"; bad=1; }
+  [ "$local_repos_sha" = "$remote_repos_sha" ] && echo "   ✓ 一致" || {
+    if [ "$server_active" -eq 1 ]; then echo "   ✗ 不一致：跑一次 --server（改了清单就必须重跑）"; bad=1
+    else echo "   ! 不一致（服务器那一份已停用，只是回滚材料，不影响判定）"; fi
+  }
+  # 2026-11-09 的 cutover 之后，「服务器上没有这一行」是**正确状态**（镜像已搬回本机，
+  # 那条 cron 只会把 26 GB 抓回去）。所以这一条只报状态、不参与失败判定；真要装回去，
+  # `--server` 会把它加回来，`--check` 到时候照样看得见。
   if ssh "$SSH_HOST" "crontab -l 2>/dev/null | grep -Fq '$REMOTE_SCRIPT'"; then
-    echo "   ✓ cron 行在：$CRON_LINE"
+    echo "   ! 服务器 cron 行还在：$CRON_LINE（cutover 之后本该停用：跑一次 --server-off）"
   else
-    echo "   ✗ cron 行不在"; bad=1
+    echo "   ✓ 服务器 cron 行已停用（2026-11-09 cutover 后的预期状态）"
   fi
   if launchctl print "gui/$(id -u)/$PLIST_LABEL" >/dev/null 2>&1; then
     echo "   ✓ launchd 任务已加载：${PLIST_LABEL}（05:10）"
@@ -213,6 +248,7 @@ trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 case "${1:-}" in
   --server) install_server ;;
+  --server-off) server_off ;;
   --local) install_local ;;
   --all) install_server; install_local ;;
   --check) check ;;
