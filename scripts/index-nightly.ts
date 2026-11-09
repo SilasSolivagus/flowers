@@ -39,6 +39,23 @@ import { REPO_ROOT, dataLayout } from '../src/core/runtime-dir.js';
 const TSX = path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx');
 const INDEX_SYNC = path.join(REPO_ROOT, 'scripts', 'index-sync.ts');
 
+/**
+ * 一个仓的索引最多跑多久（毫秒）。**缺了它就等于没有夜间任务。**
+ *
+ * 2026-11-09 的 cutover 夜里实测到的那次：`platform-fontend` 里某块内容让解析器的某个
+ * 正则回溯到爆炸（`sample` 出来的栈一直停在 `RegExpPrototypeExec`），`spawnSync` 没有
+ * 超时，于是**整轮夜里停在那个仓上 20 分钟以上**，后面的 74 个仓一个都没索引，而
+ * launchd 那边看起来只是「还在跑」。一个坏文件不该让整晚的索引都白等。
+ *
+ * 10 分钟是量出来的：正常仓 350–500 ms，最重的（首次接入、要解析几千块）几秒。
+ * 10 分钟 = 正常值的三个数量级，只可能是「卡住了」，不是「有点慢」。
+ */
+const INDEX_TIMEOUT_MS = (() => {
+  const raw = (process.env.FLOWERS_INDEX_TIMEOUT_MS ?? '').trim();
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 600_000;
+})();
+
 /** 默认日志：与 `src/core/runtime-dir.ts` 的 data 根同一个地方（仓库外，git clean 碰不到）。 */
 export const DEFAULT_LOG = path.join(dataLayout().root, 'logs', 'index-nightly.log');
 
@@ -193,14 +210,21 @@ async function main(): Promise<number> {
     const child = spawnSync(process.execPath, [TSX, INDEX_SYNC, '--repo', repo.id, '--sha', h.data.sha, '--json'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
+      timeout: INDEX_TIMEOUT_MS,
       env: { ...process.env, TZ: process.env.TZ ?? 'Asia/Shanghai' },
     });
     const ms = Date.now() - syncStarted;
     const parsed = lastJson(child.stdout ?? '') as { newBlobs?: unknown } | null;
     const blobs = typeof parsed?.newBlobs === 'number' ? parsed.newBlobs : null;
+    // 超时被杀掉时 `status` 是 null、`signal` 是 SIGTERM：那既不是「索引失败」也不是
+    // 「跑完了」，所以单独一句，点名「卡住了」而不是让人去猜一个空 stderr。
+    const timedOut = child.error !== undefined && (child.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
 
-    if (child.status !== 0 || blobs === null) {
-      const detail = (child.stderr ?? '').trim().split('\n').filter((line) => line !== '').slice(-3).join(' ');
+    if (timedOut || child.status !== 0 || blobs === null) {
+      const detail = timedOut
+        ? `索引超过 ${Math.round(INDEX_TIMEOUT_MS / 1000)} 秒被终止（这个提交里有让解析器回溯到超时的内容）；`
+          + '本轮跳过它，下一轮会再试一次——同一个仓连续几晚都超时，就是那块内容需要人看一眼'
+        : (child.stderr ?? '').trim().split('\n').filter((line) => line !== '').slice(-3).join(' ');
       writeRow(log, {
         ts: new Date().toISOString(), repo: repo.id, sha: h.data.sha, newBlobs: null, ms,
         error: detail === '' ? `index-sync 退出码 ${String(child.status)}` : detail,

@@ -330,6 +330,38 @@ remaining=0
 同步的码带出去——否则「抓不到新提交」这件事在 launchd 那边看不见，会一直绿到有人发现材料
 对着半个月前的代码。
 
+**整条链跑了一次真账**（`FLOWERS_INDEX_TIMEOUT_MS=60000 bash scripts/index-nightly.sh`）：
+
+```
+[mirror-sync] NOTE 本轮到 24s repos=216 jobs=8 失败=0 缺镜像=0
+[index]      216 个仓逐个索引，newBlobs 合计 3526 块
+[index]      (run) ms=250728 newBlobs=3526 「2 个仓失败」
+rc=3
+```
+
+4 分 11 秒（含两次 60 s 超时）。75 个 GitLab 仓是第一次进索引，块数是实打实的：
+`api-ufs` 333、`api-uc` 316、`api-share` 274、`admin-adm` 236、`123pan-website` 236、
+`grpc-auth` 192、`grpc-ftree` 157……`mirror_health` 从此有 216 行（214 ok / 2 failed）。
+
+rc=3 的两个仓是同一个**解析器**问题，不是传输问题：
+
+| 仓 | 现象 | 根因（已定位到文件） |
+| --- | --- | --- |
+| `platform-fontend` | 索引 60 s 未完成 | `src/components/SvgIcon/index.vue`（903 字节）让某个正则回溯到爆炸——`sample` 的栈一路停在 `RegExpPrototypeExec`；逐个文件跑 `parseBlob()` 时卡在这一行，它前面的文件都是个位数毫秒 |
+| `fe-tool` | 同上 | 同形态（同类 icon 组件，未逐个定位） |
+
+改的是**夜间的失败形态**，不是解析器（`src/core/codemirror/*` 这次不动）：
+
+- `index-nightly.ts` 给每个仓加了 `spawnSync(..., { timeout })`（`FLOWERS_INDEX_TIMEOUT_MS`，
+  缺省 600 s）。之前没有超时：`spawnSync` 会一直等，于是**整晚停在这一个仓上**，后面
+  74 个仓一个都没索引，而 launchd 那边看起来只是「还在跑」——这是这次实测撞到的真事
+  （跑了 20 分钟还没过 `platform-fontend`）。
+- 超时被杀时点名说「索引超过 N 秒被终止」，而不是留一句空 stderr 让人去猜。
+
+于是现在的行为是：坏仓**单独失败、名字写进 `mirror_health.error`、下一轮再试**，
+其余 214 个仓照常索引。**这一个文件仍然会让那一晚的索引停在那里**——修它属于解析器
+的事（回溯型正则），这次明确不动。
+
 ### 7.1 `sync-mirrors.sh` 原来假设服务器布局，改了这些
 
 | 原来的假设 | 现在 | 为什么 |
@@ -418,6 +450,7 @@ crontab（`/root/crontab.bak.20261109-134655`）是**回滚材料**，别删；�
 | 服务器 141 个 HEAD vs 本地 | `same 141 / diff 0 / missing 0` |
 | `scripts/sync-mirrors.sh`（216 个仓） | rc=0，**23 s**，0 失败 |
 | `inspect()`（requirement 800） | 45 875 字节，214 s，研发参考 2 条坐标全部在 HEAD 上存在 |
+| `scripts/index-nightly.sh`（整条链） | 同步 24 s（216 仓 0 失败）+ 索引 250 s（3526 块），rc=3 = 2 个仓索引超时（解析器，见 §7） |
 | `scripts/install-cron.sh --check` | launchd 已加载、服务器 cron 已停用（两份副本的 sha 漂移按「回滚材料」记为提示） |
 
 `requirements` 仍是 **814** 条（材料生成让 800 从 `inbox` 走到 `design`——那是
