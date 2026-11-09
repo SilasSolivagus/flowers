@@ -29,7 +29,7 @@ import {
   PRODUCT_BODY_RULE, referenceLines, type CodeRef,
 } from '../locate/copy.js';
 import { injectReference } from '../locate/reference.js';
-import { relocateHtmlBody } from './body-language.js';
+import { countHtmlBodyHits, relocateHtmlBody, reportVocab, sanitizeAnno } from './body-language.js';
 import { withRecency, withSnapshots } from '../locate/copy.js';
 import {
   complete, extractJson, resolveProviderConfig,
@@ -189,6 +189,13 @@ export type ReviewStats = {
   bytes: number;
   ms: number;
   usage: ComposeUsage;
+  /**
+   * 正文 + 标注里违规词**清洗之前**的处数（2026-11-09 第二轮的可数指标）。
+   * >0 = 那一次提示词没写住；材料照出，但这个数必须留在日志与 stats 里。
+   */
+  vocabHits: number;
+  /** 清洗**之后**还剩几处（应当恒为 0）。 */
+  vocabLeft: number;
 };
 
 export type ReviewOutcome = {
@@ -1062,7 +1069,7 @@ export function annotateWalkmap(
   nodes: FlowNode[],
   findings: ReviewFinding[],
   title: string,
-): Walkmap {
+): { walkmap: Walkmap; moved: string[]; raw: number; left: number } {
   const byNode = new Map<string, ReviewFinding[]>();
   for (const finding of findings) {
     const list = byNode.get(finding.node);
@@ -1071,9 +1078,24 @@ export function annotateWalkmap(
   }
 
   const mapped: Record<string, WalkmapNode> = {};
+  const moved: string[] = [];
+  let raw = 0;
+  let left = 0;
   for (const [id, meta] of Object.entries(walkmap.nodes)) {
     // 只改流程节点自己的标注；walkmap 里若还有别的 id（理论上没有），保留原样。
-    const own = nodes.some((node) => node.id === id) ? findingsAnno(byNode.get(id) ?? []) : meta.anno;
+    const base = nodes.some((node) => node.id === id) ? findingsAnno(byNode.get(id) ?? []) : meta.anno;
+    /**
+     * 缺口 / 建议那一档（2026-11-09 第二轮）：右栏是 PM 拍板的地方，`why` 里一个实现词
+     * 都不该有（`why` 是模型写的，`findingsAnno` 只拼引文）。这里按 `sanitizeAnno` 洗一遍
+     * ——它的判据是「小标题是不是 verdict」：问题清单的小标题是九种类型名，因此全部走
+     * 缺口档。被搬走的原句进末尾「研发参考」，右栏留一句指路，缺口不会因此消失。
+     */
+    const cleaned = sanitizeAnno(base);
+    raw += cleaned.raw;
+    left += cleaned.left;
+    moved.push(...cleaned.moved);
+    const own = cleaned.rows.map((row): Anno =>
+      (row.length >= 3 ? [row[0]!, row[1]!, row[2]!] : [row[0]!, row[1]!]));
     mapped[id] = { ...meta, anno: own };
   }
   // 默认停在哪一步：**第一条有问题的步骤**，不是流程图的第一节点。
@@ -1081,7 +1103,7 @@ export function annotateWalkmap(
   // 第一眼像是没评审过——评审材料最不该给人的就是这个印象。
   const firstWithFindings = nodes.find((node) => (byNode.get(node.id) ?? []).length > 0)?.id;
   const defaultNode = firstWithFindings ?? walkmap.default_node;
-  return { ...walkmap, title, default_node: defaultNode, nodes: mapped };
+  return { walkmap: { ...walkmap, title, default_node: defaultNode, nodes: mapped }, moved, raw, left };
 }
 
 // ─── 主流程：问题清单 ────────────────────────────────────────────────────────
@@ -1332,7 +1354,8 @@ export async function reviewRequirement(
   usage = pages.usage;
 
   // 标注整片换成问题清单，再验一次：`anno` 是我们拼的，所以这一层是「我们自己没写错」。
-  const walkmap = annotateWalkmap(pages.assembly.walkmap, nodes, found.findings, title);
+  const annotated = annotateWalkmap(pages.assembly.walkmap, nodes, found.findings, title);
+  const walkmap = annotated.walkmap;
   const report = validateWalkmap(walkmap, { svg, fragments: pages.assembly.fragments });
   if (!report.ok) {
     throw new AppError('review_rejected', `评审材料的标注没过校验：${report.errors.join('；')}`);
@@ -1388,13 +1411,17 @@ export async function reviewRequirement(
    *    （评审落 `absent` / `none`）整节不写。
    */
   const moved: string[] = [];
+  // 可数指标（2026-11-09 第二轮）：问题清单的 `why` + 正文的违规词，清洗前 / 清洗后各一个数。
+  const vocabHits = annotated.raw + pages.assembly.annoRaw + countHtmlBodyHits(built.html);
   const stripped = relocateHtmlBody(built.html, moved);
+  const vocabLeft = annotated.left + pages.assembly.annoLeft + countHtmlBodyHits(stripped);
+  reportVocab(`PAN-${req.number} review`, vocabHits, vocabLeft);
   const html = injectReference(
     injectBanner(
       stripped,
       withRecency(withSnapshots(renderLocate(baseline.locate), baseline.repos), recency),
     ),
-    referenceLines(reviewRefs(found.findings, baseline), moved),
+    referenceLines(reviewRefs(found.findings, baseline), [...moved, ...annotated.moved]),
   );
   await writeFile(file, html, 'utf8');
 
@@ -1428,6 +1455,8 @@ export async function reviewRequirement(
       drops: found.drops,
       modelCalls: calls,
       bytes: Buffer.byteLength(built.html, 'utf8'),
+      vocabHits,
+      vocabLeft,
       ms: Date.now() - started,
       usage,
     },

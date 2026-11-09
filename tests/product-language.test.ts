@@ -123,8 +123,20 @@ describe('findProseLeaks：三种写法都算违规', () => {
     expect(hasProseLeak('系统现在能判断某个自定义域名是否已备案，缺的是失效后主动告警。')).toBe(false);
     // 页面路由不是文件路径：`/pages/share/index` 是产品里的一个屏，读者要的就是它。
     expect(hasProseLeak('点在 /pages/share/index 这一屏的顶部')).toBe(false);
-    // 裸文件名（没有目录）不拦：误伤「文件名恰好就是功能名」的短语，收益太小。
-    expect(hasProseLeak('这个 Share.tsx 页面')).toBe(false);
+  });
+
+  /**
+   * 2026-11-09 第二轮：**第一轮的那条豁免被收回了**。
+   *
+   * 第一轮刻意放过裸文件名（「这个 Share.tsx 页面」不算违规），理由是「可能与『文件名
+   * 恰好等于功能名』的短语打架，收益很小」。第二轮 owner 退回来的那段话里，
+   * `purchaseRecord` 就是**裸的**标识符——同一个洞。豁免与漏洞是同一件事，所以
+   * 裸扩展名现在算违规：`.tsx` 对读者是零信息，`这个页面` 才是正文该有的写法。
+   * 新用例：`tests/business-language.test.ts`。
+   */
+  it('裸扩展名现在算违规（第一轮放过的裸文件名，正是第二轮的那个洞）', () => {
+    expect(hasProseLeak('这个 Share.tsx 页面')).toBe(true);
+    expect(findProseLeaks('这个 Share.tsx 页面').map((l) => l.kind)).toContain('extension');
   });
 });
 
@@ -151,7 +163,9 @@ describe('relocateProse：删子句、把坐标交出去', () => {
 
   it('没有坐标时原样返回（不重排、不改标点）', () => {
     const text = PRODUCT_BODY_EXAMPLE;
-    expect(relocateProse(text)).toEqual({ text, moved: [] });
+    // `rewritten` 是第二轮加的：同一句可能被**改写**（换掉实现词）而不是搬走，调用方要
+    // 知道这一次动没动过它。
+    expect(relocateProse(text)).toEqual({ text, moved: [], rewritten: 0 });
   });
 });
 

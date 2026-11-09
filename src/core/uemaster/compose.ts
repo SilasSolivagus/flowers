@@ -14,7 +14,9 @@ import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
 import { EMPTY_SURFACES, PRODUCT_BODY_RULE } from '../locate/copy.js';
 import type { KnownSurface, KnownSurfaces } from '../locate/copy.js';
-import { relocateHtmlBody } from './body-language.js';
+import {
+  countHtmlBodyHits, relocateHtmlBody, reportVocab, sanitizeAnno,
+} from './body-language.js';
 import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
@@ -178,6 +180,10 @@ export type ComposeOutcome = {
   usage: ComposeUsage;
   /** 落库那行的 id：作业收口（`uemaster_jobs.artifact_id`）要用，不属于对外契约。 */
   artifactId: string;
+  /** 正文 + 标注里违规词**清洗前**的处数（第二轮的可数指标；>0 = 流水线失误）。 */
+  vocabHits: number;
+  /** 清洗**之后**还剩几处（应当恒为 0）。 */
+  vocabLeft: number;
 };
 
 export type RequirementRow = {
@@ -696,6 +702,17 @@ export type Assembly = {
   fragments: Record<string, string>;
   /** 没有自己的页面、被挂到别的节点页面上的环节（判断 / 系统）。 */
   detached: Array<{ node: string; page: string }>;
+  /**
+   * 标注里被搬走的技术词原句（2026-11-09 第二轮）。
+   *
+   * 走查 / 评审把它搬进末尾「研发参考」；评估那条路**不用它**——评估不读代码，被搬走的
+   * 多半是模型想象出来的名字，写进「研发参考」等于把想象写成证据（与坐标那一条同理由）。
+   */
+  moved: string[];
+  /** 标注里清洗**之前**有多少处违规词。这是流水线的失误数，不是材料的缺陷数。 */
+  annoRaw: number;
+  /** 标注里清洗**之后**还剩多少处（应当恒为 0；不为 0 说明改写/搬走漏了一条路）。 */
+  annoLeft: number;
 };
 
 /**
@@ -715,6 +732,23 @@ export type Assembly = {
  * 纯函数：不读磁盘、不看时钟。同一份片段永远得到同一份 walkmap。
  */
 export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: string }): Assembly {
+  // ── 缺口 / 建议那一档：标注比正文更严（2026-11-09 第二轮）──
+  //
+  // 为什么在**这里**洗而不是等 `relocateHtmlBody`：`build.py` 把 walkmap 的 JSON 原样塞进
+  // `<script>`，而那一层按「正文文本节点」处理时会把脚本整块跳过（不跳过就会把页面脚本
+  // 删成残句）。所以标注必须在上游洗——它同时也是唯一知道「哪一行是 verdict、哪一行是
+  // 缺口」的地方：verdict 按正文档，其余按缺口档（`sanitizeAnno`）。
+  const cleaned = doc.nodes.map((fragment) => {
+    const result = sanitizeAnno(fragment.anno);
+    const anno = result.rows.map((row): Anno =>
+      (row.length >= 3 ? [row[0]!, row[1]!, row[2]!] : [row[0]!, row[1]!]));
+    return { fragment, anno, result };
+  });
+  const moved = cleaned.flatMap((item) => item.result.moved);
+  const annoRaw = cleaned.reduce((sum, item) => sum + item.result.raw, 0);
+  const annoLeft = cleaned.reduce((sum, item) => sum + item.result.left, 0);
+  const nodes0: PageFragment[] = cleaned.map((item) => ({ ...item.fragment, anno: item.anno }));
+
   const pageOf = new Map<string, string>();
   const pages: PageInput[] = [];
   const fragments: Record<string, string> = {};
@@ -726,17 +760,17 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
   /** 折标注用：离这个下标最近的页面节点（先往前找、再往后找）。 */
   const nearestPage = (index: number): NodeInput | undefined => {
     for (let i = index - 1; i >= 0; i -= 1) {
-      const hit = pageNode.get(doc.nodes[i]!.id);
+      const hit = pageNode.get(nodes0[i]!.id);
       if (hit !== undefined) return hit;
     }
-    for (let i = index + 1; i < doc.nodes.length; i += 1) {
-      const hit = pageNode.get(doc.nodes[i]!.id);
+    for (let i = index + 1; i < nodes0.length; i += 1) {
+      const hit = pageNode.get(nodes0[i]!.id);
       if (hit !== undefined) return hit;
     }
     return undefined;
   };
 
-  doc.nodes.forEach((fragment, index) => {
+  nodes0.forEach((fragment, index) => {
     if (fragment.kind !== 'page' || fragment.html === '') {
       const host = nearestPage(index);
       // 没有任何页面节点时校验会说「一个页面片段都没有」；这里先按无页面记。
@@ -773,6 +807,9 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
     walkmap: buildWalkmap({ title: opts.title, svg: opts.svg, nodes, pages }),
     fragments,
     detached,
+    moved,
+    annoRaw,
+    annoLeft,
   };
 }
 
@@ -1221,10 +1258,21 @@ export async function composeEvaluation(
    */
   const dropped: string[] = [];
   const html = relocateHtmlBody(built.html, dropped);
+  /**
+   * 可数指标（2026-11-09 第二轮）：模型这一版写了多少处实现词、剥完之后还剩几处。
+   *
+   * 计数口径与材料里读者看到的一致——正文文本节点（跳过属性、`<script>`、`<style>`），
+   * 再加上标注那一档（`assembly.annoRaw` / `annoLeft`，那一档在 `assembleWalkmap` 里
+   * 已经按缺口档洗过）。>0 就是流水线的失误：材料照出（本仓吃够了「整份不出」的苦），
+   * 但这个数必须留在日志与 `stats` 里。
+   */
+  const vocabHits = pages.assembly.annoRaw + countHtmlBodyHits(built.html);
+  const vocabLeft = pages.assembly.annoLeft + countHtmlBodyHits(html);
+  reportVocab(`PAN-${req.number} ${stage}`, vocabHits, vocabLeft);
   await writeFile(file, html, 'utf8');
 
   const url = artifactUrl(file);
   const artifact = await attachArtifact(db, actor, { requirementId, stage, url, inputHash });
 
-  return { url, attempts: flow.attempts, usage, artifactId: artifact.id };
+  return { url, attempts: flow.attempts, usage, artifactId: artifact.id, vocabHits, vocabLeft };
 }

@@ -20,7 +20,7 @@ import { locateFromHistory } from '../locate/history.js';
 import { recencyOf, topRecent, type RecentFile } from '../locate/recency.js';
 import { injectBanner } from '../locate/banner.js';
 import { injectReference } from '../locate/reference.js';
-import { relocateHtmlBody } from './body-language.js';
+import { countHtmlBodyHits, relocateHtmlBody, reportVocab } from './body-language.js';
 import {
   ABSENT_HISTORY_LINE, ABSENT_LINE, CANDIDATES_LINE, CONFIRM_WITH_DEV, NOT_FOUND_HEADLINE,
   PRODUCT_BODY_RULE, referenceLines, type CodeRef,
@@ -237,6 +237,16 @@ export type InspectStats = {
   /** 产物字节数与整条链路耗时。 */
   bytes: number;
   ms: number;
+  /**
+   * 正文 + 标注里违规词**清洗之前**的处数（2026-11-09 第二轮的可数指标）。
+   *
+   * 为什么它是「流水线的失误数」而不是「材料的缺陷数」：模型写了多少处研发语言，
+   * 就说明提示词在那一次有多不够用。>0 时材料照样出（本仓吃够了「整份不出」的苦），
+   * 但这个数会出现在日志一行与这份 stats 里——没有被看见的失败等于没发生。
+   */
+  vocabHits: number;
+  /** 清洗**之后**还剩几处（应当恒为 0；不为 0 说明改写/搬走漏了一条路）。 */
+  vocabLeft: number;
 };
 
 export type InspectOutcome = {
@@ -1377,11 +1387,16 @@ export function verifyPrompt(
     ` 7. 页面上能推进流程的按钮写 onclick="goNode('节点id')"，id 必须是上面清单里的 id。`,
     '',
     '标注（anno）规则：',
-    ' 1. 每个节点 1–3 条，每条 ["小标题","正文"]，小标题 2–6 个字。',
+    ' 1. 每个节点 1–3 条，每条 ["小标题","正文"]，小标题 2–6 个字（缺口 + 建议算一对、占 2 条）。',
     ' 2. **第一条必须是一条 verdict**：小标题只能是 一致 / 缺失 / 多余 / 不一致 之一，',
     '    正文一句话说清这个节点与 PRD 的关系。它是这份材料「走查」的身份，缺了会被退回。',
     ' 3. 其余条目写设计约束、边界与风险；不要重复页面里已有的文案。',
-    ' 4. kind=system / decision 的节点没有页面：不要给 html 和 frame，只给 anno。',
+    ' 4. PRD 没定、不定就没法开工的地方，写**一对**行（这是评审最要看的两格）：',
+    '    ["缺口 · 小标题", "一句话说清缺什么、谁要定", "p0"] 紧跟一行 ["建议", "产品上怎么补"]。',
+    '    第三格是严重度：p0 = 不定就没法开工，p1 = 会返工，p2 = 可以先绕。',
+    '    这两格里**一个实现词都不许有**——不写参数、字段、接口、埋点、状态码，也不写页面',
+    '    在代码里的名字。照上面「缺口 + 建议」的正例写，那一对就是从真实材料里拿来的。',
+    ' 5. kind=system / decision 的节点没有页面：不要给 html 和 frame，只给 anno。',
     '',
     '规则：id 必须与流程节点清单一一对应；全部中文；只输出 JSON 本身。',
   ].join('\n');
@@ -1410,7 +1425,8 @@ export function verifyRepairPrompt(
     '',
     '重发**完整**的 JSON，形状不变：{"findings":[{"verdict","prd","code","evidence":[],"searched":[]}],"nodes":[{"id","kind","frame","title","html","anno"}]}',
     'kind=page 给 frame 与 html；kind=system / decision 只给 anno，不要给 html。',
-    '每个节点 anno 的第一条必须是 verdict（一致/缺失/多余/不一致）。',
+    '每个节点 anno 的第一条必须是 verdict（一致/缺失/多余/不一致）；',
+    '缺口那一对行的严重度只能取 p0 / p1 / p2，且缺口与建议两格不许出现实现词。',
     'html 只用 wt-* 组件类、只写 body 内片段、不用 emoji。只输出 JSON 本身。',
   ].join('\n');
 }
@@ -1526,6 +1542,7 @@ function emptyStats(): InspectStats {
     verdicts: { implemented: 0, missing: 0, extra: 0, differs: 0 },
     cited: 0, citedValid: 0, deepRead: 0, deepReadChars: 0,
     structureAttempts: 0, verifyAttempts: 0, modelCalls: 0, bytes: 0, ms: 0,
+    vocabHits: 0, vocabLeft: 0,
   };
 }
 
@@ -1821,10 +1838,15 @@ export async function inspect(
    * 3. `injectReference` —— 末尾「研发参考」：`仓:路径` + 受影响文件数；没坐标整节不写。
    */
   const moved: string[] = [];
+  const vocabHits = assembly.annoRaw + countHtmlBodyHits(built.html);
   const stripped = relocateHtmlBody(built.html, moved);
+  const vocabLeft = assembly.annoLeft + countHtmlBodyHits(stripped);
+  reportVocab(`PAN-${req.number} inspect`, vocabHits, vocabLeft);
   const html = injectReference(
     injectBanner(stripped, locateBannerText(repos, recency)),
-    referenceLines(inspectRefs(findings), moved),
+    // 两处来源合起来：正文里被删掉的子句（`moved`）与标注里被搬走的句子
+    // （`assembly.moved`，缺口/建议那一档更严，2026-11-09 第二轮）。
+    referenceLines(inspectRefs(findings), [...moved, ...assembly.moved]),
   );
   await writeFile(file, html, 'utf8');
 
@@ -1834,6 +1856,8 @@ export async function inspect(
   });
 
   stats.bytes = Buffer.byteLength(html, 'utf8');
+  stats.vocabHits = vocabHits;
+  stats.vocabLeft = vocabLeft;
   stats.ms = Date.now() - started;
 
   // 记账放在**材料写出来之后**（修复二波，与评审那条路同口径）。这一行描述的是「PM 真拿到了
