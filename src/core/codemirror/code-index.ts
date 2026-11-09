@@ -349,7 +349,27 @@ const EXPORT_LIST = /\bexport\s*\{([^}]*)\}/g;
 const EXPORT_DEFAULT_ID = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?\s*$/gm;
 const SCRIPT_SETUP = /<script[^>]*\bsetup\b[^>]*>([\s\S]*?)<\/script>/g;
 const SETUP_DECL = /^\s*(?:export\s+)?(?:async\s+)?(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/gm;
-const COMPONENT_NAME = /\bdefineComponent\s*\(|name\s*:\s*['"]([\w$-]+)['"]/;
+/**
+ * `name: 'Xxx'` 里的组件名（`defineComponent({ name: 'SearchEntrance' })`）。
+ *
+ * **2026-11-09 事故后重写，两条改动都是为了让这条扫描是线性的**：
+ *
+ * 1. 加 `g`。原来是 `/\bdefineComponent\s*\(|name\s*:\s*['"]([\w$-]+)['"]/`——**没有 `g`**，
+ *    却被下面那个 `for (… exec(text) …)` 循环反复执行。**不带 `g` 的 `exec` 每次都从
+ *    下标 0 重新开始**，于是同一个匹配被无限次命中：`SvgIcon/index.vue`（903 字节，里面有
+ *    `defineComponent(`）让那个循环变成死循环，15 秒跑了 580 万次 `exec`，`platform-fontend`
+ *    与 `fe-tool` 的索引因此永远不返回、整晚的索引被一个文件按住。sample 出来的栈停在
+ *    `RegExpPrototypeExec`，看上去像回溯爆炸，实际是**匹配永不前进**——两者的区别很大：
+ *    回溯是「一次 exec 太久」，这里是「exec 次数无限」。
+ * 2. 去掉左半边 `\bdefineComponent\s*\(`。那个分支一个字符都不捕获（`m[1] === undefined`，
+ *    原代码在 `if` 里什么都不做），它对结果的唯一作用是「这个文件里得有 defineComponent」——
+ *    那是调用方用 `indexOf` 判的一句话。留在正则里只会多一条分支、多一种回溯形状。
+ *
+ * 现在的形状：`name` `\s*` `:` `\s*` 引号 `[\w$-]+` 引号。没有嵌套量词、没有量词套量词、
+ * 没有共享前缀的多分支，扫描一次只会往前走，命中与不命中都是 O(输入长度)。
+ * **口径没变**：仍然只看 `name:` 后面的值、仍然只在文件里出现 `defineComponent` 时才看。
+ */
+const COMPONENT_NAME = /name\s*:\s*['"]([\w$-]+)['"]/g;
 
 /**
  * 导出符号。
@@ -390,10 +410,14 @@ export function exportsOf(text: string, path: string): string[] {
       for (let d = SETUP_DECL.exec(block); d !== null; d = SETUP_DECL.exec(block)) push(d[1]);
     }
   }
-  if (text.includes('defineComponent')) {
+  // 门槛用 `indexOf`（单次前向扫描）：`name:` 在 vue/react 仓里满地都是，只有在组件
+  // **定义**文件里它才是「组件名」，而没有 `defineComponent` 的文件里这一趟没必要跑。
+  if (text.indexOf('defineComponent') !== -1) {
     COMPONENT_NAME.lastIndex = 0;
+    // 循环安全的前提是这条正则带 `g`（见 `COMPONENT_NAME` 的注释）：带 `g` 的 `exec`
+    // 每命中一次都把 `lastIndex` 推到匹配之后，匹配长度 ≥ 5 个字符，所以必然前进。
     for (let m = COMPONENT_NAME.exec(text); m !== null; m = COMPONENT_NAME.exec(text)) {
-      if (m[1] !== undefined) push(m[1]);
+      push(m[1]);
     }
   }
   return out;
