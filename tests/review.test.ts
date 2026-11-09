@@ -135,6 +135,10 @@ const PAGES_JSON = JSON.stringify({
     { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE,
       anno: [['内容', '模型自己写的标注会被换掉']] },
     { id: 'B', kind: 'decision', title: '是否登录？',
+      steps: [
+        { from: '页面', to: '服务端', what: '提交当前登录状态' },
+        { from: '服务端', to: '服务端', what: '判断这个用户有没有登录过' },
+      ],
       anno: [['判定依据', '模型自己写的标注会被换掉']] },
     { id: 'C', kind: 'page', frame: 'phone', title: '选择宠物', html: PHONE,
       anno: [['字段', '模型自己写的标注会被换掉']] },

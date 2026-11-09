@@ -33,9 +33,11 @@ import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
-import { assembleWalkmap, type PageFragment } from './compose.js';
 import {
-  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, normalizeSteps, type SeqStep,
+  FLOW_DROP_RULE, assembleWalkmap, droppedNotesIn, reportDropped, type PageFragment,
+} from './compose.js';
+import {
+  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, missingStepsReason, normalizeSteps, type SeqStep,
 } from './sequence.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import {
@@ -1034,6 +1036,8 @@ export function structurePrompt(
     ' 5. differs 至少要有一条 evidence；implemented 与 extra 也要有（没有证据的判断等于没判断）。',
     ' 6. prd / code 各写一句短句（不超过 40 字），中文；不要写「详见 PRD」这种空话。',
     ' 7. 找不到就写 missing，不要为了凑条数编一条 implemented。',
+    '',
+    ...FLOW_DROP_RULE,
   ].join('\n');
 }
 
@@ -1074,6 +1078,8 @@ export function structureRepairPrompt(
     `规则：flows 3–${FLOW_CAP} 个、按用户实际顺序；findings 1–${FINDING_CAP} 条；`,
     'missing 的 evidence 必须是空数组并给 searched；其余 verdict 至少一条 evidence；',
     '所有路径都必须在对应仓库的 HEAD 上真实存在。只输出 JSON 本身。',
+    '',
+    ...FLOW_DROP_RULE,
   ].join('\n');
 }
 
@@ -1518,10 +1524,18 @@ export function readVerify(
     /**
      * 后端节点的时序步骤（2026-11-09）：走查这条路的节点本来也分两类，但原来只有
      * 「给不给 html」的判据，于是一个纯后端流程（`PAN-815` 那一类）里六个节点全都没有
-     * html，拼装时挂到空页面上、整份被拒。这里把义务说清：没有页面的节点必须给 steps。
+     * html，拼装时挂到空页面上、整份被拒。这里把义务说清：**没有页面的节点必须给 steps**。
+     *
+     * 第三轮收紧（与 `compose.readFragments` 同一句话，`missingStepsReason` 是唯一措辞来源）：
+     * 上一版放过「判为后端但没 steps」的节点、由拼装阶段挂到最近的页面上——那会让读者看见
+     * 一屏界面，把一步服务端的事读成「这一步在界面上」。现在整份退回，模型据此能一次补上。
      */
     let steps: SeqStep[] = [];
-    if (node.kind !== 'page' && node.steps !== undefined && node.steps !== null) {
+    if (node.kind !== 'page') {
+      // 空数组与「没给」是同一件事：都等于没说这一步在服务端做什么（旧版正因为它走了兜底）。
+      const blank = node.steps === undefined || node.steps === null
+        || (Array.isArray(node.steps) && node.steps.length === 0);
+      if (blank) return { ok: false, why: missingStepsReason(node.id, node.title) };
       const read = normalizeSteps(node.steps);
       if (!read.ok) return { ok: false, why: `节点 ${node.id} 的 ${read.why}` };
       steps = read.steps;
@@ -1703,6 +1717,12 @@ export async function inspect(
   let prompt = structurePrompt(req, prd, repos, keywords);
   let structure: Structure | null = null;
   let lastProblems: string[] = [];
+  /**
+   * 模型在**被接受的那一版**里删掉的流程步骤（`已删去：…`，见 `compose.ts` 的
+   * `FLOW_DROP_RULE`）。只认最后接受的那一版：前几版模型重画了整张图，那些删改已经
+   * 不生效，把它们一起报出来会让复核的人去找一个不存在的缺口。
+   */
+  let droppedSteps: string[] = [];
 
   for (let attempt = 1; attempt <= MAX_STRUCTURE_ATTEMPTS; attempt += 1) {
     const callStarted = Date.now();
@@ -1722,8 +1742,10 @@ export async function inspect(
       lastProblems = [read.why];
     } else {
       const checked = validateStructure(read.doc, trees);
-      if (checked.ok) structure = read.doc;
-      else lastProblems = checked.problems;
+      if (checked.ok) {
+        structure = read.doc;
+        droppedSteps = droppedNotesIn(reply.text);
+      } else lastProblems = checked.problems;
     }
 
     await trace.write({
@@ -1746,6 +1768,9 @@ export async function inspect(
       `走查结论 ${MAX_STRUCTURE_ATTEMPTS} 次都没通过校验：${lastProblems.join('；')}`,
     );
   }
+
+  // 删掉了不属于产品流程的步骤 → 打一行交代（删了什么、删了几步）。
+  reportDropped(`PAN-${req.number} inspect`, droppedSteps);
 
   const findings0 = structure.findings;
   stats.flows = structure.flows.length;

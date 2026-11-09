@@ -425,7 +425,12 @@ const PAGES_JSON = JSON.stringify({
   nodes: [
     { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE,
       anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']] },
-    { id: 'B', kind: 'decision', title: '是否登录？', anno: [['判定依据', '会话里有没有用户']] },
+    { id: 'B', kind: 'decision', title: '是否登录？',
+      steps: [
+        { from: '页面', to: '服务端', what: '提交当前登录状态' },
+        { from: '服务端', to: '服务端', what: '判断这个用户有没有登录过' },
+      ],
+      anno: [['判定依据', '会话里有没有用户']] },
     { id: 'C', kind: 'page', frame: 'phone', title: '选择宠物', html: PHONE,
       anno: [['字段', '宠物（列表单选）'], ['空态', '没有宠物时引导去建档']] },
     { id: 'D', kind: 'page', frame: 'phone', title: '跳转登录', html: PHONE,

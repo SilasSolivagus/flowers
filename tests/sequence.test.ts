@@ -5,15 +5,20 @@ import path from 'node:path';
 import { describe, expect, it, afterAll } from 'vitest';
 import {
   MAX_STEPS, MAX_WHAT_CHARS, PARTICIPANTS, SEQ_WIDTH, canonicalParticipant, elideText,
-  layoutSequence, normalizeSteps, renderSequencePage, sequenceSvg, stepLanguageProblem,
-  textWidth, wrapText, type Participant, type SeqStep,
+  layoutSequence, missingStepsReason, normalizeSteps, renderSequencePage, sequenceSvg,
+  stepLanguageProblem, textWidth, wrapText, type Participant, type SeqStep,
 } from '../src/core/uemaster/sequence.js';
 import { countHtmlBodyHits } from '../src/core/uemaster/body-language.js';
 import {
-  assembleWalkmap, fragmentsPrompt, fragmentsRepairPrompt, readFragments,
-  type PageFragment, type RequirementRow,
+  FLOW_DROP_RULE, assembleWalkmap, buildFlow, dropReportLine, droppedNotesIn, flowPrompt,
+  fragmentsPrompt, fragmentsRepairPrompt, readFragments, repairPrompt,
+  type ComposeDeps, type ComposeUsage, type PageFragment, type RequirementRow,
 } from '../src/core/uemaster/compose.js';
-import { verifyPrompt, verifyRepairPrompt } from '../src/core/uemaster/inspect.js';
+import {
+  readVerify, structurePrompt, structureRepairPrompt, verifyPrompt, verifyRepairPrompt,
+} from '../src/core/uemaster/inspect.js';
+import type { Trace } from '../src/core/uemaster/attempts.js';
+import type { ProviderConfig } from '../src/core/uemaster/provider.js';
 import {
   BUILD_SCRIPT, OUTPUT_FILE, WALKMAP_FILE, materializeWalkmap, validateWalkmap,
 } from '../src/core/uemaster/walkmap.js';
@@ -271,8 +276,6 @@ describe('拼装：后端节点 → 时序伪页面', () => {
       { node: 'B', page: 'backend-B', steps: 1 },
       { node: 'C', page: 'backend-C', steps: 2 },
     ]);
-    // 没有页面可挂，所以 detached 是空的——这正是「不再强行挂页面」
-    expect(assembly.detached).toEqual([]);
     // 片段里躺的是排好的 SVG
     expect(assembly.fragments['backend-A']).toContain('<svg class="seq-svg"');
     expect(assembly.fragments['backend-A']).toContain('1. 推送订单状态变化');
@@ -294,7 +297,28 @@ describe('拼装：后端节点 → 时序伪页面', () => {
     expect(report.errors.join('\n')).not.toContain('页面「空」');
   });
 
-  it('混合流程：页面节点照旧是页面，后端节点各拿一张图，互不影响', () => {
+  it('判为后端但没给步骤 → 不挂最近的页面，而是被拒（第三轮删掉的那条兜底）', () => {
+    // 这一条盯的是**兜底本身**：场景里**有**页面节点可挂（A 和 C），所以「挂最近的页面」
+    // 那条老逻辑一旦被放回来，B 会安安静静拿到 p-A 或 p-C、整份校验通过——读者于是看见
+    // 一屏界面，把一步服务端的事读成「这一步在界面上」。判据必须让它红。
+    const nodes: PageFragment[] = [
+      { id: 'A', title: '退款入口', kind: 'page', frame: 'phone',
+        html: '<div class="wt-screen"><div class="wt-body">可退 30 元</div></div>', anno: [] },
+      { id: 'B', title: '计算可退金额', kind: 'system', frame: 'phone', html: '', anno: [] },
+      { id: 'C', title: '退款结果', kind: 'page', frame: 'phone',
+        html: '<div class="wt-screen"><div class="wt-toast">退款已提交</div></div>', anno: [] },
+    ];
+    const assembly = assembleWalkmap({ nodes }, { title: 't', svg: SVG_ONE });
+    // 没有落点：不指向 p-A，也不指向 p-C
+    expect(assembly.walkmap.nodes['B']!.page).toBe('');
+    expect(assembly.sequences).toEqual([]);
+    const report = validateWalkmap(assembly.walkmap, { svg: SVG_ONE, fragments: assembly.fragments });
+    expect(report.ok).toBe(false);
+    // 兜底那句话（事实层面）——与读回话那一层的「判为后端流程但没有给出步骤」不是一句
+    expect(report.errors.join('\n')).toContain('节点 B 既没有页面也没有后端流程');
+  });
+
+  it('既没有页面也没有步骤的节点照旧被拒：一句话说清两条出路', () => {
     const nodes: PageFragment[] = [
       { id: 'A', title: '退款入口', kind: 'page', frame: 'phone',
         html: '<div class="wt-screen"><div class="wt-body">可退 30 元</div></div>', anno: [] },
@@ -342,11 +366,26 @@ describe('readFragments 收 steps', () => {
     expect(b.steps).toEqual([{ from: '服务端', to: '支付渠道', what: '发起退款' }]);
   });
 
-  it('服务端节点没给 steps → 不在这里判死（拼装与校验才是守门人）', () => {
+  it('服务端节点没给 steps → 整份退回，话里点名节点与缺的东西（Gap 1）', () => {
     const read = readFragments(doc(undefined), ['A', 'B']);
-    expect(read.ok).toBe(true);
-    if (!read.ok) return;
-    expect(read.doc.nodes.find((n) => n.id === 'B')!.steps).toBeUndefined();
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    // 逐字：这是运维/模型看到的那一句（`missingStepsReason` 是唯一措辞来源）
+    expect(read.why).toBe(
+      '节点「B 发起退款」判为后端流程但没有给出步骤：请说明这一步在服务端做什么'
+      + '（给 steps：「谁 → 谁 · 做什么」，1–12 步，每步 ≤28 字）',
+    );
+    // 与「既没有页面也没有后端流程」不是一句：那句说的是事实，这句说的是义务
+    expect(read.why).not.toContain('既没有页面也没有后端流程');
+  });
+
+  it('steps 是空数组 / 写成 null 也算「没给」：同一句话，不静默放行', () => {
+    for (const empty of [[], null]) {
+      const read = readFragments(doc(empty), ['A', 'B']);
+      expect(read.ok).toBe(false);
+      if (read.ok) continue;
+      expect(read.why).toContain('判为后端流程但没有给出步骤');
+    }
   });
 
   it('steps 里写了代码类名 → 退回，理由指出是第几步的哪一种问题', () => {
@@ -396,6 +435,116 @@ describe('提示词：两种节点 + 封闭词表', () => {
       expect(prompt).toContain('ShareController.refund()');
       expect(prompt).toContain('t_refund_order');
     }
+  });
+});
+
+describe('readVerify 收 steps（走查那条路，与 readFragments 同一句话）', () => {
+  const answer = (steps: unknown): string => JSON.stringify({
+    nodes: [
+      { id: 'A', kind: 'page', frame: 'phone', title: '分享页搜索入口',
+        html: '<div class="wt-screen"><div class="wt-body">文件列表</div></div>',
+        anno: [['一致', '工具栏已有搜索图标']] },
+      { id: 'B', kind: 'decision', title: '是否已输关键词', steps, anno: [['缺失', '没有这个判断']] },
+    ],
+  });
+
+  it('后端节点没给 steps → 整份退回（同一句中文，措辞不漂）', () => {
+    const read = readVerify(answer(undefined), ['A', 'B'], new Map());
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.why).toBe(missingStepsReason('B', '是否已输关键词'));
+    expect(read.why).toContain('判为后端流程但没有给出步骤');
+  });
+
+  it('给了 steps → 收下，html 是空串', () => {
+    const read = readVerify(
+      answer([{ from: '页面', to: '服务端', what: '带上输入的关键词' }]),
+      ['A', 'B'],
+      new Map(),
+    );
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect(read.doc.nodes.find((n) => n.id === 'B')!.steps).toEqual([
+      { from: '页面', to: '服务端', what: '带上输入的关键词' },
+    ]);
+  });
+});
+
+// ─── 6b. 不属于产品流程的步骤：提示词让模型删掉，删了要说一行（Gap 2） ───────
+
+/** 四条「流程」提示词共用的夹具：PRD 基线、空仓、上一版的引擎报告。 */
+const PRD = { url: 'u', markdown: '# PRD', hash: 'h', version: 'v1.0', chars: 5 };
+const FLOW_CHECK = {
+  ok: false, crossings: 1, overlaps: 0, textOverflow: 0, warnings: [], report: null,
+};
+
+describe('不属于产品流程的步骤（Gap 2）', () => {
+  it('四条流程提示词都写着「删掉」与「已删去：…」，且给了三个反例', () => {
+    const prompts = [
+      flowPrompt(REQ, 'inspect'),
+      repairPrompt(REQ, 'inspect', { mermaid: 'flowchart TD', check: FLOW_CHECK, shape: { nodes: [], edges: 0 } }),
+      structurePrompt(REQ, PRD, [], []),
+      structureRepairPrompt(REQ, PRD, [], [], '{"flows":[]}', ['节点 A 没有页面']),
+    ];
+    for (const prompt of prompts) {
+      // 判据 + 那一行的形状：两句都在，模型才知道「删」与「说清楚」是一件事的两半
+      expect(prompt).toContain('不属于产品流程');
+      expect(prompt).toContain('已删去：');
+      // 三个反例必须在：不给例子，模型会把线下动作硬画成一屏页面
+      expect(prompt).toContain('线下谁去搬货');
+      expect(prompt).toContain('第三方自己内部怎么处理');
+    }
+    // 「删掉」不是可选项的语气：它得说清「不删会变成假话」
+    expect(flowPrompt(REQ, 'inspect')).toContain('读者会以为那一步真的这样发生');
+  });
+
+  it('「已删去：…」只认整行开头的那个形状；图里的同名词、句子中间的提及都不算', () => {
+    const reply = [
+      'flowchart TD',
+      '  A["进入寄养频道"] --> B["已删去：这不是删改记录，只是节点文案"]',
+      '  B --> C["提交订单"]',
+      '我删掉了线下搬货那一步，所以这里不写。',
+      '已删去：线下谁去搬货',
+      '- 已去掉：第三方自己内部怎么处理',
+      '',
+    ].join('\n');
+    expect(droppedNotesIn(reply)).toEqual(['线下谁去搬货', '第三方自己内部怎么处理']);
+    // 空清单：一个字都没有（别把「今天没删」也写成一行）
+    expect(droppedNotesIn('flowchart TD\n  A["x"] --> B["y"]')).toEqual([]);
+  });
+
+  it('删了要打一行日志（谁、删了几步、删了什么）；一步没删就不打', () => {
+    const line = dropReportLine('PAN-815 inspect', ['线下谁去搬货']);
+    expect(line).toContain('[flow-drop]');
+    expect(line).toContain('PAN-815 inspect');
+    expect(line).toContain('已删去 1 个');
+    expect(line).toContain('线下谁去搬货');
+  });
+
+  it('buildFlow 把被接受那一版的删除清单交出来（说了就得有人读）', async () => {
+    const cfg: ProviderConfig = { baseUrl: 'http://127.0.0.1:1', apiKey: 'k', model: 'm' };
+    const trace: Trace = { jobId: null, model: 'm', write: async () => {} };
+    const deps: ComposeDeps = {
+      complete: async () => ({
+        ok: true,
+        text: [
+          'flowchart TD',
+          '  A["进入寄养频道"] --> B["选择宠物"]',
+          '  B --> C["提交订单"]',
+          '已删去：线下谁去搬货',
+        ].join('\n'),
+      }),
+      render: async () => ({
+        ok: true, crossings: 0, overlaps: 0, textOverflow: 0, warnings: [], report: null,
+        svg: SVG_ONE,
+      }),
+      resolveConfig: async () => cfg,
+      build: async () => ({ ok: false, errors: [], warnings: [] }),
+    };
+    const flow = await buildFlow(cfg, REQ, 'inspect', deps, { prompt: 0, completion: 0 }, trace);
+    expect(flow.dropped).toEqual(['线下谁去搬货']);
+    // 图本身没被那一行污染（它不在 mermaid 里）
+    expect(flow.mermaid).not.toContain('已删去');
   });
 });
 

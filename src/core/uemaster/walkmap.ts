@@ -109,6 +109,12 @@ export type PageInput = { id: string; frame: Frame; html: string; kind?: 'sequen
  * - 后端节点（`system` / `decision`）给了时序步骤时，`page` 是它的伪页面 `backend-<id>`；
  * - 两者都没有的节点会被 `validateWalkmap` 拒收（那句话原来叫「页面「空」」，现在说清
  *   「既没有页面也没有后端流程」）。
+ *
+ * 第三轮（同日）不再给第三种节点兜底：原来「判为后端但没步骤」会被挂到最近的页面节点上，
+ * 那条兜底产出的是一句假陈述（读者以为那一步有界面），已删掉。现在这种节点在生成路径上
+ * 由 `compose.readFragments` / `inspect.readVerify` 用 `missingStepsReason` 更早、更具体
+ * 地退回（「判为后端流程但没有给出步骤」）；能走到这里的只剩「既没有页面也没有步骤」，
+ * 由 `validateWalkmap` 第 4 条说。**两句话不合并**：一句说意图与义务，一句说事实。
  */
 export type NodeInput = {
   id: string;
@@ -339,6 +345,12 @@ export function validateWalkmap(
   // 而那句话是「引用了不存在的页面「空」」——没人看得懂。现在挂载规则改了（后端节点
   // 拿到自己的时序伪页面），**这条判据一字不让**：既没页面也没步骤的节点照旧拒收，
   // 但话改成能照着改的说法。
+  //
+  // 它为什么**不是**「判为后端但没步骤」的那句话（`missingStepsReason`）：契约里没有
+  // `kind` 这一格，这一层只看得见「没有落点」这个事实，看不见模型的意图。所以两句分工：
+  // 读回话那一层说「你判它是服务端的事，就说明它在服务端做什么」（能照着补），这一层说
+  // 「它既没有页面也没有后端流程」（兜底，防的是绕过提示词直接拼 walkmap 的调用方）。
+  // 合并成一句的代价：模型不知道该补 steps 还是该换回页面——那正好是两件不同的事。
   for (const [id, meta] of Object.entries(walkmap.nodes)) {
     if (!pageIds.has(meta.page)) {
       errors.push(

@@ -336,6 +336,10 @@ const VERIFY_OK = JSON.stringify({
     },
     {
       id: 'B', kind: 'decision', title: '是否已输关键词',
+      steps: [
+        { from: '页面', to: '服务端', what: '带上输入的关键词' },
+        { from: '服务端', to: '服务端', what: '判断关键词是不是空的' },
+      ],
       anno: [['缺失', 'PRD 要求空关键词不请求，代码里没有这个判断']],
     },
     {

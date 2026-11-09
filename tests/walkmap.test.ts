@@ -427,7 +427,12 @@ describe('composeEvaluation → build.py 的产物', () => {
       nodes: [
         { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A,
           anno: [['内容', '按距离列出可寄养门店']] },
-        { id: 'B', kind: 'decision', title: '是否签约？', anno: [['判定依据', '会话里有没有签约主体']] },
+        { id: 'B', kind: 'decision', title: '是否签约？',
+        steps: [
+          { from: '页面', to: '服务端', what: '提交当前签约状态' },
+          { from: '服务端', to: '服务端', what: '判断客户有没有签约主体' },
+        ],
+          anno: [['判定依据', '会话里有没有签约主体']] },
         { id: 'C', kind: 'page', frame: 'phone', title: '寄养首页', html: PHONE_A_MODAL,
           anno: [['状态', '未预约时展示入口']] },
       ],
@@ -457,8 +462,11 @@ describe('composeEvaluation → build.py 的产物', () => {
     expect(html).toContain('wt-statusbar');
     expect(html).toContain('wt-modal');
     expect(html).toContain('wt-bottombar');
-    // 判断节点没有自己的页面，挂在最近的那个页面上（build.py 用 json.dumps 的默认分隔符）
-    expect(html).toContain('"B": {"page": "p-A"');
+    // 判断节点**不**挂到最近的页面上（2026-11-09 第三轮删掉的那条兜底）：它有自己的
+    // 时序伪页面 `backend-B`，进的是第三格（build.py 用 json.dumps 的默认分隔符）。
+    expect(html).toContain('"B": {"page": "backend-B"');
+    expect(html).toContain('id="backend-B"');
+    expect(html).toContain('class="seq-svg"');
     // 节点标注进了右栏
     expect(html).toContain('按距离列出可寄养门店');
     expect(html).toContain('会话里有没有签约主体');
@@ -478,7 +486,7 @@ describe('composeEvaluation → build.py 的产物', () => {
     expect(ask).toContain("goNode('节点id')");
   });
 
-  it('校验不通过（节点没有页面）→ 重问一次，仍不通过才失败；构建器一次都没跑', async () => {
+  it('节点被判为后端却没给步骤 → 重问一次，仍不通过才失败；构建器一次都没跑', async () => {
     let built = 0;
     const noPage = JSON.stringify({
       nodes: [
@@ -501,8 +509,11 @@ describe('composeEvaluation → build.py 的产物', () => {
 
     expect(error.code).toBe('pages_rejected');
     expect(error.message).toContain('页面片段 2 次都没通过校验');
-    // 第二次的失败原因是「一个页面片段都没有」——校验器的原话，不是我们改写的一句
-    expect(error.message).toContain('一个页面片段都没有');
+    // 第二次的失败原因是「判为后端流程但没有给出步骤」——读回话那一层的原话（Gap 1），
+    // 说清缺什么、该怎么补；不是「一个页面片段都没有」那句事实陈述（两句不合并）
+    expect(error.message).toContain('判为后端流程但没有给出步骤');
+    expect(error.message).toContain('节点「A 是否签约？」');
+    expect(error.message).not.toContain('一个页面片段都没有');
     expect(built).toBe(0);
     expect(fake.prompts).toHaveLength(3);
     expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate.html`)).toBe(false);
@@ -512,14 +523,24 @@ describe('composeEvaluation → build.py 的产物', () => {
     const bad = JSON.stringify({
       nodes: [
         { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: '<div class="card">门店列表</div>', anno: [] },
-        { id: 'B', kind: 'decision', title: '是否签约？', anno: [] },
+        { id: 'B', kind: 'decision', title: '是否签约？',
+        steps: [
+          { from: '页面', to: '服务端', what: '提交当前签约状态' },
+          { from: '服务端', to: '服务端', what: '判断客户有没有签约主体' },
+        ],
+          anno: [] },
         { id: 'C', kind: 'page', frame: 'phone', title: '寄养首页', html: PHONE_A, anno: [] },
       ],
     });
     const good = JSON.stringify({
       nodes: [
         { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [] },
-        { id: 'B', kind: 'decision', title: '是否签约？', anno: [] },
+        { id: 'B', kind: 'decision', title: '是否签约？',
+        steps: [
+          { from: '页面', to: '服务端', what: '提交当前签约状态' },
+          { from: '服务端', to: '服务端', what: '判断客户有没有签约主体' },
+        ],
+          anno: [] },
         { id: 'C', kind: 'page', frame: 'phone', title: '寄养首页', html: PHONE_A_MODAL, anno: [] },
       ],
     });
@@ -538,7 +559,12 @@ describe('composeEvaluation → build.py 的产物', () => {
     const fake = fakeProvider([SMALL_FLOW, JSON.stringify({
       nodes: [
         { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [] },
-        { id: 'B', kind: 'decision', title: '是否签约？', anno: [] },
+        { id: 'B', kind: 'decision', title: '是否签约？',
+        steps: [
+          { from: '页面', to: '服务端', what: '提交当前签约状态' },
+          { from: '服务端', to: '服务端', what: '判断客户有没有签约主体' },
+        ],
+          anno: [] },
         { id: 'C', kind: 'page', frame: 'phone', title: '寄养首页', html: PHONE_A_MODAL, anno: [] },
       ],
     })]);

@@ -194,6 +194,24 @@ export function normalizeSteps(raw: unknown): StepRead {
   return { ok: true, steps };
 }
 
+/**
+ * 后端节点没有交步骤时的那一句话（2026-11-09 第三轮，全仓唯一的措辞来源）。
+ *
+ * 为什么在**读回话那一层**就把整份退回，而不是留给 `validateWalkmap`：模型在这里能一次
+ * 改对——「你把这一步判成了后端流程，但没说它在服务端做什么」。而 walkmap 那一层看不见
+ * `kind`（契约里没有这一格），它能说的只有「既没有页面也没有后端流程」；两句话意思不同，
+ * 不能合并：这一句说的是**意图与义务**（你判它是服务端的事，那就说明它做了什么），那一句
+ * 说的是**事实**（这个节点没有落点）。运维看到哪一句，就知道该让模型补什么。
+ *
+ * 为什么这件事值得整份拒收：上一版把这种节点挂到最近的页面上，读者于是看见一屏界面，
+ * 把一步发生在服务端的事读成「这一步在界面上」——这正是本仓这一天在清的那类假陈述。
+ * 旧材料在磁盘上是静态 HTML，不会被重新生成，所以变严格只影响**新生成**的材料。
+ */
+export function missingStepsReason(id: string, title: string): string {
+  return `节点「${id} ${title}」判为后端流程但没有给出步骤：请说明这一步在服务端做什么`
+    + `（给 steps：「谁 → 谁 · 做什么」，1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）`;
+}
+
 /** 参与方（按首次出现排序，去重）。排版按这个顺序排列。 */
 export function participantsOf(steps: readonly SeqStep[]): Participant[] {
   const seen = new Set<Participant>();

@@ -23,7 +23,7 @@ import {
 } from './provider.js';
 import { ARTIFACT_ROOT, artifactUrl } from './store.js';
 import {
-  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, normalizeSteps, renderSequencePage,
+  MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, missingStepsReason, normalizeSteps, renderSequencePage,
   type SeqStep,
 } from './sequence.js';
 import {
@@ -324,6 +324,73 @@ export function fragmentsSurfacesBlock(known: KnownSurfaces): string[] {
 }
 
 /**
+ * 「既不是页面、也不是服务端动作的步骤，从流程里删掉」——流程图提示词里的那一段（2026-11-09 第三轮）。
+ *
+ * 为什么需要这一段：节点分类学只有两种（落在页面上 / 发生在服务端），而 PRD 里总混着
+ * 第三种东西——「第三方自己内部怎么处理」「线下谁去搬货」「开会评审这件事本身」。它们
+ * 既不会被用户在界面上看见，也不会由我们的服务端执行，**不属于我们产品的流程**。
+ * 模型原来只有两条坏路：硬画一屏界面（读者以为这一步有页面），或者硬写一组参与方
+ * （读者以为服务端在做这件事）——两种都是假话，而这一整天清的就是这类假陈述。
+ * 正确的做法是从图里删掉：少一步，读者不会读错；多一步编的，读者一定读错。
+ *
+ * 为什么要求它「删掉时说一行」：删掉一个 PRD 里写过的步骤而不说，读者会以为材料漏了。
+ * 那一行（`已删去：<原步骤文案>`，`droppedNotesIn` 收走、`buildFlow` 用一行日志交代）
+ * 让复核的人不去比对 PRD 也知道少了什么。
+ *
+ * 为什么提示词不是唯一防线：模型可能照样画出来，甚至给一屏编出来的界面。那时
+ * `readFragments` / `readVerify` 的「判为后端流程但没有给出步骤」与 `validateWalkmap`
+ * 的「既没有页面也没有后端流程」会把它整份退回——**宁可整份失败，也不要静默漏一步或
+ * 静默编一步**，这是这条规则的下限。
+ */
+export const FLOW_DROP_RULE: readonly string[] = [
+  '不属于产品流程的步骤不要画：一个步骤如果既不是用户在界面上能看到的，也不是服务端会做的事',
+  '（例如「第三方自己内部怎么处理」「线下谁去搬货」「开会评审这件事本身」），把它从图里去掉。',
+  '硬画成页面或硬写成服务端动作，读者会以为那一步真的这样发生。',
+  '去掉之后在最后单独一行写「已删去：<原步骤文案>」——删了却不说，读者会以为材料漏了一步；',
+  '一个都没去掉就什么都不要写（这一行不是必填）。',
+] as const;
+
+/**
+ * 从模型的流程图回话里收走「已删去：…」那几行。
+ *
+ * 判据刻意窄：整行以「已删去」/「已去掉」/「已略去」开头（允许前面的列表符号与引用符），
+ * 冒号（半角全角都收）之后才是原步骤文案。为什么不扫正文里的同名词：那一行是**回话的
+ * 附带说明**，不是图的一部分——图里的节点文案里出现这几个字是正常的，不能当成删改记录。
+ * 为什么行内别的位置不认：模型偶尔在解释里写「我删掉了 X」，那是它在自言自语；我们要的是
+ * 一个固定形状（像 `searched` 那一格），这样它每次都得说，而我们也总能读。
+ */
+const DROP_NOTE = /^[\s>•·\-*]*(?:已删去|已去掉|已略去)\s*[:：]\s*(.+)$/u;
+
+export function droppedNotesIn(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.split('\n')) {
+    const hit = DROP_NOTE.exec(raw.trim());
+    if (hit === null) continue;
+    const what = (hit[1] ?? '').trim();
+    if (what !== '') out.push(what);
+  }
+  return out;
+}
+
+/**
+ * 「删了几步」那一行日志。
+ *
+ * 为什么走 stderr 而不是写进材料：这一行是**流水线的交代**（这一次删了什么），读者拿它
+ * 对账用；写进材料里的位置应该由材料自己的版式决定，那是另一件事。与 `[body-language]`
+ * 那一行同一个口径（见 `body-language.ts` 的 `reportVocab`）：不拦材料，但必须被看见。
+ */
+export function dropReportLine(tag: string, dropped: readonly string[]): string {
+  return `[flow-drop] ${tag} 已删去 ${dropped.length} 个不属于产品流程的步骤：${dropped.join('、')}`;
+}
+
+/** 一行日志（删除清单为空时一个字都不打——「今天没删」不值得占一行）。 */
+export function reportDropped(tag: string, dropped: readonly string[]): number {
+  if (dropped.length === 0) return 0;
+  process.stderr.write(`${dropReportLine(tag, dropped)}\n`);
+  return dropped.length;
+}
+
+/**
  * 图这一关的提示词。
  *
  * 为什么把子集规则**抄进提示词**而不是说「按 flowspec-v1.md 画」：模型读不到文件。
@@ -372,7 +439,10 @@ export function flowPrompt(
     '    任何解释性文字（不要「以下是流程图」这类开场白）。',
     ' 6b. 节点文案是**产品语言**：写用户在做什么（「选择要分享的文件」），不要写文件路径、',
     '    函数名或行号——读者是 PM，代码坐标由系统放进材料末尾的「研发参考」，不写进图里。',
-    ' 7. 不要 ``` 代码围栏。第一行就是 flowchart TD，最后一行是最后一条连线。',
+    ' 7. 不要 ``` 代码围栏。第一行就是 flowchart TD，最后一行是最后一条连线——唯一例外是',
+    '    下面那条「已删去：…」（它写在最后，只写一行）。',
+    '',
+    ...FLOW_DROP_RULE,
     '',
     '只输出 mermaid 源码本身。',
   ].join('\n');
@@ -466,6 +536,8 @@ export function repairPrompt(
     '',
     '其余规则不变：第一行 flowchart TD；3–8 个节点；单主干 + 右分支；判断出边带「是」「否」；',
     '不要代码围栏、不要解释文字，只输出修好后的 mermaid 源码。',
+    '',
+    ...FLOW_DROP_RULE,
   ].join('\n');
 }
 
@@ -673,8 +745,9 @@ function toAnno(pairs: string[][]): Anno[] {
  * 与 `readPages` 同一套覆盖率口径（少一个节点就重来：空壳页面在评审里比「没有这一步」
  * 更误导），多出来的是 kind 的义务：`page` 必须有能看的一屏 html，`system` / `decision`
  * 不许有（它们没有页面，硬画一个就是编），而且**必须给时序步骤**（2026-11-09）：
- * 后端节点没有页面，它的原型就是那张时序图；不给步骤的节点在拼装阶段会挂到空页面上，
- * 整份材料会被 `validateWalkmap` 拒收——那一次调用就白花了。所以在模型这一侧先说清。
+ * 后端节点没有页面，它的原型就是那张时序图；不给步骤就等于「判了它是服务端的事，却不说
+ * 它做了什么」，整份退回（`missingStepsReason`）。上一版这里放过它、交给拼装阶段挂页面，
+ * 结果读者把服务端的一步读成「界面上有这一屏」——那次收紧是本轮 Gap 1。
  *
  * 这一层**不查** `wt-*` 类与 emoji：那是 walkmap 契约的事，由 `validateWalkmap` 说，
  * 报错格式也统一在那里（一句话、可重试）。两层分工清楚，错误就不会两处各说一半。
@@ -710,16 +783,20 @@ export function readFragments(
     }
 
     /**
-     * 后端节点的时序步骤（2026-11-09）。**给了就必须合格，没给不在这里判死**：
-     * 提示词要求后端节点交 steps，但「没有页面」这件事的守门人是 `validateWalkmap`
-     * ——那里才是这条事故（`PAN-815` 整份被拒）的判据所在。在这里再判一次有两个坏处：
-     * 1. 旧材料里那些只有一句标注的判断节点会集体变成硬错（它们原来跟着页面走，是对的）；
-     * 2. 「没有 steps」与「steps 写错」混成同一句话，模型不知道该补还是该改。
-     * 所以：没有 steps → 空数组，拼装时按老办法挂最近的页面（没有页面才会被拒收）；
-     * 有 steps 但写错 → 立刻退回，并把「第几步、哪个词不在词表里」带给模型。
+     * 后端节点的时序步骤（2026-11-09）。**判为后端就必须给步骤**（第三轮收紧的地方）：
+     * 上一版这里放过「没有 steps」的节点，由拼装阶段挂到最近的页面节点上——那是为了让
+     * 旧材料不变样。代价是一句假话：一步发生在服务端的事，读者会看见一屏界面，于是得出
+     * 「这一步在界面上」。现在改成整份退回，理由与措辞见 `missingStepsReason`。
+     *
+     * 两种错**不混成一句**：没给 steps → 那句话（说清缺什么、该怎么补）；给了但写错 →
+     * 「节点 X 的第 2 步：…」（说清是哪一步、哪个词不合格）。前者是义务，后者是写法。
      */
     let steps: SeqStep[] = [];
-    if (node.kind !== 'page' && node.steps !== undefined && node.steps !== null) {
+    if (node.kind !== 'page') {
+      // 空数组与「没给」是同一件事：都等于没说这一步在服务端做什么（旧版正因为它走了兜底）。
+      const blank = node.steps === undefined || node.steps === null
+        || (Array.isArray(node.steps) && node.steps.length === 0);
+      if (blank) return { ok: false, why: missingStepsReason(node.id, node.title) };
       const read = normalizeSteps(node.steps);
       if (!read.ok) return { ok: false, why: `节点 ${node.id} 的 ${read.why}` };
       steps = read.steps;
@@ -758,8 +835,6 @@ export type Assembly = {
   walkmap: Walkmap;
   /** 页面 id → 片段原文。`renderWalkthrough` 会把它落成真实文件。 */
   fragments: Record<string, string>;
-  /** 没有自己的页面、被挂到别的节点页面上的环节（判断 / 系统）。 */
-  detached: Array<{ node: string; page: string }>;
   /**
    * 拿到时序伪页面的节点（2026-11-09）：`page` 是 `backend-<节点id>`。
    *
@@ -799,10 +874,16 @@ export type Assembly = {
  *    系统/判断步骤，于是六个节点都挂到空字符串上，`validateWalkmap` 整份拒收
  *    （「引用了不存在的页面「空」」，连试两轮都出不来）。owner 的裁定是「没有页面的
  *    节点不再强行挂页面，改成挂后端流程区块，页面原型那一栏放一张时序图」。
- * 4. **既没有页面也没有步骤的节点**才退回老办法（挂最近的页面节点），一个页面节点都
- *    没有时它会以空页面身份留下来，由 `validateWalkmap` 用一句能照着改的中文拒收。
- *    保留这一条是为了「旧材料不因本次改动而变样」：走查里那些只有一句标注的判断节点，
- *    照旧跟着它所在的那个页面走。
+ * 4. **判为后端却没有步骤的节点不留任何页面**（2026-11-09 第三轮删掉的那条兜底）：
+ *    原来它会被挂到**最近的页面节点**上（先往前找、再往后找），理由是「旧材料不许因为
+ *    这次改动而变样」。那条理由站不住：兜底产出的是一句**假陈述**——一步发生在服务端的事，
+ *    读者在左栏点开它，看到的是邻居那一屏，于是得出「这一步在界面上」。它也正是本项目
+ *    这一天在清的那一类缺陷。
+ *
+ *    现在这种节点会以「既没有页面也没有后端流程」被 `validateWalkmap` 拒收（那句旧话在
+ *    `walkmap.ts` 第 4 条）。正常生成路径上它更早被拦住：`readFragments` / `readVerify`
+ *    用 `missingStepsReason` 整份退回，那句话说得更具体（判为后端流程、缺 steps）。
+ *    两句**不合并**：一句说意图与义务，一句说事实。
  *
  * 纯函数：不读磁盘、不看时钟。同一份片段永远得到同一份 walkmap。
  */
@@ -829,24 +910,9 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
   const fragments: Record<string, string> = {};
 
   const nodes: NodeInput[] = [];
-  const pageNode = new Map<string, NodeInput>();
-  const detached: Array<{ node: string; page: string }> = [];
   const sequences: Array<{ node: string; page: string; steps: number }> = [];
 
-  /** 折标注用：离这个下标最近的页面节点（先往前找、再往后找）。 */
-  const nearestPage = (index: number): NodeInput | undefined => {
-    for (let i = index - 1; i >= 0; i -= 1) {
-      const hit = pageNode.get(nodes0[i]!.id);
-      if (hit !== undefined) return hit;
-    }
-    for (let i = index + 1; i < nodes0.length; i += 1) {
-      const hit = pageNode.get(nodes0[i]!.id);
-      if (hit !== undefined) return hit;
-    }
-    return undefined;
-  };
-
-  nodes0.forEach((fragment, index) => {
+  nodes0.forEach((fragment) => {
     if (fragment.kind !== 'page' || fragment.html === '') {
       // ① 后端节点带步骤 → 它自己的时序伪页面（本次改动的核心，见上面规则 3）。
       const steps = fragment.steps ?? [];
@@ -866,15 +932,11 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
         return;
       }
 
-      // ② 没有步骤 → 老办法：挂最近的页面节点（规则 4）。
-      const host = nearestPage(index);
-      // 没有任何页面节点时校验会说「一个页面片段都没有」；这里先按无页面记。
-      if (host === undefined) {
-        nodes.push({ id: fragment.id, title: fragment.title, kind: fragment.kind, anno: fragment.anno });
-        return;
-      }
-      detached.push({ node: fragment.id, page: host.page ?? '' });
-      nodes.push({ id: fragment.id, title: fragment.title, kind: fragment.kind, page: host.page, anno: fragment.anno });
+      // ② 判为后端却没有步骤 → **不留任何页面**（规则 4）：兜底挂页面会说假话。
+      //    这里不抛：`assembleWalkmap` 是纯函数，它只把事实摊开（这个节点没有落点），
+      //    由 `validateWalkmap` 用一句能照着改的中文拒收。生成路径上更早的一句话在
+      //    `readFragments` / `readVerify`（`missingStepsReason`）。
+      nodes.push({ id: fragment.id, title: fragment.title, kind: fragment.kind, anno: fragment.anno });
       return;
     }
 
@@ -894,14 +956,12 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
       page: pageId,
       anno: fragment.anno,
     };
-    pageNode.set(fragment.id, node);
     nodes.push(node);
   });
 
   return {
     walkmap: buildWalkmap({ title: opts.title, svg: opts.svg, nodes, pages }),
     fragments,
-    detached,
     sequences,
     moved,
     annoRaw,
@@ -1116,7 +1176,19 @@ export async function buildFlow(
   usage: ComposeUsage,
   trace: Trace,
   known: KnownSurfaces = EMPTY_SURFACES,
-): Promise<{ mermaid: string; check: FlowCheck; attempts: number; usage: ComposeUsage }> {
+): Promise<{
+  mermaid: string;
+  check: FlowCheck;
+  attempts: number;
+  usage: ComposeUsage;
+  /**
+   * 模型在这一版里**主动删掉**的步骤（`已删去：…` 那几行，见 `FLOW_DROP_RULE`）。
+   *
+   * 为什么要交出来：删掉一个 PRD 里写过的步骤而没人知道，读者会以为材料漏了。这一格
+   * 让调用方打一行日志交代清楚，不用去比对 PRD 才知道少了什么。
+   */
+  dropped: string[];
+}> {
   let prompt = flowPrompt(req, stage, known);
   let spent = usage;
 
@@ -1136,6 +1208,9 @@ export async function buildFlow(
     spent = addUsage(spent, reply.usage);
 
     const mermaid = mermaidIn(reply.text);
+    // 「已删去：…」是回话里图之外的那几行（`mermaidIn` 会在第一条不像 mermaid 的行处停下，
+    // 所以它们不会污染图）；只在这一版被接受时交出去，前几版的删改记录已经不生效了。
+    const dropped = droppedNotesIn(reply.text);
     const shape = parseFlow(mermaid);
     const check = await deps.render(mermaid);
     const tooSmall = shape.nodes.length < MIN_NODES || shape.edges < MIN_EDGES;
@@ -1156,7 +1231,7 @@ export async function buildFlow(
     });
 
     if (check.ok && !tooSmall) {
-      return { mermaid, check, attempts: attempt, usage: spent };
+      return { mermaid, check, attempts: attempt, usage: spent, dropped };
     }
 
     if (attempt === MAX_FLOW_ATTEMPTS) {
@@ -1310,6 +1385,9 @@ export async function composeEvaluation(
 
   const flow = await buildFlow(cfg, req, stage, full, usage, trace, known);
   usage = flow.usage;
+  // 模型删掉了不属于产品流程的步骤 → 打一行交代（删了什么、删了几步）。
+  // 这一行不是「警告」也不是「失败」：删对了就是对的，只是复核的人得看得见。
+  reportDropped(`PAN-${req.number} ${stage}`, flow.dropped);
 
   const svg = flow.check.svg ?? '';
   // 节点清单只解析一次：提示词 2、拼 walkmap、日志都用它，三处不会漂。
