@@ -44,6 +44,23 @@ import type { MirrorResult, RepoRef } from './mirror.js';
  * 分支写错时 `head()` 读到的是另一个分支的最新提交，`mirror_health` 显示「很新」，
  * 而材料对着的是错的代码。所以分支是每仓一格，且是必填（不猜默认值）。
  *
+ * ── 路径为什么在清单里（2026-11-09，这是 34 个仓「不存在」的真正原因）
+ *
+ * 克隆地址原来是**拼**的：`https://…/60f9058e68e2993a8e6d0750/123pan/<仓名>.git`。
+ * 拼法把「仓在哪个组」写死成 `123pan`。而 `ListRepositories`（`x-total: 144`）的真实返回
+ * 里，多数仓在**组织根**（`…/artifacts.git`）、少数在 `123pan/`、`cdn-groups/`、
+ * `test-groups/`。于是我们拿 `…/123pan/artifacts.git` 去问，远端答
+ * `未知的仓库路径`——一句听起来像「这个仓不存在」的话；证据（`repo_coverage.error`）
+ * 于是被写成了「不存在」，而真相是**我们问错了地址**。
+ *
+ * 所以清单多一格 `path=`，值是**组织相对、含仓名**的整条路径（与 `real-repos.tsv`
+ * 第二列逐字相同）：`apisrv`（根）、`123pan/apisrv`、`cdn-groups/beats`。
+ * 克隆地址 = `CODEUP_ORG` + `/` + `path` + `.git`，**只在 `cloneUrlOf()` 一处拼**。
+ *
+ * 镜像目录名仍然是**裸仓名**（`/srv/123pan-mirror/<仓名>.git`）：66 个已有镜像不用改名，
+ * 而 `path` 的最后一段被强制等于仓名（见 `parseRepoInventory` 的校验），所以
+ * 「目录叫 A、地址指着 B」这种安静错法在解析阶段就不可能发生。
+ *
  * ── 第三格 `stale_after_days` 为什么在这里（2026-11-09）
  *
  * 镜像新鲜度的判据一直是**全局一个数**（`MIRROR_STALE_DAYS = 7`）。仓少的时候够用，仓多
@@ -65,6 +82,28 @@ import type { MirrorResult, RepoRef } from './mirror.js';
 
 /** 服务器上 bare 镜像的根目录。与 `scripts/sync-mirrors.sh` 的 `MIRROR_ROOT` 同一个默认值。 */
 export const DEFAULT_MIRROR_ROOT = '/srv/123pan-mirror';
+
+/**
+ * codeup 的**组织根**（不是 `123pan` 组）。克隆地址 = `CODEUP_ORG/<path>.git`。
+ *
+ * ── 为什么这一层必须存在（2026-11-09 的那次根因）
+ *
+ * 在这之前，克隆地址是**拼**出来的：`${CODEUP_ORG}/123pan/${仓名}.git`。这个拼法把
+ * 「仓在哪个组」这件事写死成了 `123pan`。而 `ListRepositories` 的真实返回（144 个仓）里，
+ * 大部分仓就在**组织根**下（`…/artifacts.git`）、少数在 `123pan/`、`cdn-groups/`、
+ * `test-groups/` 下。于是那 26 个仓的失败长得像「仓不存在」（`未知的仓库路径`），
+ * 而实际上是**我们问错了地址**：`…/123pan/artifacts.git` 当然不存在，
+ * 存在的是 `…/artifacts.git`。
+ *
+ * 这就是为什么清单要带 `path=`：组路径是**仓的属性**，不是可以拼出来的常量。
+ */
+export const CODEUP_ORG = 'https://codeup.aliyun.com/60f9058e68e2993a8e6d0750';
+
+/**
+ * 清单里没写 `path=` 时的兜底组。故意等于历史默认值——旧清单（只有 `仓名 分支`）逐行
+ * 读出来仍然指向它原来指向的那个地址，不会因为这次改格式而全体漂到别处。
+ */
+export const DEFAULT_GROUP = '123pan';
 
 /** 清单里没写分支时的兜底。**故意只用于「这一行只有仓名」这种明确省略**，见 `parseRepoInventory`。 */
 export const FALLBACK_BRANCH = 'master';
@@ -94,6 +133,17 @@ export const REPO_NAME_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** 分支名的形状：git 自己允许的字符很宽，这里只拦最危险的那几个（空格 / `..` / 控制字符）。 */
 export const BRANCH_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+/**
+ * 组路径（清单里的 `path=`）的形状：一段或多段，用 `/` 连接，如 `123pan/apisrv`、
+ * `cdn-groups/go-protobuf`、`apisrv`（组织根）。
+ *
+ * 为什么**允许** `/`（而仓名不允许）：这两者进的是完全不同的位置。仓名进服务器路径
+ * （`/srv/123pan-mirror/<仓名>.git`），一个 `/` 就是一次路径穿越；组路径只进 URL 的
+ * 路径段（`…/<path>.git`），它本来就是多级的。`..` 仍然一律拒绝——URL 里出现 `..`
+ * 一样是一次上跳，且它从来不是任何一个真仓的路径。
+ */
+export const REPO_PATH_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
 
 /**
  * 「上游多少天没有新提交才算旧」的默认值。与 `health.ts` 的 `MIRROR_STALE_DAYS` 是同一个数，
@@ -129,6 +179,15 @@ export const STALE_NEVER = 'never';
 export type InventoryLine = {
   id: string;
   branch: string;
+  /**
+   * **组织相对的克隆路径**（清单第二格 `path=`），与 `real-repos.tsv` 的第二列逐字相同：
+   * `123pan/apisrv`、`cdn-groups/go-protobuf`、`apisrv`（组织根）。
+   *
+   * 为什么它不是「组名」而是「整条路径」：TSV 里给的、API 的 `pathWithNamespace` 给的，
+   * 都是**含仓名**的那一整条。把它拆成「组 + 名」只会多一次拼装（也就多一次拼错的机会），
+   * 而 `…/<path>.git` 只需要一次字符串连接。所以这一格的最后一段必须等于 `id`（下面有校验）。
+   */
+  path: string;
   line: number;
   staleAfterDays: number | null;
 };
@@ -140,6 +199,19 @@ export type Inventory = {
   /** 文件里出现的注释/空行数，只为「这份清单确实被读到了」的可观察性。 */
   skipped: number;
 };
+
+/**
+ * 第三格之一：`never` 或 1–999999 的整数 → 阈值；其余（含 `0`、`-1`、`7d`）→ `undefined`
+ * （调用方负责报错，因为报错要带行号）。
+ *
+ * `undefined` 与 `null` 是两件事：`null` 是「never」这个**合法答案**，`undefined` 是
+ * 「这一格根本不是一个阈值」。混成一个值，`a master 0` 就会变成「永不为旧」。
+ */
+function parseStaleCell(raw: string): number | null | undefined {
+  if (raw.toLowerCase() === STALE_NEVER) return null;
+  if (/^[1-9][0-9]{0,5}$/.test(raw)) return Number(raw);
+  return undefined;
+}
 
 /**
  * 解析清单文本。
@@ -178,13 +250,6 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
           + '（它会被拼成 /srv/123pan-mirror/<仓名>.git）',
       };
     }
-    if (cells.length > 3) {
-      return {
-        ok: false, code: 'bad_config',
-        message: `第 ${lineNo} 行多了 ${cells.length - 3} 格：「${trimmed}」`
-          + '（格式是「仓名<空白>分支[<空白>stale_after_days]」，注释只能整行）',
-      };
-    }
     let branch = branchCell;
     if (branch === '') {
       // 只有仓名：当成「明显省略」。给一个提示而不是静默——猜错分支的错法是安静的。
@@ -197,35 +262,125 @@ export function parseRepoInventory(text: string): MirrorResult<Inventory> {
         message: `第 ${lineNo} 行的分支「${branch}」形状不合法（不许空格、不许 ..）`,
       };
     }
-    // 第三格：可选。**不写 = 走默认 7 天**（而不是「不报」）——默认值必须是「照常提醒」，
-    // 否则漏写一格会把一个真停摆的仓静音，而漏写是加仓时最容易发生的事。
+    // ─── 第三格起：`key=value`（keys: path / stale）───
+    //
+    // 为什么是 key=value 而不是再加两个位置格：位置格一旦超过两个，「哪一格是 stale、
+    // 哪一格是 path」就只能靠数格子，而 `stale_after_days` 是**可选**的——可选的位置格
+    // 与「下一个位置格」天生分不开（`a master 365` 到底是 stale 还是 path？）。
+    // 带名字的格子没有这个歧义，也允许以后加格而不动前两格。
+    //
+    // 兼容：第三格如果**光着**写 `never` 或正整数，仍按 `stale_after_days` 读
+    // （历史格式）。这个兼容是安全的：没有任何组路径是「全数字」或「never」。
+    let path = '';
     let staleAfterDays: number | null = DEFAULT_STALE_AFTER_DAYS;
-    if (cells.length === 3) {
-      const cell = cells[2] ?? '';
-      if (cell.toLowerCase() === STALE_NEVER) {
-        staleAfterDays = null;
-      } else if (/^[1-9][0-9]{0,5}$/.test(cell)) {
-        staleAfterDays = Number(cell);
-      } else {
-        return {
-          ok: false, code: 'bad_config',
-          message: `第 ${lineNo} 行的 stale_after_days「${cell}」不合法：`
-            + `只接受 1–999999 的整数，或 ${STALE_NEVER}（不因「上游不动了」提醒，`
-            + '但同步失败照样报）。写成 0 或 -1 一律拒绝：这两种都不是一个天数。',
-        };
+    let staleSeen = false;
+    for (let k = 2; k < cells.length; k += 1) {
+      const cell = cells[k] ?? '';
+      const eq = cell.indexOf('=');
+      if (eq > 0) {
+        const key = cell.slice(0, eq).toLowerCase();
+        const value = cell.slice(eq + 1);
+        if (key === 'path') {
+          if (path !== '') {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行写了两个 path=：（「${trimmed}」）；一个仓只有一条路径`,
+            };
+          }
+          if (value === '') {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行的 path= 是空的：组织根下的仓写仓名本身（如 path=artifacts）`,
+            };
+          }
+          if (value.includes('..') || !REPO_PATH_SHAPE.test(value)) {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行的 path「${value}」形状不合法：`
+                + '只允许 [A-Za-z0-9._-] 组成的段，用 / 连接，不许 .. 与空段',
+            };
+          }
+          path = value;
+        } else if (key === 'stale') {
+          if (staleSeen) {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行写了两个 stale=：（「${trimmed}」）`,
+            };
+          }
+          staleSeen = true;
+          const parsedStale = parseStaleCell(value);
+          if (parsedStale === undefined) {
+            return {
+              ok: false, code: 'bad_config',
+              message: `第 ${lineNo} 行的 stale「${value}」不合法：`
+                + `只接受 1–999999 的整数，或 ${STALE_NEVER}（不因「上游不动了」提醒，`
+                + '但同步失败照样报）。写成 0 或 -1 一律拒绝：这两种都不是一个天数。',
+            };
+          }
+          staleAfterDays = parsedStale;
+        } else {
+          return {
+            ok: false, code: 'bad_config',
+            message: `第 ${lineNo} 行有认不出的格子「${cell}」：第三格起只认 path= 与 stale=`
+              + '（注释只能整行）',
+          };
+        }
+        continue;
       }
+      // 光着的一格：只允许出现在第三格，且只能是 stale（历史写法）。
+      // 第三格是**位置格**，所以它写坏时的报错必须说 stale 而不是「多了格子」——
+      // 否则 `a master 0` 会被读成「第四个格子」，而人会去数格子数。
+      if (k === 2) {
+        const parsedStale = parseStaleCell(cell);
+        if (parsedStale === undefined) {
+          return {
+            ok: false, code: 'bad_config',
+            message: `第 ${lineNo} 行的 stale_after_days「${cell}」不合法：`
+              + `只接受 1–999999 的整数，或 ${STALE_NEVER}（不因「上游不动了」提醒，`
+              + '但同步失败照样报）。写成 0 或 -1 一律拒绝：这两种都不是一个天数。',
+          };
+        }
+        staleSeen = true;
+        staleAfterDays = parsedStale;
+        continue;
+      }
+      return {
+        ok: false, code: 'bad_config',
+        message: `第 ${lineNo} 行多了 ${cells.length - 3} 格：「${trimmed}」`
+          + '（格式是「仓名<空白>分支[<空白>path=<组路径>][<空白>stale=<天数>|never]」，'
+          + '注释只能整行）',
+      };
+    }
+    if (path === '') {
+      // 旧清单（只有「仓名 分支」）逐行读出来仍然指向历史地址 `123pan/<仓名>`：**不静默**，
+      // 留一条提示——本次改格式的全部理由就是「地址不能再靠拼」。
+      path = `${DEFAULT_GROUP}/${id}`;
+      notes.push(`第 ${lineNo} 行「${id}」没写 path=，按历史默认 ${path} 处理`);
+    }
+    // 镜像目录名（id）与路径最后一段必须是同一个名字：同步脚本按 id 找目录、按 path 拼
+    // 克隆地址，两者不一致时错法是**安静的**——目录里躺着 A 仓的镜像，而每晚去 fetch B。
+    const lastSegment = path.slice(path.lastIndexOf('/') + 1);
+    if (lastSegment !== id) {
+      return {
+        ok: false, code: 'bad_config',
+        message: `第 ${lineNo} 行 path「${path}」的最后一段「${lastSegment}」不等于仓名「${id}」：`
+          + '镜像目录按仓名建，克隆地址按 path 拼，两者必须是同一个仓',
+      };
     }
     const firstLine = seen.get(id);
     if (firstLine !== undefined) {
       // 重名不是「后者覆盖前者」：清单里两行同一个仓，说明有人改到一半，而
       // 两处的分支可能不同——按哪一行都会有人觉得自己的改动生效了。
+      // （同一个仓名在 codeup 的两个组下各有一份时，只能收一份：另一份属于
+      //  `config/repos-excluded.txt`，那里记的是「为什么不要它」。）
       return {
         ok: false, code: 'bad_config',
         message: `仓「${id}」出现了两次（第 ${firstLine} 行与第 ${lineNo} 行）`,
       };
     }
     seen.set(id, lineNo);
-    repos.push({ id, branch, line: lineNo, staleAfterDays });
+    repos.push({ id, branch, path, line: lineNo, staleAfterDays });
   }
   if (repos.length === 0) {
     return { ok: false, code: 'bad_config', message: '清单里一个仓都没有（全空或是全注释）' };
@@ -272,6 +427,25 @@ export function reposSettingJson(repos: readonly RepoRef[]): string {
 }
 
 /**
+ * 一个仓的克隆地址：`<CODEUP_ORG>/<path>.git`。
+ *
+ * **只在这一处拼地址。** `scripts/sync-mirrors.sh`（bash）与 `scripts/onboard-repos.ts`
+ * 都调它，而不是各自 `${org}/123pan/${name}.git` 一遍——2026-11-09 那 26 个
+ * 「仓不存在」就是同一个拼法在两处各写了一次的直接结果：错的地方一致，所以错得很像真的。
+ *
+ * `org` 可覆盖（`CODEUP_ORG` 指向自建 codeup / 演练环境时用），但**不含**任何组：组在
+ * `path` 里。给它一个以 `/` 结尾的值也不会拼出双斜杠。
+ */
+export function cloneUrlOf(path: string, org: string = CODEUP_ORG): string {
+  return `${org.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}.git`;
+}
+
+/** 一个清单行的克隆地址（`path` + 默认 org）。 */
+export function cloneUrl(entry: Pick<InventoryLine, 'path'>): string {
+  return cloneUrlOf(entry.path);
+}
+
+/**
  * 两份仓库列表的差。`current = null` 表示「设置里还没有这一格」。
  *
  * 为什么要 diff 而不只是「写进去就好了」：这一步会改掉读侧**正在用**的配置。
@@ -306,14 +480,16 @@ export function diffRepos(current: readonly RepoRef[] | null, next: readonly Rep
   };
 }
 
-/** 把一份清单变成 shell 可消费的行（`仓名<TAB>分支`），只为测试与文档里的示例。 */
+/** 把一份清单变成 shell 可消费的行（`仓名<TAB>分支<TAB>path=…`），测试与文档里的示例用。 */
 export function formatInventoryLine(entry: InventoryLine): string {
+  // `path=` 永远写出来：它是「这个仓在哪」的唯一记录，省掉它就等于把地址退回给拼装。
+  const pathCell = `\tpath=${entry.path}`;
   // 只写**偏离默认**的第三格：一份 30 行的清单里 24 行写着 7 只是噪音，而第三格存在的
   // 理由是「这几个仓要单独定阈值」——不偏离就不该出现。
   const stale = entry.staleAfterDays === DEFAULT_STALE_AFTER_DAYS
     ? ''
-    : `\t${entry.staleAfterDays === null ? STALE_NEVER : String(entry.staleAfterDays)}`;
-  return `${entry.id}\t${entry.branch}${stale}`;
+    : `\tstale=${entry.staleAfterDays === null ? STALE_NEVER : String(entry.staleAfterDays)}`;
+  return `${entry.id}\t${entry.branch}${pathCell}${stale}`;
 }
 
 /**

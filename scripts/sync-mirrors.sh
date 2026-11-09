@@ -91,7 +91,27 @@
 set -euo pipefail
 
 MIRROR_ROOT="${MIRROR_ROOT:-/srv/123pan-mirror}"
-CODEUP_BASE="${CODEUP_BASE:-https://codeup.aliyun.com/60f9058e68e2993a8e6d0750/123pan}"
+# 组织根（**不是** `123pan` 组）：克隆地址 = $CODEUP_ORG/<清单里的 path>.git。
+#
+# 为什么不再拼 `/123pan/`：144 个仓里多数就在组织根下（`…/artifacts.git`），少数在
+# `123pan/`、`cdn-groups/`、`test-groups/`。以前这里把组写死成 `123pan`，于是
+# `…/123pan/artifacts.git` 这样的地址被远端答成「未知的仓库路径」——一句听起来像
+# 「仓不存在」的话。组路径是**仓的属性**，清单带 `path=` 那一格，地址只拼一次。
+#
+# `CODEUP_BASE` 仍然认（老 cron 里写着它），但语义变了：它现在必须给**组织根**。
+# 给的是旧值（以 `/123pan` 结尾）时，这里把尾巴剥掉并在日志里留一行——否则
+# 拼出来的地址会多一层 `/123pan`，整轮 fetch 全红，而原因藏在变量语义里。
+CODEUP_ORG="${CODEUP_ORG:-${CODEUP_BASE:-https://codeup.aliyun.com/60f9058e68e2993a8e6d0750}}"
+LEGACY_ORG_BASE=0
+case "$CODEUP_ORG" in
+  */123pan|*/123pan/)
+    # 旧语义的值：它指向**组**而不是组织根。剥掉尾巴，别让拼出来的地址多一层 /123pan。
+    CODEUP_ORG="${CODEUP_ORG%/}"
+    CODEUP_ORG="${CODEUP_ORG%/123pan}"
+    LEGACY_ORG_BASE=1
+    ;;
+esac
+CODEUP_ORG="${CODEUP_ORG%/}"
 LOG="${SYNC_FLOWERS_LOG:-/var/log/sync-flowers-mirror.log}"
 LOCK="${SYNC_FLOWERS_LOCK:-/var/lock/sync-flowers-mirror.lock}"
 FETCH_TIMEOUT="${FETCH_TIMEOUT:-300}"
@@ -146,7 +166,9 @@ fetch 进 \$MIRROR_ROOT/<仓名>.git（bare），用 CAS 更新本地同名 ref�
 环境变量：
   REPOS_FILE          仓清单            默认 脚本旁边的 repos.txt（或 ../config/repos.txt）
   MIRROR_ROOT         bare 仓根目录     默认 /srv/123pan-mirror
-  CODEUP_BASE         codeup 的 123pan 根 默认 https://codeup.aliyun.com/.../123pan
+  CODEUP_ORG          codeup 的组织根   默认 https://codeup.aliyun.com/60f9...750
+                     （克隆地址 = $CODEUP_ORG/<清单里的 path>.git；CODEUP_BASE 仍认，
+                       但它现在也必须给组织根，旧值以 /123pan 结尾会被剥掉并记一行）
   SYNC_FLOWERS_LOG    日志文件          默认 /var/log/sync-flowers-mirror.log
   SYNC_FLOWERS_LOCK   锁文件            默认 /var/lock/sync-flowers-mirror.lock
   SYNC_JOBS           并发仓数          默认 8（1–64；单仓失败不影响别的仓）
@@ -175,6 +197,7 @@ command -v flock >/dev/null 2>&1 || {
 # 在锁之前就解析：清单坏了要在动任何仓之前失败，而不是同步了一半才报错。
 REPOS=()
 BRANCHES=()
+PATHS=()
 declare -A SEEN=()
 if [ ! -f "$REPOS_FILE" ]; then
   echo "读不到仓清单：$REPOS_FILE（它是 config/repos.txt，用 install-cron.sh --server 随脚本发过来）" >&2
@@ -198,13 +221,51 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "清单里仓名「$name」形状不合法：只允许 [A-Za-z0-9._-]" >&2
     exit 2
   fi
-  if [ -n "${4:-}" ]; then
-    echo "清单里「$trimmed」多了格子（格式是「仓名 分支 [stale_after_days]」，注释只能整行）" >&2
-    exit 2
-  fi
-  # 第三格：可选，本脚本只认不解释（判定在 health.ts）。校验要与 parseRepoInventory 对齐：
-  # 一边能读、一边报错退出 2，那一晚整份清单都不同步。
-  stale="${3:-}"
+  # ─── 第三格起：`path=<组路径>` 与 `stale=<天数>|never>`（本脚本只认，不解释）───
+  #
+  # `path=` 是**克隆地址的那一段**（组织相对、含仓名）：`123pan/apisrv` / `apisrv`。
+  # 以前这里没有这一格，地址靠拼 `$CODEUP_BASE/$name.git` 得到，于是组织根下的仓
+  # 被问成 `…/123pan/artifacts.git`（远端答「未知的仓库路径」）。**地址只拼一次**：
+  # 就在下面的 fetch 里，用 path 拼。
+  #
+  # 兼容：第三格光着写 `never` 或正整数时仍按 stale 读（历史格式）。
+  # 校验与 `parseRepoInventory()` 逐条对齐——一边能读、一边报错退出 2，那一晚整份清单
+  # 都不同步。
+  path="123pan/${name}"   # 没写 path= 时按历史默认（与 TS 侧 DEFAULT_GROUP 同一个值）
+  stale=""
+  shift 2 || true         # 前两格（仓名、分支）已经取走，剩下的格子按 key=value 逐个看
+  for cell in "$@"; do
+    case "$cell" in
+      path=*)
+        path="${cell#path=}"
+        if [ -z "$path" ]; then
+          echo "清单里「$name」的 path= 是空的（组织根下的仓写仓名本身，如 path=artifacts）" >&2
+          exit 2
+        fi
+        if printf '%s' "$path" | grep -q '\.\.' \
+          || ! printf '%s' "$path" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$'; then
+          echo "清单里「$name」的 path「$path」形状不合法（段只允许 [A-Za-z0-9._-]，不许 .. ）" >&2
+          exit 2
+        fi
+        ;;
+      stale=*)
+        if [ -n "$stale" ]; then
+          echo "清单里「$trimmed」写了两个 stale=" >&2
+          exit 2
+        fi
+        stale="${cell#stale=}"
+        ;;
+      *)
+        # 历史写法：第三格光着写 `never` / 正整数，就是 stale。
+        if [ -z "$stale" ] && printf '%s' "$cell" | grep -Eqi '^(never|[1-9][0-9]{0,5})$'; then
+          stale="$cell"
+        else
+          echo "清单里「$trimmed」有认不出的格子「$cell」（第三格起只认 path= 与 stale=）" >&2
+          exit 2
+        fi
+        ;;
+    esac
+  done
   if [ -n "$stale" ]; then
     if ! printf '%s' "$stale" | grep -Eqi '^never$' && ! printf '%s' "$stale" | grep -Eq '^[1-9][0-9]{0,5}$'; then
       echo "清单里「$name」的 stale_after_days「$stale」不合法：只接受正整数或 never" >&2
@@ -218,6 +279,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "清单里「$name」的分支「$branch」形状不合法（不许空格、不许 ..）" >&2
     exit 2
   fi
+  # 镜像目录名与 path 的最后一段必须是同一个名字：目录按 name 建、地址按 path 拼，
+  # 两者不一致时错法是安静的（目录里是 A 仓，每晚去 fetch B 仓）。
+  if [ "${path##*/}" != "$name" ]; then
+    echo "清单里「$name」的 path「$path」最后一段不是它自己：镜像目录按仓名建，两者必须同一个仓" >&2
+    exit 2
+  fi
   if [ -n "${SEEN[$name]:-}" ]; then
     echo "清单里仓「$name」出现了两次" >&2
     exit 2
@@ -225,6 +292,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   SEEN[$name]=1
   REPOS+=("$name")
   BRANCHES+=("$branch")
+  PATHS+=("$path")
 done <"$REPOS_FILE"
 
 if [ "${#REPOS[@]}" -eq 0 ]; then
@@ -244,7 +312,10 @@ fi
 
 exec >>"$LOG" 2>&1
 started_at=$(date +%s)
-echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} jobs=$SYNC_JOBS manifest=$REPOS_FILE ==="
+echo "=== sync start $(date -Iseconds) repos=${#REPOS[@]} jobs=$SYNC_JOBS manifest=$REPOS_FILE org=$CODEUP_ORG ==="
+if [ "$LEGACY_ORG_BASE" -eq 1 ]; then
+  echo "NOTE CODEUP_BASE 给的是旧的「组」地址（以 /123pan 结尾）：已剥成组织根 $CODEUP_ORG；下次把它改成 CODEUP_ORG"
+fi
 
 # 逐仓缓冲目录：日志与退出码都先落在这里，跑完按清单顺序整份打出。
 # 为什么需要它：并行时 N 个 printf 打同一份日志，长行会被内核写进同一个文件时撕开
@@ -279,6 +350,8 @@ is_transient() {
 sync_one() {
   local repo="$1"
   local branch="$2"
+  # 第三格：组织相对的克隆路径。地址 = 组织根 + path —— 两段，且**只在这里拼**。
+  local path="${3:-123pan/$repo}"
   local dir="$MIRROR_ROOT/$repo.git"
   local g=(git -c safe.directory='*' -C "$dir")
   local before after out st
@@ -299,7 +372,7 @@ sync_one() {
     attempt=$((attempt + 1))
     set +e
     out=$(timeout "$FETCH_TIMEOUT" "${g[@]}" fetch --quiet --no-tags --prune \
-      "$CODEUP_BASE/$repo.git" "$branch" 2>&1)
+      "$CODEUP_ORG/$path.git" "$branch" 2>&1)
     st=$?
     set -e
     [ "$st" -eq 0 ] && break
@@ -356,25 +429,28 @@ sync_one() {
 # 「哪个仓坏了」这个信息丢掉——聚合只认 `<仓名>.rc`，见下面那段。
 # `exec 9>&-` 把锁的 fd 从子进程里摘掉：子进程挂住时不该继续「持有」这一轮的锁。
 worker() {
-  local line="$1" repo branch st=0
+  local line="$1" repo branch path st=0
   exec 9>&- 2>/dev/null || true
   repo="${line%% *}"
-  branch="${line#* }"
+  line="${line#* }"
+  branch="${line%% *}"
+  path="${line#* }"
   [ "$branch" = "$repo" ] && branch=master
-  sync_one "$repo" "$branch" >"$JOBDIR/$repo.log" 2>&1 || st=$?
+  [ "$path" = "$branch" ] && path="123pan/$repo"
+  sync_one "$repo" "$branch" "$path" >"$JOBDIR/$repo.log" 2>&1 || st=$?
   printf '%s\n' "$st" >"$JOBDIR/$repo.rc"
   return 0
 }
 
 # 子进程要看得见的东西：函数用 export -f，配置用 export。两者缺一个，子进程里的
 # `sync_one` 就会以「未定义」的方式静默地一个仓都不同步。
-export MIRROR_ROOT CODEUP_BASE FETCH_TIMEOUT FETCH_RETRIES RETRY_BACKOFF JOBDIR
+export MIRROR_ROOT CODEUP_ORG FETCH_TIMEOUT FETCH_RETRIES RETRY_BACKOFF JOBDIR
 export -f sync_one is_transient mask worker
 
 JOBS_FILE="$JOBDIR/jobs.txt"
 : >"$JOBS_FILE"
 for i in "${!REPOS[@]}"; do
-  printf '%s %s\n' "${REPOS[$i]}" "${BRANCHES[$i]}" >>"$JOBS_FILE"
+  printf '%s %s %s\n' "${REPOS[$i]}" "${BRANCHES[$i]}" "${PATHS[$i]}" >>"$JOBS_FILE"
 done
 
 # 有界并行：`-P SYNC_JOBS` 个槽位，一个仓一个 job。`-I{}` 保证整行（「仓名 分支」）

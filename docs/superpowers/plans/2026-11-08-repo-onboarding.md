@@ -1063,3 +1063,350 @@ docker exec flowers-db-1 psql -U postgres -d flowers -c \
  "select repo, files_indexed||'/'||files_total as ratio, files_skipped_generated, outline_files
     from repo_coverage where ok order by files_indexed::float/greatest(files_total,1)"
 ```
+
+## 11. 第五轮（2026-11-09 上午）：URL 拼错了 —— 144 个仓的全量接入
+
+这一轮先纠正一件事：**前几轮那些「仓不存在」是假的**。`ListRepositories`（云效 OpenAPI，
+`x-total: 144`）的返回落在 `.superpowers/sdd/2026-11-08-index-value/real-repos.tsv`（一行
+`name<TAB>groupPath`）与 `real-repos.json`（原始载荷）。照着它把 144 条路径逐个
+`git ls-remote` 探完之后，34 个失败里 **27 个是地址问题**，不是现实。
+
+### 11.1 根因：克隆地址被「拼」出来，而组路径是仓的属性
+
+旧地址是 `https://codeup.aliyun.com/60f9058e68e2993a8e6d0750/123pan/<仓名>.git`——把
+「仓在哪个组」写死成 `123pan`。真实分布（144 条路径按第一段）：
+
+| 位置 | 仓数 | 例子 |
+|---|---|---|
+| 组织根（path 就是仓名） | 24 | `artifacts`、`trafficserver`、`ats-9.0.2`、`cdn-admin`、`Web-Nexus` |
+| `123pan/` | 96 | `123pan/apisrv`、`123pan/review` |
+| `cdn-groups/` | 12 | `cdn-groups/beats`、`cdn-groups/gts` |
+| `test-groups/` | 10 | `test-groups/tl`、`test-groups/platform-api` |
+
+于是 `…/123pan/artifacts.git` 得到的回答是 `remote: 未知的仓库路径，请检查仓库路径是否正确`
+——一句听起来像「这个仓不存在」的话，`repo_coverage.error` 就照抄成了「不存在」。**这是同
+一个错误在两处各写了一次**（`sync-mirrors.sh` 的 `$CODEUP_BASE/$repo.git`、
+`onboard-repos.ts` 的一行模板字符串），错的地方一致，所以错得很像真的。
+
+修法只有一条：**地址只拼一次**，输入是清单里的 `path=`。`repo-inventory.ts` 的
+`cloneUrlOf()` 是唯一那一处，`sync-mirrors.sh` 与 `onboard-repos.ts` 都从它（或它的 bash
+等价物）拿地址。
+
+### 11.2 清单格式：多一格 `path=`，镜像目录名一个都没改
+
+```
+<仓名><空白><分支>[<空白>path=<组路径>][<空白>stale=<天数>|never]
+```
+
+```text
+apisrv                  master         path=123pan/apisrv
+artifacts               master         path=artifacts
+beats                   master         path=cdn-groups/beats
+performance_front_test  lighthouse_v1  path=test-groups/performance_front_test
+review                  master         path=123pan/review   stale=never
+```
+
+- `path=` 是**组织相对、含仓名**的整条路径（与 TSV 第二列逐字相同）；缺省 = `123pan/<仓名>`
+  （旧清单逐行读出来仍指向原地址，并留一条 note）。
+- 第三格起是 `key=value`（`path=` / `stale=`）；光着写 `never`/正整数仍按 `stale` 读（历史
+  写法）。为什么不是「再加两个位置格」：`stale` 是可选的，可选位置格与下一格天生分不开。
+- 校验多一条：**`path` 的最后一段必须等于仓名**。镜像目录按仓名建、地址按 path 拼，不相等
+  时的错法是安静的（目录里躺着 A 仓，每晚去 fetch B 仓）。
+- **镜像目录名不改**（仍是 `/srv/123pan-mirror/<仓名>.git`）：66 个老镜像一个都没动，改的只是
+  URL。这样「改名 66 个目录 + 改 66 条设置」里漏一个就换仓的风险直接不存在。
+
+同步脚本把 `CODEUP_BASE`（旧语义：`…/123pan`）换成 `CODEUP_ORG`（组织根）；旧变量仍然认，
+但值以 `/123pan` 结尾时会剥掉尾巴并在日志里留一行 `NOTE`——否则拼出来多一层 `/123pan`，
+整轮 fetch 全红，而原因藏在变量语义里。
+
+### 11.3 144 → 142：重名两份与归档那一份怎么处理的
+
+| 仓名 | 两个路径 | 取哪一个 | 为什么 |
+|---|---|---|---|
+| `artifacts` | `artifacts` / `cdn-groups/artifacts` | `artifacts`（根） | `lastActivityAt` 2026-10-30 vs 2026-01-13 |
+| `go-protobuf` | `go-protobuf` / `cdn-groups/go-protobuf` | `go-protobuf`（根） | 2026-11-09 vs 2026-01-13（昨天还在动） |
+
+owner 给的判据是「取 `lastActivityAt` 更新的那份」，实测**与直觉相反**：两个 `cdn-groups/`
+副本都停在 2026-01-13（像某次一次性推送留下的），根下那两份才是活的。所以两份都取根下。
+被放弃的两条路径写在 **`config/repos-excluded.txt`**（一行一理由）——它们不能进
+`config/repos.txt`（同名是硬错误），但也不能就这么消失，否则「不遗不漏」少两个。
+
+归档的那一个：`123pan/review`（`archived: true`，最后活动 2021-08-19）。**归档 ≠ 不存在**，
+所以它仍然建镜像、仍然索引（`0/1`，树里只有一个 `README.md`），只是在清单里写
+`stale=never`——沿用「上游已归档，不因上游不动了提醒」那个哨兵，同步失败照样报。
+
+### 11.4 分支：144 条路径逐个 `ls-remote --symref` 探过
+
+`master` 133、`main` 5、`dev` 2、`v1` 1（`usercenter`）、`lighthouse_v1` 1
+（`performance_front_test`）。这份分支表不是猜的：144 条路径跑了两轮探测（第一轮 60 条被
+codeup 的 DNS/443 抖动打掉，第二轮逐条重试四次），143 条拿到默认分支；剩下 `gocron`
+是**空仓**（`ls-remote` 成功但没有 HEAD）。
+
+### 11.5 接入结果：66 → 141 个镜像，覆盖率 139 行 `ok=true`
+
+| 项 | 结果 |
+|---|---|
+| 清单 | `config/repos.txt`：**142** 个仓（另 84 行注释/空行），= 144 − 2 重名放弃 |
+| 设置 | `code.mirror.repos` 66 → **142**（`repos-apply.ts`，读侧回读一致） |
+| 服务器 | 镜像 **66 → 141** 个（`gocron` 空仓不建：一个 ref 都没有，建了也只是每晚一条 FAIL） |
+| 覆盖率 | **139 行 `ok=true`、3 行 `ok=false`**；142 行覆盖 142 个仓，外加 2 条显式排除 = **144** |
+| 树文件 | `files_total` 合计 **51,329**（已去掉 vendor/dist/图片等噪音路径），`files_indexed` 合计 **9,936** |
+| 页面 / import | `pages` **193**、`imports` **12,459** |
+| 磁盘 | `/srv/123pan-mirror` **10.31 GB → 25.58 GB**（+15.27 GB）；可用空间最低见到 **24.9 GB** |
+| `blob_index` | **6,639 → 9,231** 行（+2,592：内容地址让 139 个仓只新增 2.6k 行） |
+| 用例 | `npx vitest run`：**79 个文件、1674 通过 / 1 跳过** |
+
+磁盘水位 10 GB（`DEFAULT_DISK_FLOOR_GB`）**一次都没接近过**：最坏时刻离它还有约 15 GB。
+这不是运气——144 个仓里文件最多的三个（`frontend` 3.2k、`trafficserver` 4.3k、
+`openresty-cdn-gateway` 2.8k）镜像都在 0.1–0.5 GB 量级；真正大的是 `beats`（552 MB，
+因为里面提交了一个 106 MB 的 `mfy_self_build/filebeat`）。
+
+### 11.6 那 34 个「失败」重跑的结果：30 个现在就进得来
+
+| 结论 | 个数 | 是哪些 |
+|---|---|---|
+| 现在 `ok=true` | **30** | 含 27 个原先被判「不存在」的（`artifacts` 108/155、`cloud-drive` 484/559、`123pan-ssr` 321/700、`coredns-cdn` 318/808、`cdn-manager` 212/436…） |
+| 仍失败 | 2 | `beats`（索引读不完，见 11.9）、`platform-fontend`（索引挂住，见 11.9） |
+| 不在 144 里 | 2 | `ploto`、`sqlstring`——API 里没有这两个仓。**旧行不删**（那是证据），但它们是历史行，不计入 144 的分母 |
+
+也就是说：原 34 个里 **32 个在权威清单内，其中 30 个现在通过**；剩下 2 个是解析层的两个
+不同问题，不是地址问题。
+
+### 11.7 142 行覆盖率（按 `files_indexed / files_total` 升序；`—` = 没测成）
+
+| 仓 | 组路径 | 索引/树 | 比例 | 跳过生成 | 页面 | 轮廓 | import | 树里最像的几种文件 / 失败原因 |
+|---|---|---|---|---|---|---|---|---|
+| `beats` | `cdn-groups/beats` | — | — | — | — | — | — | 索引失败（树里 11958 个文件）：git cat-file 读取超时：20 秒内没有返回 |
+| `gocron` | `gocron` | — | — | — | — | — | — | 远端是空仓（clone 成功但一个 ref 都没有，索引无从下手） |
+| `platform-fontend` | `test-groups/platform-fontend` | — | — | — | — | — | — | 索引挂起：抽取阶段同步阻塞（25 分钟无任何进展，连 --index-timeout-s 240 的看门狗都不触发，说明事件循环被同步占死而不是某个 ssh 回调不回）。镜像与 HEAD 均正常（ee47b36，574  |
+| `123pan-gateway` | `123pan/123pan-gateway` | 0/49 | 0.0% | 0 | 0 | 0 | 0 | lua:39 sh:4 md:2 (noext):1 |
+| `123pan_app_package` | `123pan/123pan_app_package` | 0/456 | 0.0% | 0 | 0 | 0 | 0 | dart:253 webp:74 png:45 java:32 |
+| `ai-test-agent` | `test-groups/ai-test-agent` | 0/86 | 0.0% | 0 | 0 | 0 | 0 | py:73 md:3 yml:1 txt:1 |
+| `app` | `123pan/app` | 0/1414 | 0.0% | 0 | 0 | 0 | 0 | dart:516 svg:462 webp:296 png:234 |
+| `app_tv` | `123pan/app_tv` | 0/171 | 0.0% | 0 | 0 | 0 | 0 | dart:113 png:60 webp:25 xml:11 |
+| `ats-9.0.2` | `ats-9.0.2` | 0/3933 | 0.0% | 0 | 0 | 0 | 0 | cc:827 h:754 rst:531 po:444 |
+| `backup-disk` | `123pan/backup-disk` | 0/32 | 0.0% | 0 | 0 | 0 | 0 | h:16 cpp:10 vcxproj:1 sln:1 |
+| `cdn` | `cdn-groups/cdn` | 0/159 | 0.0% | 0 | 0 | 0 | 0 | lua:46 sh:33 yml:28 (noext):14 |
+| `cdn-cp` | `cdn-cp` | 0/7 | 0.0% | 0 | 0 | 0 | 0 | sh:3 (noext):1 md:1 ipdb:1 |
+| `cron-scripts` | `123pan/cron-scripts` | 0/28 | 0.0% | 0 | 0 | 0 | 0 | py:25 DS_Store:2 conf:1 |
+| `defense-nginx` | `123pan/defense-nginx` | 0/167 | 0.0% | 0 | 0 | 0 | 0 | lua:127 conf:10 (noext):7 md:7 |
+| `devops` | `123pan/devops` | 0/180 | 0.0% | 0 | 0 | 0 | 0 | rs:80 xml:31 py:10 yaml:9 |
+| `go-protobuf` | `go-protobuf` | 0/199 | 0.0% | 98 | 0 | 0 | 0 | proto:98 go:98 sum:1 mod:1 |
+| `jmeter-offline` | `test-groups/jmeter-offline` | 0/26 | 0.0% | 0 | 0 | 0 | 0 | jar:346 sh:9 txt:5 md:5 |
+| `minio_deploy` | `123pan/minio_deploy` | 0/76 | 0.0% | 0 | 0 | 0 | 0 | conf:36 sh:21 (noext):10 key:2 |
+| `mount-disk` | `123pan/mount-disk` | 0/2160 | 0.0% | 0 | 0 | 0 | 0 | h:1662 hpp:589 png:145 cpp:135 |
+| `mq_copy` | `123pan/mq_copy` | 0/1 | 0.0% | 0 | 0 | 0 | 0 | MD:1 |
+| `nginx-proxy` | `123pan/nginx-proxy` | 0/159 | 0.0% | 0 | 0 | 0 | 0 | lua:127 (noext):7 md:7 default:6 |
+| `openresty-cdn-gateway` | `cdn-groups/openresty-cdn-gateway` | 0/2756 | 0.0% | 0 | 0 | 0 | 0 | t:689 c:535 h:444 lua:300 |
+| `performance_front_test` | `test-groups/performance_front_test` | 0/16 | 0.0% | 0 | 0 | 0 | 0 | py:11 sh:2 txt:1 md:1 |
+| `php-audit` | `123pan/php-audit` | 0/37 | 0.0% | 0 | 0 | 0 | 0 | php:1718 json:59 md:32 rst:30 |
+| `platform-api` | `test-groups/platform-api` | 0/608 | 0.0% | 0 | 0 | 0 | 0 | py:565 patch:22 log:4 json:3 |
+| `review` | `123pan/review` | 0/1 | 0.0% | 0 | 0 | 0 | 0 | md:1 |
+| `thumbnail` | `123pan/thumbnail` | 0/16 | 0.0% | 0 | 0 | 0 | 0 | (noext):6 default:6 conf:2 types:1 |
+| `trafficserver` | `trafficserver` | 0/4279 | 0.0% | 0 | 0 | 0 | 0 | cc:885 h:806 rst:558 po:443 |
+| `transcode-proxy` | `123pan/transcode-proxy` | 0/2742 | 0.0% | 0 | 0 | 0 | 0 | t:714 c:538 h:444 lua:266 |
+| `video_audit_work` | `123pan/video_audit_work` | 0/1 | 0.0% | 0 | 0 | 0 | 0 | md:1 |
+| `windows-component` | `123pan/windows-component` | 0/182 | 0.0% | 0 | 0 | 0 | 0 | h:116 hpp:45 cpp:7 pro:3 |
+| `app_plugin` | `123pan/app_plugin` | 1/4736 | 0.0% | 0 | 0 | 0 | 0 | dart:1482 ets:455 png:375 java:251 |
+| `kong-2.5.0` | `kong-2.5.0` | 1/838 | 0.1% | 0 | 0 | 1 | 0 | lua:645 t:89 md:14 crt:13 |
+| `123pan-ele-react` | `123pan/123pan-ele-react` | 6/544 | 1.1% | 0 | 2 | 2 | 18 | png:287 nsh:220 nlf:116 ico:68 |
+| `Web-Nexus` | `Web-Nexus` | 47/4187 | 1.1% | 0 | 0 | 35 | 92 | tsx:1006 md:975 svg:930 ts:648 |
+| `123pan-video` | `123pan-video` | 2/106 | 1.9% | 0 | 0 | 0 | 0 | js:38 svg:28 less:13 md:9 |
+| `123pan-virtuallist-antd` | `123pan/123pan-virtuallist-antd` | 1/38 | 2.6% | 0 | 0 | 1 | 1 | md:13 tsx:10 js:7 json:2 |
+| `crazy-api` | `test-groups/crazy-api` | 41/534 | 7.7% | 0 | 0 | 0 | 84 | js:364 png:189 scss:66 jpg:53 |
+| `web-ui-test` | `test-groups/web-ui-test` | 13/90 | 14.4% | 0 | 0 | 5 | 19 | ts:30 yaml":24 json:15 js:8 |
+| `download_peed` | `download_peed` | 41/235 | 17.4% | 0 | 0 | 39 | 0 | dart:75 go:48 png:41 md:9 |
+| `app-ui-test` | `test-groups/app-ui-test` | 8/44 | 18.2% | 0 | 0 | 0 | 15 | html:27 ts:13 json:2 md:1 |
+| `123pan-cross-frontend` | `123pan/123pan-cross-frontend` | 24/130 | 18.5% | 0 | 4 | 13 | 83 | ts:50 tsx:29 less:24 png:14 |
+| `go-direct-link-worker` | `123pan/go-direct-link-worker` | 21/109 | 19.3% | 0 | 0 | 21 | 0 | conf:69 json:42 go:28 (noext):4 |
+| `go-async-etag-worker` | `123pan/go-async-etag-worker` | 22/114 | 19.3% | 0 | 0 | 22 | 0 | json:75 conf:73 go:29 (noext):4 |
+| `gcache-adapter` | `123pan/gcache-adapter` | 1/5 | 20.0% | 0 | 0 | 1 | 0 | sum:1 mod:1 md:1 go:1 |
+| `123pan-uni-app` | `123pan/123pan-uni-app` | 142/639 | 22.2% | 0 | 27 | 97 | 580 | svg:442 vue:102 png:87 ts:73 |
+| `health_check` | `123pan/health_check` | 2/9 | 22.2% | 0 | 0 | 2 | 0 | go:2 gitignore:2 toml:1 sum:1 |
+| `123pan-pc` | `123pan/123pan-pc` | 137/582 | 23.5% | 0 | 2 | 94 | 507 | ts:184 svg:96 dll:87 png:86 |
+| `Nimbus` | `123pan/Nimbus` | 47/193 | 24.4% | 0 | 3 | 28 | 129 | png:93 svg:87 ts:37 js:22 |
+| `cdn-proxy` | `cdn-proxy` | 1/4 | 25.0% | 0 | 0 | 1 | 0 | mod:1 md:1 go:1 gitignore:1 |
+| `get_domain` | `123pan/get_domain` | 2/8 | 25.0% | 0 | 0 | 2 | 0 | sh:2 go:2 toml:1 sum:1 |
+| `event-tracking` | `cdn-groups/event-tracking` | 15/59 | 25.4% | 7 | 0 | 12 | 0 | go:22 gitkeep:14 yaml:8 sh:3 |
+| `phoenix-share` | `123pan/phoenix-share` | 238/895 | 26.6% | 0 | 0 | 167 | 1055 | png:307 svg:223 ts:209 tsx:176 |
+| `123pan-slb` | `123pan/123pan-slb` | 54/189 | 28.6% | 12 | 0 | 52 | 0 | js:76 gif:75 go:69 css:12 |
+| `save-copy-worker` | `123pan/save-copy-worker` | 45/156 | 28.8% | 0 | 0 | 39 | 0 | json:91 conf:89 go:54 (noext):4 |
+| `123pan-windowsPro` | `123pan-windowsPro` | 154/521 | 29.6% | 0 | 14 | 84 | 659 | png:129 js:117 nsh:110 ts:82 |
+| `copy-file-worker` | `123pan/copy-file-worker` | 29/97 | 29.9% | 0 | 0 | 27 | 0 | json:52 conf:48 go:36 (noext):4 |
+| `coverage` | `test-groups/coverage` | 23/71 | 32.4% | 0 | 0 | 23 | 0 | sh:24 (noext):24 go:23 |
+| `frontend` | `123pan/frontend` | 1144/3241 | 35.3% | 0 | 27 | 874 | 4881 | ts:938 md:933 tsx:583 png:391 |
+| `gofs` | `123pan/gofs` | 21/59 | 35.6% | 0 | 0 | 21 | 0 | go:27 sh:5 png:4 md:4 |
+| `go-kafka-service` | `123pan/go-kafka-service` | 14/38 | 36.8% | 0 | 0 | 14 | 0 | go:14 json:13 conf:10 (noext):4 |
+| `share` | `123pan/share` | 201/530 | 37.9% | 0 | 0 | 150 | 830 | png:255 svg:173 ts:142 tsx:131 |
+| `eslint-config` | `123pan/eslint-config` | 33/86 | 38.4% | 0 | 1 | 15 | 95 | ts:34 less:14 tsx:13 js:7 |
+| `binlog_go_new` | `123pan/binlog_go_new` | 7/18 | 38.9% | 0 | 0 | 7 | 0 | go:7 (noext):4 conf:3 json:2 |
+| `coredns-cdn` | `cdn-groups/coredns-cdn` | 318/808 | 39.4% | 2 | 0 | 294 | 0 | go:608 md:126 7:51 (noext):6 |
+| `crontab` | `crontab` | 2/5 | 40.0% | 0 | 0 | 2 | 0 | go:2 sum:1 mod:1 md:1 |
+| `getconfig-api` | `123pan/getconfig-api` | 28/68 | 41.2% | 0 | 0 | 28 | 0 | go:36 conf:18 json:17 (noext):4 |
+| `transfer-schedul-worker` | `123pan/transfer-schedul-worker` | 23/55 | 41.8% | 0 | 0 | 23 | 0 | go:32 json:13 conf:11 (noext):5 |
+| `log-agent-client` | `123pan/log-agent-client` | 10/23 | 43.5% | 2 | 0 | 7 | 0 | go:12 gitkeep:4 (noext):2 yaml:1 |
+| `reference-count-worker` | `123pan/reference-count-worker` | 22/50 | 44.0% | 0 | 0 | 22 | 0 | go:30 json:11 conf:9 (noext):4 |
+| `crypto` | `crypto` | 4/9 | 44.4% | 0 | 0 | 4 | 0 | go:7 mod:1 md:1 |
+| `go-cloud-capacity-worker` | `123pan/go-cloud-capacity-worker` | 24/54 | 44.4% | 0 | 0 | 24 | 0 | go:32 json:11 conf:9 (noext):4 |
+| `123pan-ssr` | `123pan-ssr` | 321/700 | 45.9% | 0 | 21 | 211 | 1241 | png:368 tsx:199 ts:188 less:156 |
+| `cdn-agent` | `cdn-groups/cdn-agent` | 34/74 | 45.9% | 7 | 0 | 31 | 0 | go:42 gitkeep:14 yaml:8 (noext):3 |
+| `silentDataES` | `123pan/silentDataES` | 19/41 | 46.3% | 7 | 0 | 19 | 0 | go:29 (noext):4 toml:2 sh:2 |
+| `go-thumbnail` | `123pan/go-thumbnail` | 7/15 | 46.7% | 0 | 0 | 7 | 0 | go:9 toml:1 sh:1 (noext):1 |
+| `copy-file-schedule-worker` | `123pan/copy-file-schedule-worker` | 23/49 | 46.9% | 0 | 0 | 23 | 0 | go:30 json:11 conf:9 (noext):4 |
+| `go-etag-worker` | `123pan/go-etag-worker` | 25/52 | 48.1% | 0 | 0 | 25 | 0 | go:32 json:11 conf:9 (noext):4 |
+| `new-year-worker` | `123pan/new-year-worker` | 25/52 | 48.1% | 0 | 0 | 25 | 0 | go:32 json:10 conf:9 (noext):4 |
+| `cdn-manager` | `cdn-groups/cdn-manager` | 212/436 | 48.6% | 180 | 0 | 196 | 0 | go:401 gitkeep:14 yaml:8 (noext):4 |
+| `grpc` | `cdn-groups/grpc` | 212/436 | 48.6% | 180 | 0 | 196 | 0 | go:401 gitkeep:14 yaml:8 (noext):4 |
+| `batch-process-data-worker` | `123pan/batch-process-data-worker` | 9/18 | 50.0% | 0 | 0 | 9 | 0 | go:11 yml:1 toml:1 sql:1 |
+| `share-consumer` | `123pan/share-consumer` | 19/38 | 50.0% | 1 | 0 | 16 | 0 | go:23 xml:4 DS_Store:3 yml:1 |
+| `123pan-image-hosting` | `123pan/123pan-image-hosting` | 78/155 | 50.3% | 0 | 2 | 29 | 236 | png:98 js:41 ts:40 tsx:33 |
+| `123pan-resource-library` | `123pan/123pan-resource-library` | 43/85 | 50.6% | 0 | 5 | 34 | 119 | tsx:27 ts:26 less:11 json:4 |
+| `refresh-center-agent` | `cdn-groups/refresh-center-agent` | 40/74 | 54.1% | 3 | 0 | 32 | 0 | go:43 gitkeep:14 yaml:8 (noext):3 |
+| `audit-consumer` | `123pan/audit-consumer` | 24/43 | 55.8% | 7 | 0 | 23 | 0 | go:36 yml:1 toml:1 sh:1 |
+| `gf16` | `123pan/gf16` | 428/765 | 55.9% | 0 | 0 | 412 | 0 | go:760 toml:38 html:29 json:11 |
+| `apisrv` | `123pan/apisrv` | 352/624 | 56.4% | 231 | 0 | 330 | 0 | go:616 yml:1 toml:1 sh:1 |
+| `usercenter` | `123pan/usercenter` | 38/67 | 56.7% | 7 | 0 | 31 | 0 | go:45 gitkeep:15 toml:1 sh:1 |
+| `123pan-traffic` | `123pan/123pan-traffic` | 144/252 | 57.1% | 52 | 0 | 139 | 0 | go:245 yml:1 toml:1 sum:1 |
+| `log` | `log` | 4/7 | 57.1% | 0 | 0 | 4 | 0 | go:4 sum:1 mod:1 md:1 |
+| `silentDataBinlog` | `123pan/silentDataBinlog` | 8/14 | 57.1% | 0 | 0 | 8 | 0 | go:8 (noext):2 toml:1 sh:1 |
+| `mount-disk-ws` | `123pan/mount-disk-ws` | 11/19 | 57.9% | 0 | 0 | 11 | 0 | go:11 yml:1 toml:1 sum:1 |
+| `upload-consumer` | `123pan/upload-consumer` | 28/48 | 58.3% | 12 | 0 | 26 | 0 | go:41 toml:1 sum:1 sh:1 |
+| `pay_server` | `123pan/pay_server` | 174/296 | 58.8% | 95 | 0 | 163 | 0 | go:288 (noext):2 yml:1 toml:1 |
+| `transcode` | `123pan/transcode` | 53/89 | 59.6% | 3 | 0 | 43 | 0 | go:69 (noext):4 sh:3 xml:2 |
+| `123pan_manager_frontend` | `123pan/123pan_manager_frontend` | 606/1017 | 59.6% | 0 | 85 | 469 | 1338 | tsx:379 ts:340 less:150 md:73 |
+| `dispatch-monitor` | `dispatch-monitor` | 12/20 | 60.0% | 0 | 0 | 10 | 0 | go:13 yml:1 toml:1 sum:1 |
+| `contentTreeSrv` | `123pan/contentTreeSrv` | 35/58 | 60.3% | 12 | 0 | 26 | 0 | go:53 yml:1 toml:1 (noext):1 |
+| `api_server` | `123pan/api_server` | 586/960 | 61.0% | 298 | 0 | 561 | 0 | go:930 sql:6 gitkeep:5 sh:4 |
+| `123pan_manager` | `123pan/123pan_manager` | 542/885 | 61.2% | 284 | 0 | 532 | 0 | go:860 gitkeep:14 DS_Store:2 yml:1 |
+| `binlog-srv` | `123pan/binlog-srv` | 8/13 | 61.5% | 0 | 0 | 7 | 0 | go:8 toml:1 sum:1 sh:1 |
+| `gf-jwt` | `123pan/gf-jwt` | 8/13 | 61.5% | 0 | 0 | 7 | 0 | go:8 png:5 md:2 (noext):1 |
+| `uuidsrv` | `123pan/uuidsrv` | 8/13 | 61.5% | 0 | 0 | 7 | 0 | go:8 toml:1 sum:1 sh:1 |
+| `new_audit` | `123pan/new_audit` | 15/24 | 62.5% | 0 | 0 | 14 | 0 | go:16 toml:2 yml:1 sum:1 |
+| `123pan-agent-tracker` | `123pan/123pan-agent-tracker` | 195/310 | 62.9% | 0 | 0 | 163 | 477 | tsx:161 ts:75 svg:46 png:13 |
+| `upload-server` | `123pan/upload-server` | 152/241 | 63.1% | 73 | 0 | 145 | 0 | go:229 yml:2 sh:2 toml:1 |
+| `file-analysis-worker` | `123pan/file-analysis-worker` | 12/19 | 63.2% | 0 | 0 | 11 | 0 | go:13 yml:1 toml:1 sum:1 |
+| `gts` | `cdn-groups/gts` | 229/359 | 63.8% | 3 | 0 | 200 | 0 | go:299 (noext):13 md:13 yml:7 |
+| `osssrv` | `123pan/osssrv` | 40/62 | 64.5% | 12 | 0 | 33 | 0 | go:57 toml:1 sum:1 sh:1 |
+| `s3-migration` | `123pan/s3-migration` | 20/31 | 64.5% | 7 | 0 | 20 | 0 | go:27 toml:1 sum:1 mod:1 |
+| `track-consumer` | `123pan/track-consumer` | 15/23 | 65.2% | 0 | 0 | 15 | 0 | go:17 toml:1 sum:1 sh:1 |
+| `cdk_manager` | `123pan/cdk_manager` | 27/41 | 65.9% | 5 | 0 | 25 | 0 | go:33 yml:1 toml:1 sh:1 |
+| `resource_manager` | `123pan/resource_manager` | 37/56 | 66.1% | 11 | 0 | 35 | 0 | go:50 toml:1 sh:1 (noext):1 |
+| `offline-download` | `123pan/offline-download` | 49/73 | 67.1% | 9 | 0 | 44 | 0 | go:60 log:3 sh:2 (noext):2 |
+| `mq_consumer_v5` | `123pan/mq_consumer_v5` | 114/166 | 68.7% | 36 | 0 | 107 | 0 | go:157 mod:2 toml:1 sum:1 |
+| `go-share` | `123pan/go-share` | 18/26 | 69.2% | 0 | 0 | 17 | 0 | go:19 yml:1 toml:1 sum:1 |
+| `binlog-to-elasticsearch` | `123pan/binlog-to-elasticsearch` | 25/36 | 69.4% | 3 | 0 | 23 | 0 | go:31 txt:22 json:14 (noext):2 |
+| `audit-tools` | `audit-tools` | 16/23 | 69.6% | 0 | 0 | 15 | 0 | go:17 (noext):2 sum:1 sh:1 |
+| `artifacts` | `artifacts` | 108/155 | 69.7% | 1 | 0 | 101 | 0 | go:147 md:2 yml:1 sum:1 |
+| `metrics-consumer` | `123pan/metrics-consumer` | 21/30 | 70.0% | 3 | 0 | 16 | 0 | go:24 toml:1 sum:1 sh:1 |
+| `cloud-drive-migration` | `123pan/cloud-drive-migration` | 62/88 | 70.5% | 2 | 0 | 57 | 0 | go:67 proto:12 yml:1 toml:1 |
+| `mq_consumer` | `123pan/mq_consumer` | 178/249 | 71.5% | 49 | 0 | 157 | 0 | go:238 yml:1 yaml:1 toml:1 |
+| `uncompress_srv` | `123pan/uncompress_srv` | 43/58 | 74.1% | 6 | 0 | 40 | 0 | go:50 sh:2 yml:1 toml:1 |
+| `cloud-disk-ws` | `123pan/cloud-disk-ws` | 29/39 | 74.4% | 0 | 0 | 24 | 0 | go:31 yml:1 toml:1 sh:1 |
+| `log-agent` | `log-agent` | 30/40 | 75.0% | 0 | 0 | 29 | 0 | go:32 yml:1 yaml:1 toml:1 |
+| `dispatch` | `123pan/dispatch` | 41/52 | 78.8% | 0 | 0 | 39 | 0 | go:41 yml:5 (noext):2 sum:1 |
+| `redis` | `redis` | 12/15 | 80.0% | 0 | 0 | 12 | 0 | go:12 sum:1 mod:1 md:1 |
+| `123pan-piecehash` | `123pan/123pan-piecehash` | 29/36 | 80.6% | 1 | 0 | 27 | 0 | go:30 yml:1 toml:1 sum:1 |
+| `helper` | `helper` | 13/16 | 81.3% | 0 | 0 | 13 | 0 | go:13 sum:1 mod:1 md:1 |
+| `OpenAPI` | `123pan/OpenAPI` | 106/130 | 81.5% | 10 | 0 | 100 | 0 | go:119 yml:2 sh:2 toml:1 |
+| `tl` | `test-groups/tl` | 32/39 | 82.1% | 0 | 0 | 30 | 0 | go:32 xml:2 md:2 sum:1 |
+| `cdn-dispatch` | `cdn-groups/cdn-dispatch` | 56/68 | 82.4% | 0 | 0 | 49 | 0 | go:59 yml:3 sum:1 sh:1 |
+| `webdav` | `123pan/webdav` | 218/262 | 83.2% | 0 | 0 | 192 | 0 | go:237 (noext):8 md:8 sh:3 |
+| `cdn-go-proxy` | `cdn-groups/cdn-go-proxy` | 38/44 | 86.4% | 0 | 0 | 34 | 0 | go:38 toml:1 sum:1 sh:1 |
+| `cloud-drive` | `cloud-drive` | 484/559 | 86.6% | 2 | 0 | 418 | 0 | go:486 yaml:40 sql:25 (noext):3 |
+| `123pan-pc-go` | `123pan/123pan-pc-go` | 99/114 | 86.8% | 5 | 0 | 94 | 0 | go:106 yml:1 yaml:1 sum:1 |
+| `cdn-admin` | `cdn-admin` | 51/58 | 87.9% | 0 | 0 | 45 | 0 | go:51 yml:1 toml:1 sum:1 |
+| `api_server_restful` | `123pan/api_server_restful` | 102/115 | 88.7% | 0 | 0 | 99 | 0 | go:103 xml:2 gitignore:2 yml:1 |
+| `xgo` | `xgo` | 69/76 | 90.8% | 0 | 0 | 63 | 0 | go:69 yaml:2 (noext):2 sum:1 |
+| `123pan-dylib-go` | `123pan/123pan-dylib-go` | 46/50 | 92.0% | 0 | 0 | 35 | 0 | go:48 sum:1 sqlite:1 mod:1 |
+
+> `files_total` 是 `ls-tree` **去掉噪音路径**之后的数（`vendor/`、`node_modules/`、`dist/`、
+> 图片字体二进制、锁文件、`*.min.js`，判据见 `mirror.ts` 的 `isNoisePath`），所以它比
+> `git ls-tree -r | wc -l` 小：`php-audit` 树里 1925 个文件，去噪后 37 个，全部是 PHP。
+
+### 11.8 「克隆成功但索引 0」的 28 个仓：22 个是语言不认识，6 个是生成物/零散文件
+
+| 类别 | 个数 | 仓 |
+|---|---|---|
+| 树里**一个**解析器认的语言都没有 | **22** | Lua/conf：`123pan-gateway`(39 lua)、`cdn`(46 lua)、`defense-nginx`(127 lua)、`nginx-proxy`(127 lua)、`cdn-cp`；C/C++：`ats-9.0.2`(827 cc+754 h)、`trafficserver`(885 cc+806 h)、`mount-disk`(1203 h+589 hpp)、`backup-disk`；Dart/Flutter：`123pan_app_package`(253 dart)、`app_tv`(113 dart)；Python：`ai-test-agent`(73 py)、`cron-scripts`(25 py)、`platform-api`(565 py)、`performance_front_test`(11 py)；PHP：`php-audit`(25 php)；纯部署：`minio_deploy`、`jmeter-offline`(26 个 jar)；只有文档：`review`、`video_audit_work`、`mq_copy`、`thumbnail` |
+| 去噪后只剩 1–98 个可解析文件 | 6 | `go-protobuf`（98 个 `.go` **全是生成代码**，索引层主动跳过；另外 98 个 `.proto`）；`app`（Flutter 客户端，5 个零散 `.ts`/`.js`，其中一个是 `main.*.js` 打包产物）；`devops`、`transcode-proxy`、`openresty-cdn-gateway`、`windows-component`（各剩 1 个贴边文件） |
+
+**这就是「不遗不漏」的诚实边界**：这 28 个仓我们做了能做的全部——镜像建了、HEAD 读到了、
+树数清了、理由记下来了；但**解析器今天只认 `[ts|tsx|js|jsx|mjs|cjs|vue|go]`**，Lua、C/C++、
+Dart、PHP、Python、纯部署、纯文档一个都不认。所以「不遗不漏」在今天的定义只能是：
+**144 个仓，每一个要么被索引（111 个：9,936 个文件、193 个页面、12,459 条 import），要么有
+一行 `ok=false` 且原因可查（`beats`/`gocron`/`platform-fontend` 三行 + 28 行 `0/N` 的扩展名
+证据），要么被显式排除并写明理由（2 个重名副本）**——不是「144 个仓的代码都能被检索」。
+要让那 22 个进索引，需要的是**新的语言解析器**（Lua 与 C/C++ 最值：`123pan-gateway` 与
+`ats-9.0.2`/`trafficserver` 是其中文件最多的），那是另一条工作线。
+
+### 11.9 三个 `ok=false`：两个是解析层的新发现
+
+| 仓 | 原因（库里原文） | 判断 |
+|---|---|---|
+| `gocron` | 远端是空仓（clone 成功但一个 ref 都没有，索引无从下手） | 真·空仓。镜像不建（建了也是每晚一条 FAIL）；行留在表里 |
+| `beats` | 索引失败（树里 11958 个文件）：git cat-file 读取超时：20 秒内没有返回 | 一次 `cat-file --batch` 读不完：树里 1.3 万个文件、含 106 MB 的 `mfy_self_build/filebeat` 与 21 MB 的夹具。`GIT_TIMEOUT_MS = 20 s` 是单次读的上限 |
+| `platform-fontend` | 索引挂起：抽取阶段**同步阻塞**（25 分钟无进展，连 `--index-timeout-s 240` 的看门狗都不触发） | 镜像与 HEAD 都正常（`ee47b36`，574 个文件 / 5.7 MB，最大单文件 199 KB），所以不是「仓太大」。`sample` 显示进程停在 `AsyncFunctionAwaitResolveClosure` 而 `setTimeout` 不触发 ⇒ 事件循环被同步占死，指向解析器对某个文件的退化 |
+
+这一轮为此加了两件事（都属于「批量脚本不许把一个问题变成整批不结束」）：
+
+1. `onboard-repos.ts --index-timeout-s N`：单仓索引的墙钟上限（默认 1800 s），超时记
+   `ok=false` + 中文原因。**它的边界写在代码注释里**：只能拦「异步挂住」，拦不住同步阻塞
+   ——`platform-fontend` 就是后者，所以它的结论是用下面的口子落的。
+2. `scripts/record-coverage.ts`：只给「管道自己产不出这一行」的仓用的手工记账口
+   （`--reason` 必填且必须是一句中文，只能写 `ok=false`，仓名必须在清单里）。没有它，
+   这两类仓在表里**一行都没有**，而「没有行」与「测过且失败」在报告里长得一样。
+
+### 11.10 端到端验证（不是「看起来对了」）
+
+```bash
+# 1) 清单能被两侧读成同一件事：142 个仓、零解析错误
+npx tsx scripts/repos-apply.ts --dry-run        # 142 个仓；diff 只显示新增与重排
+npx tsx scripts/onboard-repos.ts --file <单行清单>  # 单仓冒烟：artifacts 108/155
+
+# 2) bash 侧解析同一份清单（空镜像根 → 每个仓都报「目录不存在」，但一个都不许报格式错）
+MIRROR_ROOT=/tmp/emptymirror REPOS_FILE=/tmp/repos-new.txt \
+  SYNC_FLOWERS_LOG=/tmp/sync-validate.log SYNC_JOBS=4 bash scripts/sync-mirrors.sh
+#   实测：rc=4、FAIL 142 条（全是「目录不存在」）、日志头 org=https://…/60f9…750（无多余花括号）
+
+# 3) 两种组路径各真 fetch 一次（证明拼出来的地址对）
+git init --bare /tmp/relmirror/audit-tools.git; git init --bare /tmp/relmirror/contentTreeSrv.git
+printf 'audit-tools\tmaster\tpath=audit-tools\ncontentTreeSrv\tmaster\tpath=123pan/contentTreeSrv\n' > /tmp/tiny.txt
+MIRROR_ROOT=/tmp/relmirror REPOS_FILE=/tmp/tiny.txt … bash scripts/sync-mirrors.sh
+#   实测 rc=0：OK audit-tools@master (none) -> bc6b81f moved=1；OK contentTreeSrv@master -> b3aed6d
+
+# 4) 服务器与本仓库不漂：两个文件的 sha256 都要一致
+bash scripts/install-cron.sh --server && bash scripts/install-cron.sh --check
+#   实测：sync-flowers-mirror.sh / repos.txt 两侧 sha256 一致，cron 行与 launchd 任务都在
+
+# 5) 覆盖率与等式
+docker exec flowers-db-1 psql -U postgres -d flowers -c \
+ "select count(*) filter (where ok) ok, count(*) filter (where not ok) bad from repo_coverage"
+#   期望：ok=139 bad=3（表里另有 2 行历史仓 ploto / sqlstring，不计入 144）
+```
+
+### 11.11 这一轮没做、也不该顺手做的
+
+- **没有改解析器的抽取规则**，也没有碰 `src/core/locate/*`：`platform-fontend` 的挂起与
+  22 个语言不认的仓都需要那条线的工作，而那是另一件事（且必须先有可复现的失败样本）。
+- **没有动 `requirements`**（814 行，接入前后同一个数）。
+- **没有删任何旧 `repo_coverage` 行**：`ploto`、`sqlstring` 等不在 144 里的历史行原样保留，
+  它们是「当初为什么以为这些仓存在」的证据。
+- **没有改镜像目录名**（见 11.2）。
+- 服务器 05:05 那一轮同步**没有等它跑**：本轮验证的是「地址拼对」与「清单两侧一致」；
+  夜间整轮 fetch 的耗时属于下一次观察（141 个仓、`SYNC_JOBS=8`，按 §10.1 的算式约 18 个批次）。
+
+### 11.12 复现
+
+```bash
+# 权威清单（144 条路径 + 原始载荷）
+cut -f2 .superpowers/sdd/2026-11-08-index-value/real-repos.tsv | wc -l           # 144
+cut -f1 .superpowers/sdd/2026-11-08-index-value/real-repos.tsv | sort -u | wc -l # 142（2 个重名）
+
+# 分支是一次性探出来的（不是抄的）
+ssh dogyun 'cut -f1 /root/probe/paths.tsv | xargs -P 4 -I{} bash -c "git ls-remote --symref \
+  https://codeup.aliyun.com/60f9058e68e2993a8e6d0750/\"$1\".git HEAD" _ {}'
+
+# 全量接入（可续跑：同 HEAD 且上一轮 ok 的仓自动跳过）
+npx tsx scripts/onboard-repos.ts --floor-gb 12
+```
+

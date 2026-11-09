@@ -65,12 +65,17 @@ import {
   recordCoverage, shouldSkip, type CoverageRow,
 } from '../src/core/codemirror/repo-coverage.js';
 import {
-  inventoryPath, inventoryToRepos, mirrorRoot, readRepoInventory, reposSettingJson,
+  cloneUrl, inventoryPath, inventoryToRepos, mirrorRoot, readRepoInventory, reposSettingJson,
   type InventoryLine,
 } from '../src/core/codemirror/repo-inventory.js';
 
-/** 清单里 owner 说的目标仓数：只用于报告里的外推，不参与任何判断。 */
-const TARGET_REPOS = 139;
+/**
+ * 报告里外推用的仓数：只用于「144 个仓大概要多少磁盘」这一句，不参与任何判断。
+ *
+ * 144 = `ListRepositories` 的 `x-total`（2026-11-09 实测）。此前写的是 139（owner 口头数），
+ * 现在以 API 的真实总数为准——它同时也是覆盖率表的分母。
+ */
+const TARGET_REPOS = 144;
 
 /** clone 的超时：2.4 G 的仓在跨国 HTTPS 上要几分钟，给 30 分钟。`sync-mirrors.sh` 的 fetch 是 300 s。 */
 const CLONE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -89,13 +94,28 @@ type Args = {
   targetCount: number;
   /** clone 失败后的重试次数（不含第一次）。见 `cloneWithRetry` 的注释。 */
   retries: number;
+  /**
+   * 单仓**索引**的墙钟上限（毫秒）。默认 30 分钟（与 clone 同一量级）。
+   *
+   * 为什么需要它：`platform-fontend`（574 个文件、5.7 MB 内容）的索引在 2026-11-09
+   * 实测里既没有成功也没有失败——它**挂住**了，40 分钟没有任何进展，而进程既不写
+   * `repo_coverage` 也不退出。一个会挂住的批量脚本比一个会失败的批量脚本更糟：它把
+   * 「这一个仓有问题」变成「这一批永远跑不完」，而报告里连一行 `ok=false` 都留不下来。
+   * 所以索引必须有上界，超时就当成一次**有理由的失败**记下来（`ok=false` + 中文原因）。
+   *
+   * **它的边界（实测）**：这个看门狗只能拦「异步挂住」（ssh/pg 的回调再也不回来）。
+   * 如果抽取本身把事件循环**同步**堵死（正则退化那条路），`setTimeout` 根本轮不到执行
+   * ——`platform-fontend` 就是后者：连 240 s 的上限都没触发，进程一动不动。那种仓只能靠
+   * 外层 `timeout` 杀掉，再用 `scripts/record-coverage.ts` 把结论落成一行。
+   */
+  indexTimeoutMs: number;
 };
 
 function parseArgs(argv: readonly string[]): Args {
   const args: Args = {
     file: inventoryPath(), force: false, limit: null, budgetGb: null,
     floorGb: DEFAULT_DISK_FLOOR_GB, noClone: false, json: false, targetCount: TARGET_REPOS,
-    retries: 2,
+    retries: 2, indexTimeoutMs: CLONE_TIMEOUT_MS,
   };
   const number = (raw: string | undefined): number | null => {
     const value = Number(raw ?? '');
@@ -112,6 +132,11 @@ function parseArgs(argv: readonly string[]): Args {
     else if (flag === '--floor-gb') { args.floorGb = number(argv[i + 1]) ?? DEFAULT_DISK_FLOOR_GB; i += 1; }
     else if (flag === '--target-count') { args.targetCount = number(argv[i + 1]) ?? TARGET_REPOS; i += 1; }
     else if (flag === '--retries') { args.retries = number(argv[i + 1]) ?? 2; i += 1; }
+    else if (flag === '--index-timeout-s') {
+      const sec = number(argv[i + 1]);
+      args.indexTimeoutMs = sec === null || sec <= 0 ? CLONE_TIMEOUT_MS : sec * 1000;
+      i += 1;
+    }
     else if (flag === '--help' || flag === '-h') { usage(); process.exit(0); }
   }
   return args;
@@ -131,6 +156,7 @@ function usage(): void {
     `  --floor-gb N   可用空间减掉这批之后必须还剩下的水位（默认 ${DEFAULT_DISK_FLOOR_GB} GB）`,
     '  --no-clone     只做已有的镜像（不动服务器；缺镜像的仓记 ok=false）',
     '  --retries N    clone 失败重试次数（默认 2：codeup 的 DNS/HTTPS 会间歇性失败）',
+    '  --index-timeout-s N  单仓索引的墙钟上限（默认 1800）：超时记 ok=false，不让整批挂住',
     '  --json         打一份 JSON 结果（含每仓覆盖率与磁盘外推）',
     '',
     '退出码：0 全部成功（含跳过）/ 3 至少一个仓失败 / 2 环境、清单或配置读不到。',
@@ -313,7 +339,10 @@ async function ensureMirror(ctx: Ctx, entry: InventoryLine): Promise<{ ok: true;
   // 先 clone 到临时目录，成功后才 mv 到位：半成品 bare 仓（git 在写 pack 时被打断）
   // 看起来「目录已经在了」，下一轮就会被当成「镜像存在」——那是最难查的一类假成功。
   const tmp = `${dir}.tmp-onboard`;
-  const url = `https://codeup.aliyun.com/60f9058e68e2993a8e6d0750/123pan/${entry.id}.git`;
+  // 地址来自清单的 `path=`（组织相对、含仓名），**不在这里拼组名**：144 个仓里多数在
+  // 组织根、少数在 123pan/ 与 cdn-groups/。写死 `/123pan/` 正是那 26 个仓
+  // 「未知的仓库路径」的全部原因——它们不是不存在，是我们问错了地址。
+  const url = cloneUrl(entry);
   console.log(`  clone ${entry.id}（${url} → ${dir}）…`);
   const cloned = await cloneWithRetry(ctx.host, ['git', 'clone', '--mirror', '--quiet', url, tmp], ctx.args.retries + 1);
   if (cloned.run.code !== 0) {
@@ -324,8 +353,35 @@ async function ensureMirror(ctx: Ctx, entry: InventoryLine): Promise<{ ok: true;
   // 清单里写的分支才是我们要的那一条（错法的代价见 `repo-inventory.ts` 文件头）。
   const branchCheck = await server(ctx.host, ['git', `--git-dir=${tmp}`, 'rev-parse', '--verify', `refs/heads/${entry.branch}`]);
   if (branchCheck.code !== 0) {
+    // 分支不在 → 先把「这个仓到底有没有东西」问清楚再报：`clone` 一个空仓是**成功**的
+    // （bare 目录建出来了、但一个 ref 都没有），而那句「镜像里没有分支 master」会让人
+    // 去查分支名。空仓与分支名写错是两件事，理由列要能分开它们。
+    // 三种「没有那个分支」要分得开，否则理由列读不出下一步该做什么：
+    //   1. 一个 ref 都没有   → 空仓（`gocron` 之流）
+    //   2. 有 ref 但没有分支 → 只有 tag / 特殊 ref，clone 得到的是空工作树
+    //   3. 有别的分支        → 清单里的分支名写错了（把现有的名字列出来，人能直接改）
+    // 用 `show-ref` 而不是 `for-each-ref --format=%(…)`：ssh 会把参数从主机名之后用
+    // **空格拼成一条远端命令行**（见 mirror.ts 的同一条注意事项），`%(refname)` 里的
+    // 圆括号会被远端 shell 当成语法错误——第一版正是这么写的，于是「有 0 个 ref」与
+    // 「ref 列表读失败」在日志里长得一样（`-1 个非分支 ref`）。show-ref 没有这个坑。
+    const allRefs = await server(ctx.host, ['git', `--git-dir=${tmp}`, 'show-ref']);
+    const headRefs = await server(ctx.host, ['git', `--git-dir=${tmp}`, 'show-ref', '--heads']);
+    const linesOf = (text: string): string[] => text.split('\n').filter((l) => l.trim() !== '');
+    const refCount = allRefs.code === 0 ? linesOf(allRefs.stdout).length : 0;
+    const branchNames = headRefs.code === 0
+      ? linesOf(headRefs.stdout).map((line) => line.replace(/^[0-9a-f]+\s+refs\/heads\//, '').trim())
+      : [];
     await server(ctx.host, ['rm', '-rf', tmp]);
-    return { ok: false, error: `镜像里没有分支 ${entry.branch}（清单第 ${entry.line} 行写的是它）` };
+    let reason: string;
+    if (refCount === 0) {
+      reason = '远端是空仓（clone 成功但一个 ref 都没有，索引无从下手）';
+    } else if (branchNames.length === 0) {
+      reason = `远端没有任何分支（只有 ${String(refCount)} 个非分支 ref，如 tag）：clone 成功，但没有可索引的分支`;
+    } else {
+      reason = `镜像里没有分支 ${entry.branch}（清单第 ${entry.line} 行写的是它）；`
+        + `远端现有的分支：${branchNames.slice(0, 8).join('、')}`;
+    }
+    return { ok: false, error: reason };
   }
   const setHead = await server(ctx.host, ['git', `--git-dir=${tmp}`, 'symbolic-ref', 'HEAD', `refs/heads/${entry.branch}`]);
   if (setHead.code !== 0) {
@@ -358,6 +414,36 @@ async function ensureMirror(ctx: Ctx, entry: InventoryLine): Promise<{ ok: true;
   return { ok: true, cloned: true, gb: await mirrorSizeGb(ctx.host, dir) };
 }
 
+/**
+ * 给一个 promise 加上墙钟上限。
+ *
+ * 为什么不是 `AbortSignal`：被包住的 `measureOne` 是一串 `execFile`/`pg` 调用，没有一条
+ * 支持取消；能做的只有「不再等它」。所以这里**故意**让原 promise 悬着（它的结果被丢弃），
+ * 调用方拿到一条明确的失败。代价是那个挂住的子进程会一直活到进程结束——所以收尾时
+ * 只要出现过超时就强制 `process.exit()`（见 main() 末尾），否则事件循环永远不空。
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        resolve(onTimeout());
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
 /** 索引一个仓并量覆盖率。失败一律是 `{ ok: false, error }`，不抛。 */
 async function measureOne(
   entry: InventoryLine,
@@ -367,12 +453,20 @@ async function measureOne(
   counts: Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'filesSkippedGenerated'
     | 'pages' | 'outlineFiles' | 'imports'>;
 } | { ok: false; error: string }> {
-  const synced = await syncRepoIndex(db, entry.id, sha);
-  if (!synced.ok) return { ok: false, error: `索引失败：${synced.message}` };
   // `files_total` 来自 `ls-tree`，与索引不是同一趟 I/O：索引只回答「我记得什么」，
   // 树回答「实际有多少」——两者的差就是这张表的全部意义，所以必须真去列一次。
+  //
+  // 顺序（2026-11-09 起）：**先列树，再索引**。理由只在失败路径上——索引失败时那句
+  // 「git cat-file 读取超时」本身不含任何量级信息，读的人无法判断是「仓坏了」还是
+  // 「这个仓有 1.3 万个文件、单个 blob 106 MB」（`beats` 就是后者）。把树先数出来，
+  // 失败原因就能带上「树里有 N 个文件」，这是 `repo_coverage.error` 这一列唯一的价值：
+  // 让下一次的人不用重新跑一遍才知道为什么。
   const tree = await lsTreeEntries(entry.id, { ref: sha });
   if (!tree.ok) return { ok: false, error: `列树失败：${tree.message}` };
+  const synced = await syncRepoIndex(db, entry.id, sha);
+  if (!synced.ok) {
+    return { ok: false, error: `索引失败（树里 ${tree.data.length} 个文件）：${synced.message}` };
+  }
   return { ok: true, counts: coverageCounts(synced.data.index, tree.data.length) };
 }
 
@@ -429,6 +523,8 @@ async function main(): Promise<number> {
       ——续跑跳过的仓不该占名额，否则「--limit 10」在断点续跑时会一个都不做。 */
   let attempted = 0;
   let deferred = 0;
+  /** 有过「索引超时」就记下来：挂住的 promise 不会自己结束，收尾要强制退出（见文件末尾）。 */
+  let timedOut = 0;
   const budgetLeft = args.limit;
 
   for (const entry of inventory.repos) {
@@ -514,8 +610,19 @@ async function main(): Promise<number> {
       }
 
       attempted += 1;
-      const result = await measureOne(entry, headRes.data.sha);
+      const startedMs = Date.now();
+      const result = await withTimeout(
+        measureOne(entry, headRes.data.sha),
+        args.indexTimeoutMs,
+        () => ({
+          ok: false as const,
+          error: `索引超时（${Math.round(args.indexTimeoutMs / 1000)} 秒内没有返回，已按失败记账）：`
+            + '镜像读得回来、HEAD 也读到了，是抽取内容这一步没跑完；'
+            + '下次用更大的 --index-timeout-s 再试，或先看这个仓的文件量/大文件',
+        }),
+      );
       if (!result.ok) {
+        if (result.error.startsWith('索引超时（')) timedOut += 1;
         base.error = result.error;
         failures.push({ repo: entry.id, reason: result.error });
         outcomes.push(base);
@@ -608,6 +715,11 @@ async function main(): Promise<number> {
     if (orphans.length > 0) console.log(`表里另有 ${orphans.length} 个不在清单里的仓（历史行，不影响读侧）：${orphans.join('、')}`);
   }
 
+  if (timedOut > 0) {
+    // 挂住的那条 promise 还占着 ssh/pg 的句柄，`pool.end()` 也等不到它；不硬退就是
+    // 「跑完了但进程不动」。这里把退出码先写死，再强制结束（下面 finally 里的 end 会跳过）。
+    process.exit(failures.length === 0 ? 0 : 3);
+  }
   return failures.length === 0 ? 0 : 3;
 }
 

@@ -5,8 +5,9 @@ import { describe, expect, it } from 'vitest';
 
 import { parseRepos } from '../src/core/codemirror/mirror.js';
 import {
-  DEFAULT_STALE_AFTER_DAYS, FALLBACK_BRANCH, STALE_NEVER, diffRepos, formatInventoryLine,
-  inventoryToRepos, parseRepoInventory, readRepoInventory, reposSettingJson, staleThresholdsOf,
+  CODEUP_ORG, DEFAULT_STALE_AFTER_DAYS, FALLBACK_BRANCH, STALE_NEVER, cloneUrl, cloneUrlOf,
+  diffRepos, formatInventoryLine, inventoryToRepos, parseRepoInventory, readRepoInventory,
+  reposSettingJson, staleThresholdsOf,
 } from '../src/core/codemirror/repo-inventory.js';
 
 /**
@@ -22,6 +23,8 @@ import {
  * 3. **路径**：`path` 由 `MIRROR_ROOT` 拼出来，仓名不许带 `/` 或 `..`（它进的是服务器路径）。
  * 4. **与设置同构**：清单 → `[{"id","path"}]` 之后必须能被 `parseRepos()` 原样读回来
  *    ——这条是这个文件存在的理由（一个来源、零漂移）。
+ * 5. **`path=` 这一格**（2026-11-09 新增）：它决定克隆地址。它坏掉的方式必须是大声的
+ *    ——`path` 最后一段不等于仓名时，「目录里是 A 仓、每晚去 fetch B 仓」是安静的。
  */
 
 const SAMPLE = `# 注释：三行真数据
@@ -37,10 +40,20 @@ describe('parseRepoInventory', () => {
     const parsed = parseRepoInventory(SAMPLE);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
+    // 没写 path= 的三行都落在**历史默认** `123pan/<仓名>` 上：旧清单读出来仍然指向原地址。
     expect(parsed.data.repos).toEqual([
-      { id: '123pan-pc', branch: 'master', line: 2, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
-      { id: '123pan-uni-app', branch: 'master', line: 3, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
-      { id: '123pan-gateway', branch: FALLBACK_BRANCH, line: 6, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
+      {
+        id: '123pan-pc', branch: 'master', path: '123pan/123pan-pc', line: 2,
+        staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      },
+      {
+        id: '123pan-uni-app', branch: 'master', path: '123pan/123pan-uni-app', line: 3,
+        staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      },
+      {
+        id: '123pan-gateway', branch: FALLBACK_BRANCH, path: '123pan/123pan-gateway', line: 6,
+        staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      },
     ]);
     // 注释 2 行 + 空行 2 行（含结尾换行造出来的那一行）：计数只为「这份文件确实被读到了」。
     expect(parsed.data.skipped).toBe(4);
@@ -51,7 +64,7 @@ describe('parseRepoInventory', () => {
   it('连续空格当一格（有人用对齐）', () => {
     const parsed = parseRepoInventory('a    dev\n');
     expect(parsed.ok && parsed.data.repos[0]).toEqual({
-      id: 'a', branch: 'dev', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      id: 'a', branch: 'dev', path: '123pan/a', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
     });
   });
 
@@ -110,6 +123,67 @@ describe('parseRepoInventory', () => {
     expect(parsed.message).toContain('一个仓都没有');
   });
 
+  it('path= 决定克隆地址：组织根 / 组下 / 顺序无关', () => {
+    const parsed = parseRepoInventory(
+      'apisrv master path=123pan/apisrv\n'
+      + 'artifacts master path=artifacts\n'
+      + 'beats main path=cdn-groups/beats\n'
+      + 'tl dev stale=30 path=test-groups/tl\n',
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.data.repos.map((entry) => entry.path)).toEqual([
+      '123pan/apisrv', 'artifacts', 'cdn-groups/beats', 'test-groups/tl',
+    ]);
+    // 格子顺序无关：stale 写在 path 前面也认。
+    expect(parsed.data.repos[3]!.staleAfterDays).toBe(30);
+    // 地址只在 cloneUrlOf 一处拼：组织根 + path + .git。
+    expect(parsed.data.repos.map(cloneUrl)).toEqual([
+      `${CODEUP_ORG}/123pan/apisrv.git`,
+      `${CODEUP_ORG}/artifacts.git`,
+      `${CODEUP_ORG}/cdn-groups/beats.git`,
+      `${CODEUP_ORG}/test-groups/tl.git`,
+    ]);
+  });
+
+  it('path 的最后一段必须等于仓名（目录名与地址指向同一个仓）', () => {
+    // 这条校验拦的是**安静**的错法：目录叫 a、地址指着 b，每晚 fetch 的是别人。
+    const parsed = parseRepoInventory('a master path=123pan/b\n');
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toContain('最后一段');
+    expect(parsed.message).toContain('123pan/b');
+  });
+
+  it('path= 写成空的 / 带 .. / 带奇怪字符整份失败', () => {
+    for (const bad of ['path=', 'path=123pan/../etc', 'path=/abs', 'path=a//b', 'path=a b']) {
+      const parsed = parseRepoInventory(`a master ${bad}\n`);
+      expect(parsed.ok, bad).toBe(false);
+    }
+  });
+
+  it('两个 path= 或两个 stale= 整份失败（一个仓只有一条路径/一个阈值）', () => {
+    const twicePath = parseRepoInventory('a master path=123pan/a path=cdn-groups/a\n');
+    expect(twicePath.ok).toBe(false);
+    if (!twicePath.ok) expect(twicePath.message).toContain('两个 path=');
+    const twiceStale = parseRepoInventory('a master stale=30 stale=never\n');
+    expect(twiceStale.ok).toBe(false);
+    if (!twiceStale.ok) expect(twiceStale.message).toContain('两个 stale=');
+  });
+
+  it('认不出的格子点名（第三格起只认 path= 与 stale=）', () => {
+    const parsed = parseRepoInventory('a master group=123pan\n');
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.message).toContain('认不出');
+    expect(parsed.message).toContain('group=123pan');
+  });
+
+  it('cloneUrlOf：org 的尾斜杠不会拼出双斜杠', () => {
+    expect(cloneUrlOf('cdn-groups/beats', `${CODEUP_ORG}/`)).toBe(`${CODEUP_ORG}/cdn-groups/beats.git`);
+    expect(cloneUrlOf('/cdn-groups/beats')).toBe(`${CODEUP_ORG}/cdn-groups/beats.git`);
+  });
+
   it('CRLF 不会把 \\r 带进分支名', () => {
     const parsed = parseRepoInventory('a master\r\nb main\r\n');
     expect(parsed.ok).toBe(true);
@@ -121,8 +195,11 @@ describe('parseRepoInventory', () => {
 describe('inventoryToRepos / reposSettingJson', () => {
   it('path 由 MIRROR_ROOT 拼出来（尾斜杠不影响）', () => {
     const lines = [
-      { id: 'a', branch: 'master', line: 1, staleAfterDays: DEFAULT_STALE_AFTER_DAYS },
-      { id: 'b', branch: 'dev', line: 2, staleAfterDays: null },
+      {
+        id: 'a', branch: 'master', path: '123pan/a', line: 1,
+        staleAfterDays: DEFAULT_STALE_AFTER_DAYS,
+      },
+      { id: 'b', branch: 'dev', path: 'cdn-groups/b', line: 2, staleAfterDays: null },
     ];
     expect(inventoryToRepos(lines, '/srv/x/')).toEqual([
       { id: 'a', path: '/srv/x/a.git' },
@@ -194,13 +271,17 @@ describe('readRepoInventory', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.data.file).toBe(file);
-    expect(formatInventoryLine(result.data.inventory.repos[0]!)).toBe('shop-web\tmain');
+    expect(formatInventoryLine(result.data.inventory.repos[0]!)).toBe('shop-web\tmain\tpath=123pan/shop-web');
     // 偏离默认的第三格才写出来（一份 30 行的清单里 24 行写 7 只是噪音）。
     const withStale = parseRepoInventory('a master 365\nb main never\nc dev\n');
     expect(withStale.ok).toBe(true);
     if (!withStale.ok) return;
-    expect(withStale.data.repos.map(formatInventoryLine))
-      .toEqual(['a\tmaster\t365', `b\tmain\t${STALE_NEVER}`, 'c\tdev']);
+    // `path=` 永远写出来（它才是「这个仓在哪」的记录）；stale 只在偏离默认时写。
+    expect(withStale.data.repos.map(formatInventoryLine)).toEqual([
+      'a\tmaster\tpath=123pan/a\tstale=365',
+      `b\tmain\tpath=123pan/b\tstale=${STALE_NEVER}`,
+      'c\tdev\tpath=123pan/c',
+    ]);
   });
 
   it('坏行的报错里有文件名', async () => {

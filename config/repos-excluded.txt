@@ -1,0 +1,14 @@
+# **没有**进 `config/repos.txt` 的仓 —— 每行一个，带理由。
+#
+# 为什么单独一份：`config/repos.txt` 的重名是硬错误（两行同一个仓说明有人改到一半）。
+# 而 codeup 上确实存在「同一个仓名在两个组下各一份」的情形——那不是改到一半，是两个
+# 各自独立的仓共用一个名字。镜像目录按裸仓名建，所以只能收一份；另一份必须**被记下来**，
+# 否则「不遗不漏」就少了两个。这份文件就是那两个的位置。
+#
+# 判据（owner 给的）：取 `lastActivityAt` 更新的那份。实测反而与直觉相反——
+# 两个 cdn-groups 副本都停在 2026-01-13（像是某次一次性推送留下的），而根下那份
+# go-protobuf 昨天还在动、artifacts 10-30 才动过。所以两份都取**根下**那一份。
+#
+# 格式：<组路径><TAB><理由>
+cdn-groups/artifacts	artifacts 的另一个副本：保留 artifacts（lastActivityAt 2026-10-30T15:28:18+08:00 更新），本行是 lastActivityAt 2026-01-13T19:55:08+08:00
+cdn-groups/go-protobuf	go-protobuf 的另一个副本：保留 go-protobuf（lastActivityAt 2026-11-09T09:28:06+08:00 更新），本行是 lastActivityAt 2026-01-13T19:55:08+08:00

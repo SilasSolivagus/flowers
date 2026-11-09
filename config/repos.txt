@@ -1,10 +1,11 @@
 # 代码镜像仓清单 —— 「哪些仓」的唯一一份名单。
 #
 # 谁读它：
-#   scripts/sync-mirrors.sh   服务器上跑，按这里的仓名 + 分支从 codeup fetch（本文件由
-#                             scripts/install-cron.sh --server 一并 rsync 到服务器）
+#   scripts/sync-mirrors.sh   服务器上跑，按这里的「仓名 + 分支 + path」从 codeup fetch
+#                             （本文件由 scripts/install-cron.sh --server 一并 rsync 到服务器）
 #   scripts/repos-apply.ts    把这份清单**播种**成 app_settings.code.mirror.repos
 #   scripts/onboard-repos.ts  批量建镜像 + 索引 + 写 repo_coverage 的批量入口
+#   src/core/codemirror/repo-inventory.ts  解析器（TS 侧唯一一份）
 #
 # 为什么是一份纯文本而不是 shell 数组 / 又一份 JSON：
 # 这一层要能被三处读到——Linux 上的 bash（没有 node）、本机的 tsx、以及人（加一个仓就是
@@ -12,158 +13,213 @@
 # 的和索引读的就不是同一批仓（2026-11-08 的 `123pan-cross-frontend` 正是这么漏掉的：
 # 它在设置里、不在数组里，于是「代码快照较旧」挂了十几天没人知道）。
 #
-# 格式：<仓名><TAB 或空格><分支>[<TAB 或空格><stale_after_days>]；`#` 开头整行是注释；
-# 空行忽略。第三格可选：超过这么多天没有新提交才提醒（缺省 7）；写 never = 这个仓的上游
-# 已归档，**不因「上游不动了」提醒**（同步失败照样报）。为什么按仓定阈值见
-# src/core/codemirror/repo-inventory.ts 的文件头，以及 2026-11-09 那份报告。
-#   - 仓名只放行 [A-Za-z0-9._-]：它会被拼成服务器上的路径
-#     （/srv/123pan-mirror/<仓名>.git），带 `/` 或 `..` 就是一次路径穿越。
-#   - 分支写**远端真实存在的那一个**。镜像的 HEAD 会跟着它走，而 `head()` 读的是 HEAD
-#     ——分支写错时出错方式是「读到了另一个分支的最新提交」，不是报错。
-#   - 顺序无意义；合并去重按仓名，重名直接报错（早失败比跑到一半更像一件事）。
+# ─── 格式（2026-11-09 起：多了 path= 一格）────────────────────────────────────
 #
-# 加一个仓的顺序（两步，第二步是幂等的）：
-#   1. 在这里加一行 → commit
-#   2. scripts/repos-apply.ts --dry-run（看 diff）→ scripts/repos-apply.ts
-#      再 scripts/onboard-repos.ts（建镜像 + 索引 + 覆盖率）
+#   <仓名><空白><分支>[<空白>path=<组路径>][<空白>stale=<天数>|never]
+#
+#   `#` 开头整行是注释；空行忽略；一行坏了整份作废（半份仓库列表比没有更糟）。
+#
+#   path=   组织相对的**克隆路径**，含仓名：`123pan/apisrv`、`cdn-groups/beats`、
+#           `apisrv`（组织根）。克隆地址 = CODEUP_ORG + `/` + path + `.git`，
+#           只在 `src/core/codemirror/repo-inventory.ts` 的 `cloneUrlOf()` 一处拼。
+#           缺省（不写）= `123pan/<仓名>`，那是 2026-11-09 之前唯一存在过的地址，
+#           旧清单逐行读出来仍然指向原来那个仓。
+#   stale=  超过这么多天没有新提交才提醒（缺省 7）；never = 上游已归档/停更，
+#           不因「上游不动了」提醒，**但同步失败照样报**。判定在 health.ts。
+#           第三格光着写 `never` / 正整数仍然按 stale 读（历史写法）。
+#
+# 三条校验（`parseRepoInventory()` 与 shell 侧逐条对齐）：
+#   1. 仓名只放行 [A-Za-z0-9._-]：它会被拼成服务器上的路径
+#      （/srv/123pan-mirror/<仓名>.git），带 `/` 或 `..` 就是一次路径穿越。
+#   2. path 的最后一段**必须等于仓名**：镜像目录按仓名建、克隆地址按 path 拼，
+#      两者不一致时错法是安静的（目录里躺着 A 仓，每晚去 fetch B 仓）。
+#   3. 重名是错误。同一个仓名在 codeup 的两个组下各有一份时只能收一份，
+#      另一份写进 `config/repos-excluded.txt`（那里记「为什么不要它」）。
+#
+# ─── 为什么多了 path= 这一格（2026-11-09，34 个仓「不存在」的真正原因）────────
+#
+# 克隆地址原来是**拼**的：`…/60f9058e68e2993a8e6d0750/123pan/<仓名>.git`。这个拼法把
+# 「仓在哪个组」写死成了 `123pan`。而 `ListRepositories`（`x-total: 144`）的真实返回里，
+# **多数仓就在组织根**（`…/artifacts.git`）、少数在 `123pan/`、`cdn-groups/`、`test-groups/`。
+# 于是 `…/123pan/artifacts.git` 被远端答成「未知的仓库路径，请检查仓库路径是否正确」——
+# 一句听起来像「这个仓不存在」的话，`repo_coverage.error` 也就照抄成了「不存在」。
+# 那 26 个「不存在」不是现实，是我们问错了地址。组路径是**仓的属性**，只能从清单里读。
+#
+# 镜像目录名**不改**：仍然是裸仓名（/srv/123pan-mirror/<仓名>.git），66 个已有镜像一个都
+# 没动过，改的只是 fetch/clone 用的地址。这样「改名 66 个目录 + 改 66 行设置」的风险
+# （漏一个就是一次静默的换仓）全都不存在，而 path 已经承担了「地址从哪来」这件事。
+#
+# ─── 加一个仓的顺序（第二步是幂等的）────────────────────────────────────────
+#
+#   1. 在这里加一行（path 从 `ListRepositories` 的 pathWithNamespace 抄，别自己拼）→ commit
+#   2. npx tsx scripts/repos-apply.ts --dry-run（看 diff）→ scripts/repos-apply.ts
+#      再 npx tsx scripts/onboard-repos.ts（建镜像 + 索引 + 覆盖率）
 #   服务器上的镜像同步不需要再改：它读的就是这份文件。
 #
-# 前三个是本产品已知的前端/前端配套；agent-tracker 与 gateway 是 2026-11-08 owner 点名的
-# 两个仓（原先只存在于口头清单里，没有镜像）。
-123pan-pc	master
-123pan-uni-app	master
-123pan-cross-frontend	master
-123pan-agent-tracker	master	365
-123pan-gateway	master	180
-apisrv	master
+# 分支一律**逐个 ls-remote 验过**（2026-11-09，144 个 path 全跑了一遍）：绝大多数是
+# master，另有 main / dev / v1 / lighthouse_v1。分支写错的错法是安静的——fetch 成功、
+# HEAD 很新、材料对着另一个分支的代码。
 
-# ─── 2026-11-08 第二批：清单文档《代码仓库全景图-2026-04-16.md》里的前端的一批（17 个）───
-#
-# 为什么只挑前端、不挑那 79 个 Go 仓：解析器只读 [ts|tsx|js|jsx|vue] 与 `pages.json`。
-# `123pan-gateway`（39 个 .lua）已经证明过代价——镜像建了、同步绿了、索引 **0/49**：
-# 仓进来但不进索引，只会让覆盖率表多 79 行 0，并每月多花几十 GB 磁盘去换一个看不见。
-#
-# 这 17 个名字来自那份文档，而它是**六个月前的产品文档、不是仓注册表**。所以：
-#   - 仓名按文档原样写；远端已经不存在的（`ls-remote` 说 not found）**不删**，
-#     让 onboard-repos.ts 把它们记成 ok=false + 原因（跑一次就知道缺的是哪几个）；
-#   - `platform-fontend` 疑似 `platform-frontend` 的笔误（两种都试过，都不存在）；
-#   - `eslint-config` / `app-ui-test` / `web-ui-test` 是库与测试件，不是应用——按名字照加，
-#     覆盖率表会显示它们「有索引、没有页面」，这是它们该有的样子。
-# 分支一律 master：逐个 `git ls-remote --symref <url> HEAD` 验过，默认分支就是 master。
-#
-# 第三格为什么是这几个数（2026-11-09，判据只一条：**这个仓多久没有任何提交是正常的**）：
-#   virtuallist-antd  never   2023-06-04 之后再无提交（1254 天）。已归档的组件库，HEAD 年龄
-#                             不是关于我们管道的任何事实；任何有限数字早晚会被跨过，然后
-#                             下一个人会看到一个「阈值」并以为它是量出来的。
-#   ele-react         730     停更的 Electron 客户端（364 天）。留一条硬上界：真有人在两年后
-#                             接手时，那句提醒仍然会响。
-#   share             540     分享页（339 天）。产品仓，只是发版稀疏：一年半没有提交本身
-#                             就是一件该被问一句的事。
+# ─── 按仓的 stale 阈值（判据只有一条：**这个仓多久没有任何提交是正常的**）─────
+#   virtuallist-antd  never   2023-06-04 之后再无提交（1254 天）。已归档的组件库，HEAD
+#                             年龄不是关于我们管道的任何事实；任何有限数字早晚会被跨过，
+#                             然后下一个人会看到一个「阈值」并以为它是量出来的。
+#   review            never   codeup 上 archived=true，最后活动 2021-08-19。**归档不等于不
+#                             存在**，所以它仍然在清单里、仍然被索引；只是不该因为它不动
+#                             而每晚提醒。
+#   ele-react         730     停更的 Electron 客户端（364 天）。留一条硬上界。
+#   share             540     分享页（339 天）。产品仓，只是发版稀疏。
 #   eslint-config     365     配置库（161 天）。按年改一次是它的正常节奏。
 #   agent-tracker     365     内部工具（73 天）。季度级改动。
-#   gateway           180     网关（50 天，十天内会越过全局 7 天）。它是活跃组件，半年是上界。
-# 这六个之外**一律不写第三格**（= 全局 7 天）：真停摆的仓要尽早被发现，而给所有仓放宽阈值
-# 等于把这一列取消掉。数字是「下一次复评的时间点」，不是永久静音。
-#
-# 2026-11-09 更正：那 7 个「远端不存在」的仓已经从这份清单里**删掉**了。它们在这里
-# 每多待一夜，`sync-mirrors.sh` 就对每一个各打一条 `FAIL … 目录不存在` 并让整轮 rc=3
-# ——一个每晚都非零的退出码不再是信号，于是真正的那一次故障也没人看。
-# 删掉的 7 个是：123pan-ssr、123pan-video、123pan-windowsPro、crazy-api、
-# platform-fontend、app-ui-test、web-ui-test。
-# **证据没有删**：`repo_coverage` 里它们 7 行 ok=false + 原因还在（要查为什么当初以为它们
-# 存在，看那 7 行 + 报告 §8.4）。所以：先查表，**不要再从《代码仓库全景图-2026-04-16.md》
-# 把名字抄回来**——那份文档是历史，不是仓注册表。
-frontend	master
-share	master	540
-phoenix-share	master
-123pan_manager_frontend	master
-123pan-ele-react	master	730
-123pan-resource-library	master
-123pan-virtuallist-antd	master	never
-123pan-image-hosting	master
-Nimbus	master
-eslint-config	master	365
+#   gateway           180     网关（50 天）。活跃组件，半年是上界。
+# 这七个之外**一律不写这一格**（= 全局 7 天）：给所有仓放宽阈值等于把这一列取消掉。
 
-# ─── 2026-11-09 第三批：Go 仓先接 5 个（35 条 backend 需求）───
-#
-# 为什么是这 5 个、为什么只接 5 个：全量 79 个 Go 仓约 32 GB（按 apisrv 0.367 GB 外推），
-# 而 35 条 backend 需求集中在四块：风控/封禁（10 条）、对象存储与 CDN 直链（6 条）、
-# 会员/付费/发票（3 条）、文件域（回收站/批量重命名/修改时间/搜索，4 条）。所以按
-# 「需求落在哪个服务」挑，不按「仓好不好接」挑：
-#   usercenter         账号与封禁字段（默认分支是 v1，不是 master——ls-remote 验过）
-#   pay_server         会员到期、活动商品配置、发票
-#   contentTreeSrv     文件树/目录结构：回收站恢复、批量重命名、file.update_at
-#   api_server_restful RESTful 入口（/blacklist/add 这类接口的另一份实现）
-#   osssrv             对象存储：直链产品的回源/生命周期/日志/成本
-# 没能进来的：`cdn-manager` / `cloud-drive` 在 codeup 的 123pan 组下**不存在**
-# （`ls-remote` 多种拼法都 not found，见报告）。直链那 6 条因此只有 osssrv 这一侧。
-usercenter	v1
-pay_server	master
-contentTreeSrv	master
-api_server_restful	master
-osssrv	master
+# ── 组织根下的仓（path 就是仓名；这批正是被「拼 /123pan/」拼错的那一批）──
+123pan-ssr	master	path=123pan-ssr
+123pan-video	master	path=123pan-video
+123pan-windowsPro	master	path=123pan-windowsPro
+artifacts	master	path=artifacts
+ats-9.0.2	master	path=ats-9.0.2
+audit-tools	master	path=audit-tools
+cdn-admin	master	path=cdn-admin
+cdn-cp	master	path=cdn-cp
+cdn-proxy	master	path=cdn-proxy
+cloud-drive	master	path=cloud-drive
+crontab	master	path=crontab
+crypto	master	path=crypto
+dispatch-monitor	master	path=dispatch-monitor
+download_peed	main	path=download_peed
+go-protobuf	master	path=go-protobuf
+gocron	master	path=gocron
+helper	master	path=helper
+kong-2.5.0	master	path=kong-2.5.0
+log	master	path=log
+log-agent	master	path=log-agent
+redis	master	path=redis
+trafficserver	master	path=trafficserver
+Web-Nexus	master	path=Web-Nexus
+xgo	master	path=xgo
 
-# ─── 2026-11-09 第四批：Go 仓全量接入（阶段二先验过的 10 个）───
-#
-# 这一批的仓名来自 `.superpowers/sdd/2026-11-08-index-value/go-repos.txt`（72 个，从
-# 2026-04-16 的清单里抽出来的），**分支一格全部 ls-remote 验过**，不按「大家都叫 master」抄：
-#   silentDataES 的默认分支是 dev（`ref: refs/heads/dev`），写 master 的错法是安静的
-#   ——fetch 成功、HEAD 很新、对着另一个分支的代码。go-etag-worker 同理是 main。
-# 先写这 10 个，是因为它们要在**全量之前**把 vendor / 生成代码两条排除口径验一遍
-# （见 docs/superpowers/plans/2026-11-08-repo-onboarding.md §10.2）。
-api_server	master
-upload-server	master
-offline-download	master
-mount-disk-ws	master
-gofs	master
-uuidsrv	master
-cdk_manager	master
-silentDataES	dev
-transcode	master
-123pan-slb	master
+# ── 123pan 组 ──
+123pan-agent-tracker	master	path=123pan/123pan-agent-tracker	stale=365
+123pan-cross-frontend	master	path=123pan/123pan-cross-frontend
+123pan-dylib-go	master	path=123pan/123pan-dylib-go
+123pan-ele-react	master	path=123pan/123pan-ele-react	stale=730
+123pan-gateway	master	path=123pan/123pan-gateway	stale=180
+123pan-image-hosting	master	path=123pan/123pan-image-hosting
+123pan-pc	master	path=123pan/123pan-pc
+123pan-pc-go	master	path=123pan/123pan-pc-go
+123pan-piecehash	master	path=123pan/123pan-piecehash
+123pan-resource-library	master	path=123pan/123pan-resource-library
+123pan-slb	master	path=123pan/123pan-slb
+123pan-traffic	master	path=123pan/123pan-traffic
+123pan-uni-app	master	path=123pan/123pan-uni-app
+123pan-virtuallist-antd	master	path=123pan/123pan-virtuallist-antd	stale=never
+123pan_app_package	main	path=123pan/123pan_app_package
+123pan_manager	master	path=123pan/123pan_manager
+123pan_manager_frontend	master	path=123pan/123pan_manager_frontend
+api_server	master	path=123pan/api_server
+api_server_restful	master	path=123pan/api_server_restful
+apisrv	master	path=123pan/apisrv
+app	main	path=123pan/app
+app_plugin	main	path=123pan/app_plugin
+app_tv	master	path=123pan/app_tv
+audit-consumer	master	path=123pan/audit-consumer
+backup-disk	dev	path=123pan/backup-disk
+batch-process-data-worker	master	path=123pan/batch-process-data-worker
+binlog-srv	master	path=123pan/binlog-srv
+binlog-to-elasticsearch	master	path=123pan/binlog-to-elasticsearch
+binlog_go_new	master	path=123pan/binlog_go_new
+cdk_manager	master	path=123pan/cdk_manager
+cloud-disk-ws	master	path=123pan/cloud-disk-ws
+cloud-drive-migration	master	path=123pan/cloud-drive-migration
+contentTreeSrv	master	path=123pan/contentTreeSrv
+copy-file-schedule-worker	master	path=123pan/copy-file-schedule-worker
+copy-file-worker	master	path=123pan/copy-file-worker
+cron-scripts	master	path=123pan/cron-scripts
+defense-nginx	master	path=123pan/defense-nginx
+devops	master	path=123pan/devops
+dispatch	master	path=123pan/dispatch
+eslint-config	master	path=123pan/eslint-config	stale=365
+file-analysis-worker	master	path=123pan/file-analysis-worker
+frontend	master	path=123pan/frontend
+gcache-adapter	master	path=123pan/gcache-adapter
+get_domain	master	path=123pan/get_domain
+getconfig-api	master	path=123pan/getconfig-api
+gf-jwt	master	path=123pan/gf-jwt
+gf16	master	path=123pan/gf16
+go-async-etag-worker	master	path=123pan/go-async-etag-worker
+go-cloud-capacity-worker	master	path=123pan/go-cloud-capacity-worker
+go-direct-link-worker	master	path=123pan/go-direct-link-worker
+go-etag-worker	main	path=123pan/go-etag-worker
+go-kafka-service	master	path=123pan/go-kafka-service
+go-share	master	path=123pan/go-share
+go-thumbnail	master	path=123pan/go-thumbnail
+gofs	master	path=123pan/gofs
+health_check	master	path=123pan/health_check
+log-agent-client	master	path=123pan/log-agent-client
+metrics-consumer	master	path=123pan/metrics-consumer
+minio_deploy	master	path=123pan/minio_deploy
+mount-disk	master	path=123pan/mount-disk
+mount-disk-ws	master	path=123pan/mount-disk-ws
+mq_consumer	master	path=123pan/mq_consumer
+mq_consumer_v5	master	path=123pan/mq_consumer_v5
+mq_copy	master	path=123pan/mq_copy
+new-year-worker	master	path=123pan/new-year-worker
+new_audit	master	path=123pan/new_audit
+nginx-proxy	master	path=123pan/nginx-proxy
+Nimbus	master	path=123pan/Nimbus
+offline-download	master	path=123pan/offline-download
+OpenAPI	master	path=123pan/OpenAPI
+osssrv	master	path=123pan/osssrv
+pay_server	master	path=123pan/pay_server
+phoenix-share	master	path=123pan/phoenix-share
+php-audit	master	path=123pan/php-audit
+reference-count-worker	master	path=123pan/reference-count-worker
+resource_manager	master	path=123pan/resource_manager
+review	master	path=123pan/review	stale=never
+s3-migration	master	path=123pan/s3-migration
+save-copy-worker	master	path=123pan/save-copy-worker
+share	master	path=123pan/share	stale=540
+share-consumer	master	path=123pan/share-consumer
+silentDataBinlog	master	path=123pan/silentDataBinlog
+silentDataES	dev	path=123pan/silentDataES
+thumbnail	master	path=123pan/thumbnail
+track-consumer	master	path=123pan/track-consumer
+transcode	master	path=123pan/transcode
+transcode-proxy	master	path=123pan/transcode-proxy
+transfer-schedul-worker	master	path=123pan/transfer-schedul-worker
+uncompress_srv	master	path=123pan/uncompress_srv
+upload-consumer	master	path=123pan/upload-consumer
+upload-server	master	path=123pan/upload-server
+usercenter	v1	path=123pan/usercenter
+uuidsrv	master	path=123pan/uuidsrv
+video_audit_work	master	path=123pan/video_audit_work
+webdav	master	path=123pan/webdav
+windows-component	master	path=123pan/windows-component
 
-# ─── 2026-11-09 第四批（续）：清单里剩下 35 个**确实存在**的 Go 仓 ───
-#
-# 72 个名字是从 2026-04-16 的清单里抄的，**普遍已过期**：`ls-remote` 逐个验过，只有 45 个
-# 还在 codeup 的 123pan 组下；另外 27 个返回 `未知的仓库路径，请检查仓库路径是否正确`
-# （= 不存在，不是网络问题）。那 27 个不进这份清单：一个永远 not found 的仓每晚都会让
-# sync 以 rc=3 收尾，而「每晚都红」的日志到第 30 天就不是信息了（§9.1 同一个理由）。
-# 名单与证据在 docs/superpowers/plans/2026-11-08-repo-onboarding.md §10.3。
-#
-# 第三格没有写：Go 仓大多在活跃迭代（这批 HEAD 全是 2026 年），用全局 7 天先测一轮，
-# 谁真的停更了再按仓放宽——反过来（先给所有仓放宽）等于把这一列取消掉。
-123pan-dylib-go	master
-123pan-pc-go	master
-123pan-piecehash	master
-123pan-traffic	master
-123pan_manager	master
-OpenAPI	master
-audit-consumer	master
-batch-process-data-worker	master
-binlog-srv	master
-binlog-to-elasticsearch	master
-binlog_go_new	master
-cloud-disk-ws	master
-cloud-drive-migration	master
-dispatch	master
-file-analysis-worker	master
-gcache-adapter	master
-get_domain	master
-getconfig-api	master
-gf-jwt	master
-gf16	master
-go-async-etag-worker	master
-go-cloud-capacity-worker	master
-go-etag-worker	main
-go-thumbnail	master
-health_check	master
-log-agent-client	master
-metrics-consumer	master
-new_audit	master
-reference-count-worker	master
-resource_manager	master
-s3-migration	master
-silentDataBinlog	master
-uncompress_srv	master
-upload-consumer	master
-webdav	master
+# ── cdn-groups 组 ──
+beats	master	path=cdn-groups/beats
+cdn	master	path=cdn-groups/cdn
+cdn-agent	master	path=cdn-groups/cdn-agent
+cdn-dispatch	master	path=cdn-groups/cdn-dispatch
+cdn-go-proxy	master	path=cdn-groups/cdn-go-proxy
+cdn-manager	master	path=cdn-groups/cdn-manager
+coredns-cdn	master	path=cdn-groups/coredns-cdn
+event-tracking	master	path=cdn-groups/event-tracking
+grpc	master	path=cdn-groups/grpc
+gts	master	path=cdn-groups/gts
+openresty-cdn-gateway	master	path=cdn-groups/openresty-cdn-gateway
+refresh-center-agent	master	path=cdn-groups/refresh-center-agent
+
+# ── test-groups 组 ──
+ai-test-agent	master	path=test-groups/ai-test-agent
+app-ui-test	master	path=test-groups/app-ui-test
+coverage	master	path=test-groups/coverage
+crazy-api	master	path=test-groups/crazy-api
+jmeter-offline	master	path=test-groups/jmeter-offline
+performance_front_test	lighthouse_v1	path=test-groups/performance_front_test
+platform-api	master	path=test-groups/platform-api
+platform-fontend	master	path=test-groups/platform-fontend
+tl	master	path=test-groups/tl
+web-ui-test	master	path=test-groups/web-ui-test
