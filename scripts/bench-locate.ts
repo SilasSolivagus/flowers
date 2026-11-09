@@ -35,44 +35,91 @@
  *
  * 用法：
  *   npx tsx scripts/bench-locate.ts                    # 面一全量 + 面二全量
- *   npx tsx scripts/bench-locate.ts --only 776         # 面一只跑一条
+ *   npx tsx scripts/bench-locate.ts --only 776         # 面一只跑一条（按**旧需求号**过滤，见 `CASES`）
  *   npx tsx scripts/bench-locate.ts --commits 60       # 面二只跑前 60 条
  *   npx tsx scripts/bench-locate.ts --surface 1        # 只跑面一（面二的 A/B 很慢）
  *   npx tsx scripts/bench-locate.ts --surface 2 --c-only  # 面二只跑 C/C'（513 条约 40 秒）
  *   npx tsx scripts/bench-locate.ts --json /tmp/x.json # 另存一份机器可读结果
+ *   npx tsx scripts/bench-locate.ts --asof 2026-11-07T00:00:00Z   # 复现更早那一次的语料边界
+ *   npx tsx scripts/bench-locate.ts --surface 1 --verify-only   # 只做「标准答案还在不在」那道控制
  *
  * `--c-only` 是报告 §0.4 那条复现命令的一部分（A 每条约 30 秒，513 条跑不完，见
  * `armSet`）。用法块早先漏了它，照着报告复现的人会以为只能整面跑。
+ *
+ * ── 2026-11-10：这一份脚本被搬过两处（都不改尺子）
+ *
+ * 1. **传输方式**。原来三个取数口都是 `ssh` 字面量：`ssh dogyun cd /srv/123pan-mirror/<repo>.git`
+ *    （合并记录）与 `ssh dogyun docker exec … psql`（需求）。镜像在 2026-11-09 搬到本机盘后，
+ *    这些命令连第一句 `cd` 都过不去——脚本整体不可运行。现在改成走 `mirror.ts` 的只读读口
+ *    （`mergeHistory()` / `lsTreeEntries()` / `head()` / `grep()`），配置由
+ *    `app_settings.code.mirror.repos` 解析，`local` 与 `ssh` 两种传输都认。git 命令本身
+ *    **一条没变**：`rev-list --merges` → 每条 `log -1` + `log --no-merges m^1..m` +
+ *    `diff --name-only m^1 m`，与 `HISTORY_SCRIPT` 逐条对应。需求也从「ssh 到远端 psql」
+ *    改成同一个 `db`（`src/db/client.ts`）。
+ * 2. **案例的主键**。`CASES` 原来按需求**号**配对，而那批号已经不在原位了（库按 PRD 重建过：
+ *    旧 #776 = 上传下载按量限速风控，现在 #776 = 音乐收藏后底部操作栏收藏态未更新）。
+ *    现在按**标题**解析、号只留作历史记号（`legacyNumber`）：C 的检索式本来就是
+ *    `locateQuery(title)`（只喂标题），所以「同标题同分支」仍然是上一次那 7 条。
+ *
+ * ── 另一件必须写在明面上的事：标准答案会过期
+ *
+ * 标准答案来自「某次合并 diff 出来的文件清单」，而那个文件可能**后来被删了**。已删的文件
+ * 再也不会出现在任何候选里，把它算成 locate 的 miss 是在拿一个不存在的东西扣分。所以这一版
+ * 多了一道**控制**（`survivalOf`）：逐条核对标准答案里的每个文件**还在不在索引读的那棵树
+ * （HEAD）上**。全部失踪的案例标 `invalidated`，不进任何分母；部分失踪的照算，但把失踪的
+ * 文件逐个列出来（`gone`）。这道控制只**报告**，不参与打分——打分口径一个字都没动。
  */
-import { execFile } from 'node:child_process';
+import { sql } from 'drizzle-orm';
 import { writeFileSync } from 'node:fs';
-import { promisify } from 'node:util';
 
-import { head, lsTree, grep } from '../src/core/codemirror/mirror.js';
+import {
+  grep, head, isNoisePath, lsTree, lsTreeEntries, mergeHistory,
+} from '../src/core/codemirror/mirror.js';
 import { locateAcross } from '../src/core/codemirror/code-index.js';
 import { repoIndex } from '../src/core/codemirror/index-store.js';
 import { keywordsFrom, locateQuery } from '../src/core/uemaster/inspect.js';
-import { locateFromHistory, rankMerges } from '../src/core/locate/history.js';
+import {
+  CANDIDATE_LIMIT, TOP_MERGES, locateFromHistory, mergeWeight, rankMerges,
+} from '../src/core/locate/history.js';
 import { readHistory, type HistoryRow } from '../src/core/locate/history-store.js';
 import { db, pool } from '../src/db/client.js';
 
-const run = promisify(execFile);
-
+/**
+ * 被评的**两个仓**。评测口径不许跟着索引规模一起长。
+ *
+ * 2026-11-09 的 cutover 把镜像扩到 216 个仓（`repo_coverage`：216 个 ok、80,319 个文件、
+ * 326 个页面），但这一份评测仍然只看这两个仓，原因不是懒：
+ * 1. 面一的 7 条配对就是这两个仓里的分支；
+ * 2. 定位的线上口径（`inspect.ts` → `locateFromHistory`）读的是 `commit_history`，而那张表
+ *    只有这两个仓的行（546 + 125 = 671；其余 214 个仓**一行历史都没有**）。
+ *
+ * 也就是说：索引扩了 216 个仓，而定位能看的东西一个都没多。把这两个常量改成 216 个仓，
+ * 只能让 A/B 两臂变成「拿更多不相关的文件去撞答案」，不是「定位变强了」——
+ * 那是另一个实验，要先把历史补进库里。见 2026-11-10 的复测报告。
+ */
 const REPOS = ['123pan-pc', '123pan-uni-app'] as const;
 
 /**
- * 人工核对过的配对：需求号 ↔ 分支名片段。
+ * 人工核对过的配对：需求标题 ↔ 分支名片段。
  *
  * 每条右边那句是本人才看过的理由——不写理由的配对不许进这张表，否则以后没人敢信评测结果。
+ *
+ * **锚是 `title`，不是 `legacyNumber`。** 上一次测量（2026-11-07）按号取需求行，那批号在
+ * 库里重建之后已经指向别的需求了：旧 #776「上传下载按量限速风控」现在是 #545，而现在的
+ * #776 是「音乐收藏后底部操作栏收藏态未更新」。按号跑会得到七条**看起来正常、配错对象**的
+ * 结果（而且不会报错），所以号只留作历史记号：报告里要靠它跟旧表对齐。
+ *
+ * 标题在库里可能不止一行（同一句话被录了两次，例如「用户部分权益缩减调整」有 #338 / #742）：
+ * 解析时取**号最小的那行**，并把它打出来。C 只吃标题，所以重复行不影响排名。
  */
-const CASES: ReadonlyArray<{ number: number; branch: string; why: string }> = [
-  { number: 776, branch: 'download-limit', why: '标题「上传下载按量限速风控」= 分支 feat-download-limit' },
-  { number: 782, branch: 'userEquity', why: '「权益套餐产品结构改造」= feat-userEquity' },
-  { number: 775, branch: 'userEquity', why: '「用户部分权益缩减调整」= feat-userEquity' },
-  { number: 758, branch: 'professional-space', why: '「专业空间」= release-professional-space' },
-  { number: 788, branch: 'professional-space', why: '「商用空间：容量售卖与个人盘风控」= professional-space' },
-  { number: 797, branch: 'direct-link', why: '「分享创建页改版-直链分享」= feat-direct-link-renovation' },
-  { number: 795, branch: 'directLink-open', why: '「PC 端支持打开分享页」= feat-directLink-open' },
+const CASES: ReadonlyArray<{ legacyNumber: number; title: string; branch: string; why: string }> = [
+  { legacyNumber: 776, title: '上传下载按量限速风控', branch: 'download-limit', why: '标题「上传下载按量限速风控」= 分支 feat-download-limit' },
+  { legacyNumber: 782, title: '权益套餐产品结构改造', branch: 'userEquity', why: '「权益套餐产品结构改造」= feat-userEquity' },
+  { legacyNumber: 775, title: '用户部分权益缩减调整', branch: 'userEquity', why: '「用户部分权益缩减调整」= feat-userEquity' },
+  { legacyNumber: 758, title: '专业空间', branch: 'professional-space', why: '「专业空间」= release-professional-space' },
+  { legacyNumber: 788, title: '商用空间：容量售卖与个人盘风控联动', branch: 'professional-space', why: '「商用空间：容量售卖与个人盘风控联动」= professional-space' },
+  { legacyNumber: 797, title: '分享创建页改版-直链分享', branch: 'direct-link', why: '「分享创建页改版-直链分享」= feat-direct-link-renovation' },
+  { legacyNumber: 795, title: 'PC 端支持打开分享页', branch: 'directLink-open', why: '「PC 端支持打开分享页」= feat-directLink-open' },
 ];
 
 /** 只保留源码：合并里带的 docs/、package.json、图片不算「这个功能的位置」。 */
@@ -89,23 +136,34 @@ const CODE_DIR = /(^|\/)(pages?|views?|screens?|components?|services?|api|store|
  */
 const WEAK_ANSWER_FILES = 10;
 
-type Merged = { repo: string; branch: string; date: string; files: string[] };
+type Merged = { repo: string; branch: string; at: string; date: string; files: string[] };
 
-/** 从镜像里读合并记录：分支名 + 日期 + 这次合并带进来的源码文件。 */
+/**
+ * 从镜像里读合并记录：分支名 + 日期 + 这次合并带进来的源码文件。
+ *
+ * 走 `mergeHistory()`（`mirror.ts` 读口 7）而不是自己拼 git 命令：那个读口已经把
+ * 「一次 shell 里跑完所有合并」的脚本写好了，且**只认配置里的仓库路径**——`local` 与
+ * `ssh` 两种传输同一份实现。早先这里是一条字面量 `ssh dogyun cd /srv/123pan-mirror/…`，
+ * 镜像搬走之后整条脚本连第一句都过不去。
+ *
+ * 与旧实现的**语义差别**只有一处：分支名由 `mergeBranch()`（`from <x>` 的**第一个**匹配）
+ * 解析，旧 shell 用的是 `sed -n` 的贪婪写法（`s|.*from \([^ ]*\)|\1|p`，`.*` 贪婪所以取**最后**一个）。两者
+ * 只在「标题里出现第二个 from」的提交上分歧。这一版不另写一份解析来对账（那等于在评测里
+ * 再造一个实现），改用一次离线核对：把两个仓全部合并标题取出来，跑两种解析、逐条比。
+ * 2026-11-10 的结果是**零分歧**（见报告的「口径核对」一节），所以标准答案没有被换过。
+ */
 async function mergesOf(repo: string): Promise<Merged[]> {
-  const script = `cd /srv/123pan-mirror/${repo}.git && git rev-list --merges HEAD | while read m; do `
-    + `s=$(git log -1 --format="%s" $m); d=$(git log -1 --format="%ad" --date=short $m); `
-    + `b=$(echo "$s" | sed -n "s/.*from \\([^ ]*\\).*/\\1/p"); `
-    + `f=$(git diff --name-only $m^1 $m 2>/dev/null | grep -E "\\.(tsx?|jsx?|vue)$" | tr "\\n" " "); `
-    + `echo "$b|$d|$f"; done`;
-  const { stdout } = await run('ssh', ['dogyun', script], { maxBuffer: 16 * 1024 * 1024, timeout: 180_000 });
-  const out: Merged[] = [];
-  for (const line of stdout.split('\n')) {
-    const [branch, date, files] = line.split('|');
-    if (branch === undefined || branch === '') continue;
-    out.push({ repo, branch, date: date ?? '', files: (files ?? '').split(/\s+/).filter((f) => f !== '') });
-  }
-  return out;
+  const got = await mergeHistory(repo);
+  if (!got.ok) throw new Error(`读不到镜像 ${repo} 的合并历史（${got.code}）：${got.message}`);
+  return got.data.map((r) => ({
+    repo,
+    branch: r.branch ?? '',
+    // `at` 是完整 ISO（`--asof` 要按它筛），`date` 只到日（展示用）。
+    // 不要拿 `date` 跟别的源比大小：镜像给 `+08:00`、库给 `Z`（见 `history-store.readHistory`）。
+    at: r.mergedAt,
+    date: r.mergedAt.slice(0, 10),
+    files: r.files,
+  }));
 }
 
 /** 这条分支带进来的「功能文件」——评测里的标准答案。 */
@@ -336,24 +394,143 @@ function answerMerge(
   rows: readonly HistoryRow[],
   query: string,
   expected: string[],
-): { rank: number; files: number; score: number } | null {
+): AnswerMerge | null {
   const ranked = rankMerges(rows, query, rows.length);
   for (let i = 0; i < ranked.length; i += 1) {
     const entry = ranked[i];
     if (entry === undefined) continue;
     const hit = entry.row.files.some((f) => expected.some((w) => f === w || f.endsWith(`/${w}`)));
-    if (hit) return { rank: i + 1, files: entry.row.files.length, score: entry.score };
+    if (hit) {
+      return {
+        rank: i + 1,
+        files: entry.row.files.length,
+        score: entry.score,
+        repo: entry.row.repo,
+        sha: entry.row.commitSha,
+        date: entry.row.mergedAt.slice(0, 10),
+      };
+    }
   }
   return null;
 }
 
-async function requirementsByNumber(): Promise<Map<number, { title: string; description: string }>> {
-  const script = 'docker exec flower-postgres-1 psql -U flower_admin -d flower -tAc "'
-    + "select json_agg(t) from (select number, title, coalesce(description,'') as description "
-    + "from requirements where deleted_at is null) t;\"";
-  const { stdout } = await run('ssh', ['dogyun', script], { maxBuffer: 16 * 1024 * 1024, timeout: 120_000 });
-  const rows = JSON.parse(stdout.trim()) as Array<{ number: number; title: string; description: string }>;
-  return new Map(rows.map((r) => [Number(r.number), { title: r.title, description: r.description }]));
+/**
+ * 「真答案那次合并」的四格 + 它落在哪个仓。
+ *
+ * 多出来的 `repo` 是给「错仓」这条原因用的：候选清单是两仓并集，一个候选排在前面可能
+ * 只是因为**另一个仓**里有个同名的公用件——那种 miss 的原因不是「没找到」，而是「找错了仓」，
+ * 两者的下一步完全不同（前者改检索，后者改聚合的跨仓权重）。
+ */
+type AnswerMerge = {
+  rank: number;
+  files: number;
+  score: number;
+  repo: string;
+  sha: string;
+  date: string;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 控制项：标准答案还在不在（`survivalOf`）——**只报告，不参与打分**
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// 标准答案是「某次合并 diff 出来的文件清单」，它是一份**历史快照**。文件后来被删掉时，
+// 那条案例就再也不可能命中：任何候选集里都不会出现一个已不存在的路径。把它算成 miss，
+// 等于拿一个不存在的目标扣 locate 的分——而且这种 miss 长得跟真 miss 一模一样（落 `low`），
+// 从数字上看不出来，只能靠这道控制挡住。
+//
+// 判据只能看**索引读的那棵树**（`repoIndex` → `lsTreeEntries(ref=sha)`），因为候选只可能
+// 来自那棵树。另外两种「找不到」要分开，别混进「已删」：
+// - `filtered`：路径落在索引**故意排除**的目录/扩展名里（`dist/`、`node_modules/`、图片……）。
+//   它可能还在仓里，但索引从来不看它，所以这条案例对 C 一直是不公平的（不是今天才失效）。
+// - `gone`：路径既不在树里、也不是被过滤掉的——那就是真删了。
+
+type Survival = { total: number; kept: string[]; gone: string[]; filtered: string[] };
+
+/** 一个文件在「索引看见的这棵树」里是否存在。纯函数，可单测。 */
+function survivalOf(expected: readonly string[], present: ReadonlySet<string>): Survival {
+  const kept: string[] = [];
+  const gone: string[] = [];
+  const filtered: string[] = [];
+  for (const path of expected) {
+    if (present.has(path)) kept.push(path);
+    else if (isNoisePath(path)) filtered.push(path);
+    else gone.push(path);
+  }
+  return { total: expected.length, kept, gone, filtered };
+}
+
+/**
+ * 一条案例算不算「还是一场公平的考试」。
+ *
+ * 采用的口径：**标准答案的全部文件都不在了**才失效（`invalidated`）——那时确实没有任何
+ * 东西可找。部分文件被删的案例照算，因为剩下的那些仍然是「这个功能在哪」的真答案，而
+ * 报告会把删掉的那几个逐一列出来，让读的人自己判断这条案例还剩多少成色。
+ *
+ * 严格口径（任一文件缺失即失效）也一并算出来（`strictlyInvalid`），因为它是同一份数据的
+ * 另一种读法；两个数都进报告，但**头条只采用前一个**，并且分母写清楚。
+ */
+function invalidation(survival: Survival): { invalidated: boolean; strictlyInvalid: boolean } {
+  return {
+    invalidated: survival.kept.length === 0,
+    strictlyInvalid: survival.gone.length > 0 || survival.filtered.length > 0,
+  };
+}
+
+/** 一个仓在**索引真正读的那棵树**上的文件清单（用于 `survivalOf`）。 */
+async function treeAt(repo: string): Promise<{ sha: string | null; files: Set<string> }> {
+  const h = await head(repo);
+  if (!h.ok || h.data === null) return { sha: null, files: new Set() };
+  const entries = await lsTreeEntries(repo, { ref: h.data.sha });
+  if (!entries.ok) return { sha: h.data.sha, files: new Set() };
+  return { sha: h.data.sha, files: new Set(entries.data.map((entry) => entry.path)) };
+}
+
+/**
+ * 需求行（这一版只取查询式真正用到的那几格）。
+ *
+ * `description` 已经不存在了：库在 PRD 那一轮重建时把「描述」拆成了
+ * `context / problem / outcome`，而且内容是**重写过的 PRD 句式**，不是原来那段文本。
+ * 所以长检索式（A 与 C′ 用的那句）没法逐字复刻，只能拼成
+ * `标题 + 上下文 + 痛点 + 期望结果`——形状一样，文字不一样。**C 不受影响**：线上口径是
+ * `locateQuery(title)`，只喂标题（见 `inspect.ts` 的 `queryOfRequirement`），而标题是原样还在的。
+ */
+type RequirementRow = { number: number; title: string; context: string; problem: string; outcome: string };
+
+/**
+ * 按标题取需求行（标题 → 号最小的那一行）。
+ *
+ * 走同一个 `db`（`src/db/client.ts`），不再 `ssh` 到远端 `docker exec psql`：那一句跟镜像
+ * 一样是旧部署的假设，本机 cutover 之后连不上，而且远端那张库的 schema 与这份代码已经不是
+ * 同一套（它有 `description`、没有 `context`）。
+ */
+async function requirementsByTitle(): Promise<Map<string, RequirementRow>> {
+  const res = await db.execute<{
+    number: number; title: string; context: string | null; problem: string | null; outcome: string | null;
+  }>(sql`
+    select number, title, context, problem, outcome
+      from requirements
+     where deleted_at is null
+     order by number`);
+  const out = new Map<string, RequirementRow>();
+  for (const row of res.rows) {
+    // `order by number` + 只写第一次见到的：同一句标题录了两行时，稳定地取号最小那行。
+    if (out.has(row.title)) continue;
+    out.set(row.title, {
+      number: Number(row.number),
+      title: row.title,
+      context: row.context ?? '',
+      problem: row.problem ?? '',
+      outcome: row.outcome ?? '',
+    });
+  }
+  return out;
+}
+
+/** A / C′ 用的那句长检索式：标题 + 三格 PRD 正文（空的格不占位）。 */
+function longQueryOf(req: RequirementRow): string {
+  const body = [req.context, req.problem, req.outcome].map((part) => part.trim()).filter((part) => part !== '');
+  return [`${req.title}`.trim(), ...body].join('\n\n').trim();
 }
 
 /**
@@ -371,23 +548,35 @@ async function requirementsByNumber(): Promise<Map<number, { title: string; desc
  *
  * 所以两个面分开报，不合并成一个百分比；面二只看「有没有大面积崩塌」。
  */
-async function commitCases(repo: string): Promise<Array<{ label: string; query: string; expected: string[] }>> {
-  const script = `cd /srv/123pan-mirror/${repo}.git && git rev-list --merges HEAD | while read m; do `
-    + `subj=$(git log -1 --format=%s $m); `
-    + `msgs=$(git log --no-merges --format=%s $m^1..$m 2>/dev/null | tr '\n' ' '); `
-    + `f=$(git diff --name-only $m^1 $m 2>/dev/null | grep -E "\\.(tsx?|jsx?|vue)$" | tr "\\n" " "); `
-    + `echo "$subj<<>>$msgs<<>>$f"; done`;
-  const { stdout } = await run('ssh', ['dogyun', script], { maxBuffer: 16 * 1024 * 1024, timeout: 180_000 });
-  const out: Array<{ label: string; query: string; expected: string[] }> = [];
-  for (const line of stdout.split('\n')) {
-    const [subj, msgs, files] = line.split('<<>>');
-    if (subj === undefined) continue;
+async function commitCases(
+  repo: string,
+  asofMs: number | null,
+): Promise<Array<{ label: string; query: string; expected: string[]; sha: string; repo: string }>> {
+  const got = await mergeHistory(repo);
+  if (!got.ok) throw new Error(`读不到镜像 ${repo} 的合并历史（${got.code}）：${got.message}`);
+  const out: Array<{ label: string; query: string; expected: string[]; sha: string; repo: string }> = [];
+  for (const row of got.data) {
+    // `--asof`：只留这一刻之前的合并，用来自造「上一次那批 40 条」的抽屉。
+    if (asofMs !== null && Date.parse(row.mergedAt) > asofMs) continue;
     // 查询词：分支自己的提交信息（去掉合并提交本身）。空的、纯「合并master」的跳过。
-    const query = (msgs ?? '').replace(/合并master|Merge branch|升级版本号/g, '').trim();
+    //
+    // `mergeHistory` 把多行提交信息用 ` / ` 连起来（旧 shell 是 `tr '\n' ' '`）。这里连回
+    // 空格再判长度，是为了让「这条算不算有效查询」的边界（`length < 4`）与上一次同一口径：
+    // 切词只看中文二字组与英文词，` / ` 和空格对 `grams()` 是同一件事，但长度差两个字符
+    // 足以让边界上的那一条进/出样本。
+    const query = row.message.split(' / ').join(' ')
+      .replace(/合并master|Merge branch|升级版本号/g, '').trim();
     if (query.length < 4) continue;
-    const expected = (files ?? '').split(/\s+/).filter((f) => f !== '' && SRC.test(f) && CODE_DIR.test(f));
+    const expected = row.files.filter((f) => SRC.test(f) && CODE_DIR.test(f));
     if (expected.length === 0) continue;
-    out.push({ label: subj.replace(/^Merge \S+ into \S+ from /, ''), query, expected: [...new Set(expected)].sort() });
+    // 标签只用于展示：旧版是合并标题去掉 `Merge … from ` 前缀，读口不给标题，改用分支名。
+    out.push({
+      label: row.branch ?? row.sha.slice(0, 8),
+      query,
+      expected: [...new Set(expected)].sort(),
+      sha: row.sha,
+      repo,
+    });
   }
   return out;
 }
@@ -408,34 +597,96 @@ type CaseRow = {
   weak: boolean;
   arms: Partial<Record<ArmKey, ArmHit>>;
   note: string;
+  /** 标准答案在这棵树上还剩几个（`null` = 没做这道控制，例如 `--verify-only` 之外的老路径）。 */
+  survival: Survival | null;
+  /** 全部文件都不在了：本条不进任何分母。 */
+  invalidated: boolean;
+  /** 严格口径（任一文件缺失/被过滤）——只报告，不改分母。 */
+  strictlyInvalid: boolean;
+  answer: AnswerMerge | null;
+  /** 档案字段（面一写进报告，面二只进 JSON）。 */
+  extra?: Record<string, unknown>;
 };
 
 /**
  * 本次实际跑了哪些臂。
  *
- * A 每一条要 30 秒左右（每条查询都要在两仓各做一遍 `lsTree` + 每个关键词一次 `grep`，
- * 全是 ssh 往返），513 条目二意味着四小时以上。所以 `--c-only` 让 C/C' 单跑全量，
- * 而「三臂对照」只在能跑完的那批上做——**同批、同案**，绝不把两个分母混成一个百分比。
+ * A 每一条在两仓各做一遍 `lsTree` + 每个关键词一次 `grep`。2026-11-07 那次是 ssh 往返，
+ * 一条 30 秒，513 条跑不完；搬到本机盘之后一条约 1 秒级，但「三臂同案」仍然只在 40 条上做
+ * （与上一次同一个分母，不改），C 是纯函数、全量跑。
  */
 function armSet(cOnly: boolean): ArmKey[] {
   return cOnly ? ['C', "C'"] : ['A', 'B', 'C', "C'"];
 }
 
+/**
+ * C 的候选，带上「这个路径是被哪个仓的那次合并推上来的」。
+ *
+ * **只用于写 miss 的原因，不参与打分**：`locateFromHistory` 返回 `path` 没有仓，而两仓并集
+ * 里同一个路径可能两边都有。诊断「错仓」需要这一格，而改 `history.ts` 去回一个 repo 字段
+ * 是改生产实现（这一轮不许动），所以在评测里按同一份聚合重算一遍。
+ *
+ * 重算必须与实现逐条一致，否则诊断是假的——所以调用方要拿它的 `path` 与 `pathC()` 的结果
+ * 对比（`attributeC` 的返回值里带 `sameAsImpl`），不一致就整列作废，不许「差不多」。
+ */
+function attributeC(
+  rows: readonly HistoryRow[],
+  query: string,
+): { list: Array<{ path: string; repo: string; weight: number }>; sameAsImpl: boolean } {
+  const ranked = rankMerges(rows, query, TOP_MERGES);
+  const byFile = new Map<string, { path: string; repo: string; weight: number }>();
+  for (const hit of ranked) {
+    const weight = mergeWeight(hit.score, hit.row.files.length);
+    for (const file of hit.row.files) {
+      const seen = byFile.get(file);
+      if (seen === undefined) byFile.set(file, { path: file, repo: hit.row.repo, weight });
+      else if (weight > seen.weight) {
+        seen.weight = weight;
+        seen.repo = hit.row.repo;
+      }
+    }
+  }
+  const list = [...byFile.values()]
+    .sort((a, b) => (a.weight !== b.weight
+      ? b.weight - a.weight
+      : (a.path === b.path ? 0 : (a.path < b.path ? -1 : 1))))
+    .slice(0, CANDIDATE_LIMIT);
+  const impl = pathC(rows, query);
+  const sameAsImpl = list.length === impl.length && list.every((item, i) => item.path === impl[i]);
+  return { list, sameAsImpl };
+}
+
 /** 一条案例的一句话结论（写进报告「逐案」那一节）：只在没命中时给出原因。 */
-function noteOf(arms: Partial<Record<ArmKey, ArmHit>>, answer: { rank: number; files: number } | null): string {
+function noteOf(
+  arms: Partial<Record<ArmKey, ArmHit>>,
+  answer: AnswerMerge | null,
+  survival: Survival | null,
+  cRepo: { path: string; repo: string } | null,
+  mergeCount: number,
+): string {
   const parts: string[] = [];
+  if (survival !== null && survival.kept.length === 0 && survival.total > 0) {
+    parts.push(`标准答案的 ${survival.total} 个文件全部不在索引读的这棵树上了（已删或被索引排除），本条失效`);
+  }
   const c = arms.C;
   if (c !== undefined && c.tier === 'hit' && c.rank > 1) {
-    const files = answer === null ? null : answer.files;
-    parts.push(files === null
-      ? `C 命中但只到第 ${c.rank} 名`
-      : `C 命中第 ${c.rank} 名：真答案那次合并一次动了 ${files} 个文件，权重并列时按路径升序，真答案被挤到第 ${c.rank}`);
+    parts.push(answer === null
+      ? `候选在 top-6 里，但只到第 ${c.rank} 名`
+      : `候选在 top-6 里，但只到第 ${c.rank} 名：真答案那次合并动了 ${answer.files} 个文件，权重与并列项按路径升序，真答案被排到第 ${c.rank}`);
   }
-  if (c !== undefined && c.tier === 'none') parts.push('C 落 none：历史里没有任何合并与这句查询有二字组重合');
+  if (c !== undefined && c.tier === 'none') parts.push('一个候选都没交：历史里没有任何合并与这句查询有二字组重合');
   if (c !== undefined && c.tier === 'low') {
-    if (answer === null) parts.push('C 有候选但落 low：历史里没有任何合并含标准答案文件（这条答案来自镜像 diff，库里那 657 行不含它）');
-    else if (answer.rank <= 5) parts.push(`C 有候选但落 low：答案合并排第 ${answer.rank}，但它动了 ${answer.files} 个文件，权重并列按路径升序后真答案被挤出前 6`);
-    else parts.push(`C 有候选但落 low：答案合并排第 ${answer.rank}（共 657 条），没进前 5`);
+    if (answer === null) {
+      parts.push(`有候选但一个都没中：库里那 ${mergeCount} 行不含标准答案文件（答案来自镜像 diff，不在 C 的语料里）`);
+    } else if (answer.rank > TOP_MERGES) {
+      parts.push(`有候选但一个都没中：真答案那次合并在 ${mergeCount} 行里排第 ${answer.rank}，没进前 ${TOP_MERGES}`);
+    } else {
+      parts.push(`有候选但一个都没中：真答案那次合并排第 ${answer.rank}（进了前 ${TOP_MERGES}），但它动了 ${answer.files} 个文件，权重并列按路径升序后被挤出前 ${CANDIDATE_LIMIT}`);
+    }
+  }
+  // 错仓：第一名来自另一个仓，而真答案在 answer.repo。
+  if (cRepo !== null && answer !== null && cRepo.repo !== answer.repo && (c?.tier !== 'hit' || (c?.rank ?? 0) > 1)) {
+    parts.push(`第一候选来自 ${cRepo.repo}（真答案在 ${answer.repo}）——这是跨仓并集的取舍得失，不是「没找到」`);
   }
   return parts.join('；');
 }
@@ -470,96 +721,190 @@ function printSummary(title: string, rows: CaseRow[], arms: ArmKey[]): void {
     const noise = list.reduce((acc, x) => acc + (x.picked.length - x.hits), 0);
     console.log(
       `${arm.padEnd(3)} 第1名 ${String(r1).padStart(3)}/${total}  前3名 ${String(r3).padStart(3)}/${total}`
+      + `  命中(前${CANDIDATE_LIMIT}) ${String(hit).padStart(3)}/${total}`
       + `  噪音 ${String(noise).padStart(4)} 文件  三档 hit ${String(hit).padStart(3)} / low ${String(low).padStart(3)} / none ${String(none).padStart(3)}`,
     );
   }
 }
 
-async function main(): Promise<void> {
-  const onlyIdx = process.argv.indexOf('--only');
-  const only = onlyIdx >= 0 ? Number(process.argv[onlyIdx + 1]) : null;
-  const surfaceIdx = process.argv.indexOf('--surface');
-  const surface = surfaceIdx >= 0 ? String(process.argv[surfaceIdx + 1]) : 'both';
-  const cases = only === null ? CASES : CASES.filter((c) => c.number === only);
-  const cOnly = process.argv.includes('--c-only');
-  const armsToRun = armSet(cOnly);
+/**
+ * 2026-11-07 那份报告 §2 / §1 抄下来的旧数字，**只用于打印「旧 → 新」对照**。
+ *
+ * 抄进来的理由：旧的那一次是 ssh 时代跑出来的，今天不可能重跑（镜像与库都搬过），而
+ * 「旧 vs 新」正是这一轮要回答的东西。数字既然是抄的，就要在同一处标明它是抄的——
+ * `files` 是当时的答案文件数，`answerRank`/`answerFiles` 是当时那次合并的名次与宽度。
+ */
+type LegacyCase = { files: number; A: number; B: number; C: number; c2: number; answerRank: number | null; answerFiles: number | null };
 
-  const [uni, pc, reqs] = await Promise.all([
+const LEGACY_FACE_ONE: Readonly<Record<number, LegacyCase>> = {
+  776: { files: 8, A: 4, B: 0, C: 1, c2: 0, answerRank: 1, answerFiles: 11 },
+  782: { files: 2, A: 0, B: 0, C: 0, c2: 0, answerRank: 1, answerFiles: 10 },
+  775: { files: 2, A: 0, B: 0, C: 1, c2: 1, answerRank: 1, answerFiles: 11 },
+  758: { files: 27, A: 0, B: 0, C: 1, c2: 1, answerRank: 1, answerFiles: 1 },
+  788: { files: 27, A: 0, B: 0, C: 1, c2: 1, answerRank: 1, answerFiles: 1 },
+  797: { files: 7, A: 0, B: 0, C: 6, c2: 6, answerRank: 1, answerFiles: 82 },
+  795: { files: 1, A: 0, B: 0, C: 1, c2: 1, answerRank: 2, answerFiles: 7 },
+};
+
+function argValue(flag: string): string | null {
+  const idx = process.argv.indexOf(flag);
+  if (idx < 0) return null;
+  return process.argv[idx + 1] ?? null;
+}
+
+async function main(): Promise<void> {
+  const onlyRaw = argValue('--only');
+  const only = onlyRaw === null ? null : Number(onlyRaw);
+  const surface = argValue('--surface') ?? 'both';
+  const cases = only === null ? CASES : CASES.filter((c) => c.legacyNumber === only);
+  const cOnly = process.argv.includes('--c-only');
+  const verifyOnly = process.argv.includes('--verify-only');
+  const asof = argValue('--asof');
+  const attribute = process.argv.includes('--attribute') || surface === '1';
+  const armsToRun = verifyOnly ? [] : armSet(cOnly);
+
+  /** `--asof` 的边界：把这一刻之后的合并剔掉（复现更早那一次的语料）。 */
+  const asofMs = asof === null ? null : Date.parse(asof);
+  if (asof !== null && Number.isNaN(asofMs)) throw new Error(`--asof 不是合法时间：「${asof}」`);
+
+  const [uniRaw, pcRaw, reqs] = await Promise.all([
     mergesOf('123pan-uni-app'),
     mergesOf('123pan-pc'),
-    requirementsByNumber(),
+    requirementsByTitle(),
   ]);
+  const cut = (list: Merged[]): Merged[] => (asofMs === null ? list : list.filter((m) => Date.parse(m.at) <= asofMs));
+  const uni = cut(uniRaw);
+  const pc = cut(pcRaw);
   const all = [...uni, ...pc];
 
-  // C 的语料：库里那 657 行。两个仓并在一起（A/B 的口径也是两个仓），
+  // C 的语料：库里那 671 行。两个仓并在一起（A/B 的口径也是两个仓），
   // 但报告里会写清「生产上 inspect 是按**单仓**检索的」这层差别。
-  const history: HistoryRow[] = [...(await readHistory(db, '123pan-pc')), ...(await readHistory(db, '123pan-uni-app'))];
+  const historyAll: HistoryRow[] = [...(await readHistory(db, '123pan-pc')), ...(await readHistory(db, '123pan-uni-app'))];
+  const history = asofMs === null
+    ? historyAll
+    : historyAll.filter((row) => Date.parse(row.mergedAt) <= asofMs);
 
-  console.log(`镜像合并：uni-app ${uni.length} 条 / pc ${pc.length} 条 · 需求库 ${reqs.size} 条`);
-  console.log(`commit_history（C 的语料）：${history.length} 行`);
+  const trees = new Map<string, { sha: string | null; files: Set<string> }>();
+  const present = new Set<string>();
+  for (const repo of REPOS) {
+    const tree = await treeAt(repo);
+    trees.set(repo, tree);
+    for (const path of tree.files) present.add(path);
+  }
+
+  console.log(`镜像合并：uni-app ${uni.length} 条 / pc ${pc.length} 条 · 需求库 ${reqs.size} 个标题`);
+  console.log(`commit_history（C 的语料）：${history.length} 行${asofMs === null ? '' : `（--asof ${asof}，全量 ${historyAll.length}）`}`);
+  console.log(`索引读的树：${[...trees.entries()].map(([repo, t]) => `${repo}@${(t.sha ?? '未知').slice(0, 8)}（${t.files.size} 文件）`).join(' · ')}`);
   console.log(`评测 ${cases.length} 条\n`);
 
-  const report: Record<string, unknown> = { historyRows: history.length, surfaces: [] };
+  const report: Record<string, unknown> = {
+    at: new Date().toISOString(),
+    asof,
+    historyRows: history.length,
+    historyRowsAll: historyAll.length,
+    merges: { uni: uni.length, pc: pc.length },
+    trees: [...trees.entries()].map(([repo, t]) => ({ repo, sha: t.sha, files: t.files.size })),
+    surfaces: [],
+  };
 
   // ── 面一：人工配对的 7 条 ──
   const oneRows: CaseRow[] = [];
   if (surface !== '2') {
     for (const c of cases) {
-      const req = reqs.get(c.number);
-      const expected = expectedOf(all, c.branch);
-      if (req === undefined || expected.length === 0) {
-        console.log(`  跳过 ${c.number}（缺需求或缺标准答案）`);
+      const req = reqs.get(c.title);
+      if (req === undefined) {
+        console.log(`  ⚠ 跳过 ${c.title}（库里没有这个标题，旧号 #${c.legacyNumber}）`);
         continue;
       }
-      const longQuery = `${req.title}\n\n${req.description}`.trim();
+      const expected = expectedOf(all, c.branch);
+      if (expected.length === 0) {
+        console.log(`  ⚠ 跳过 ${c.title}（分支片段「${c.branch}」在镜像里没有对应合并）`);
+        continue;
+      }
+      const survival = survivalOf(expected, present);
+      const { invalidated, strictlyInvalid } = invalidation(survival);
+      const longQuery = longQueryOf(req);
       const shortQuery = locateQuery(req.title);
-      const arms: Partial<Record<ArmKey, ArmHit>> = {
-        C: judge(pathC(history, shortQuery), expected),
-        "C'": judge(pathC(history, longQuery), expected),
-      };
-      if (!cOnly) {
-        arms.A = judge(await pathA(longQuery, req.title), expected);
-        arms.B = judge(await pathB(longQuery, req.title), expected);
+      const arms: Partial<Record<ArmKey, ArmHit>> = {};
+      if (!verifyOnly) {
+        arms.C = judge(pathC(history, shortQuery), expected);
+        arms["C'"] = judge(pathC(history, longQuery), expected);
+        if (!cOnly) {
+          arms.A = judge(await pathA(longQuery, req.title), expected);
+          arms.B = judge(await pathB(longQuery, req.title), expected);
+        }
       }
       const answer = answerMerge(history, shortQuery, expected);
+      const attr = attribute ? attributeC(history, shortQuery) : null;
       const weak = expected.length > WEAK_ANSWER_FILES;
-      const note = noteOf(arms, answer);
-      oneRows.push({ label: `#${c.number} ${req.title}`, expected: expected.length, weak, arms, note });
+      const note = noteOf(arms, answer, survival, attr?.list[0] ?? null, history.length);
+      const legacy = LEGACY_FACE_ONE[c.legacyNumber] ?? null;
+      oneRows.push({
+        label: `#${req.number} ${req.title}`,
+        expected: expected.length,
+        weak,
+        arms,
+        note,
+        survival,
+        invalidated,
+        strictlyInvalid,
+        answer,
+        extra: { legacyNumber: c.legacyNumber, number: req.number, branch: c.branch, query: shortQuery, longQuery, sameAsImpl: attr?.sameAsImpl ?? null, cRepos: attr?.list ?? null, pickedC: arms.C?.picked ?? [] },
+      });
 
-      const show = (r: number): string => (r === 0 ? '未命中' : `第 ${r} 名`);
-      console.log(`#${c.number} ${req.title}${weak ? '  ⚠ 弱标准答案' : ''}`);
-      console.log(`  标准答案 ${expected.length} 个文件（${reposOf(all, c.branch).join('+')}）· `
-        + armsToRun.map((k) => `${k} ${show(arms[k]?.rank ?? 0)}`).join(' · '));
-      if (answer !== null) console.log(`  真答案合并：657 条里第 ${answer.rank}（动了 ${answer.files} 个文件）`);
+      const show = (r: number | undefined): string => (r === undefined ? '—' : r === 0 ? '未命中' : `第 ${r} 名`);
+      console.log(`#${req.number} ${req.title}${weak ? '  ⚠ 弱标准答案' : ''}`
+        + `${c.legacyNumber === req.number ? '' : `（旧号 #${c.legacyNumber}）`}${invalidated ? '  ✗ 本条失效' : ''}`);
+      console.log(`  标准答案 ${expected.length} 个文件（${reposOf(all, c.branch).join('+')}）`
+        + `${legacy === null ? '' : ` · 旧答案 ${legacy.files} 个`} · 还在 ${survival.kept.length} / 已删 ${survival.gone.length} / 被索引排除 ${survival.filtered.length}`);
+      console.log(`  本次 ${armsToRun.length === 0 ? '（--verify-only，未跑臂）' : armsToRun.map((k) => `${k} ${show(arms[k]?.rank)}`).join(' · ')}`);
+      if (legacy !== null && !verifyOnly) {
+        console.log(`  旧值 A ${legacy.A === 0 ? '未命中' : `第 ${legacy.A} 名`} · B ${legacy.B === 0 ? '未命中' : `第 ${legacy.B} 名`} · C ${show(legacy.C)} · C′ ${show(legacy.c2)}`);
+      }
+      if (answer !== null) console.log(`  真答案合并：${history.length} 条里第 ${answer.rank}（动了 ${answer.files} 个文件，在 ${answer.repo}）`);
       if (process.argv.includes('--verbose')) {
         console.log(`  检索式 C   ${shortQuery}`);
         console.log(`  关键词 A   ${frozenKeywords(longQuery, req.title).join(' / ')}（冻结词表）`);
         console.log(`  标准答案   ${expected.slice(0, 4).join(' , ')}${expected.length > 4 ? ' …' : ''}`);
+        if (survival.gone.length > 0) console.log(`  已删文件   ${survival.gone.slice(0, 6).join(' , ')}${survival.gone.length > 6 ? ' …' : ''}`);
         console.log(`  A 挑了     ${arms.A?.picked.slice(0, 4).join(' , ') || '（本批未跑）'}`);
         console.log(`  B 挑了     ${arms.B?.picked.slice(0, 4).join(' , ') || '（本批未跑）'}`);
         console.log(`  C 挑了     ${arms.C?.picked.slice(0, 4).join(' , ') || '（空）'}`);
+        if (attr !== null) console.log(`  C 候选来自 ${attr.list.slice(0, 4).map((x) => `${x.path}（${x.repo}）`).join(' , ') || '（空）'}${attr.sameAsImpl ? '' : '  ⚠ 重算与实现不一致，仓归属作废'}`);
       }
       if (note !== '') console.log(`  备注       ${note}`);
     }
 
-    printSummary('面一：人工配对的真实需求（说了算）', oneRows, armsToRun);
+    const validRows = oneRows.filter((r) => !r.invalidated);
+    printSummary('面一：人工配对的真实需求（说了算）· 排除失效案例', validRows, armsToRun);
+    if (validRows.length !== oneRows.length) {
+      printSummary('面一 · 含失效案例（对照用，不进头条）', oneRows, armsToRun);
+    }
     // 头条两个口径：含弱标准答案 / 排除弱标准答案。
-    const strong = oneRows.filter((r) => !r.weak);
-    if (strong.length !== oneRows.length) {
-      console.log(`\n  （同上，排除 ${oneRows.length - strong.length} 条弱标准答案）`);
+    const strong = validRows.filter((r) => !r.weak);
+    if (strong.length !== validRows.length) {
+      console.log(`\n  （同上，排除 ${validRows.length - strong.length} 条弱标准答案）`);
       printSummary('面一 · 排除弱标准答案', strong, armsToRun);
     }
     (report.surfaces as unknown[]).push({
-      ...summarize('面一：人工配对的真实需求', oneRows, armsToRun),
+      ...summarize('面一：人工配对的真实需求', validRows, armsToRun),
+      casesAll: oneRows.length,
+      invalidated: oneRows.filter((r) => r.invalidated).length,
+      strictlyInvalid: oneRows.filter((r) => r.strictlyInvalid).length,
       strong: summarize('面一 · 排除弱标准答案', strong, armsToRun),
       detail: oneRows.map((r) => ({
         label: r.label,
         expected: r.expected,
         weak: r.weak,
+        invalidated: r.invalidated,
+        strictlyInvalid: r.strictlyInvalid,
+        survival: r.survival,
+        answer: r.answer,
         arms: Object.fromEntries(Object.entries(r.arms)
           .filter(([, v]) => v !== undefined)
           .map(([k, v]) => [k, { rank: v!.rank, tier: v!.tier, picked: v!.picked }])),
         note: r.note,
+        ...r.extra,
       })),
     });
   }
@@ -568,24 +913,39 @@ async function main(): Promise<void> {
   if (surface !== '1') {
     const capIdx = process.argv.indexOf('--commits');
     const cap = capIdx >= 0 ? Number(process.argv[capIdx + 1]) : 0;
-    const allCommits = [...(await commitCases('123pan-pc')), ...(await commitCases('123pan-uni-app'))];
+    const allCommits = [...(await commitCases('123pan-pc', asofMs)), ...(await commitCases('123pan-uni-app', asofMs))];
     const commits = cap > 0 ? allCommits.slice(0, cap) : allCommits;
     console.log(`\n── 面二取 ${commits.length}/${allCommits.length} 条 ──`);
     const twoRows: CaseRow[] = [];
     let i = 0;
     for (const c of commits) {
       i += 1;
-      const arms: Partial<Record<ArmKey, ArmHit>> = {
-        C: judge(pathC(history, c.query), c.expected),
-        "C'": judge(pathC(history, c.query), c.expected),
-      };
-      if (!cOnly) {
-        arms.A = judge(await pathA(c.query, c.query), c.expected);
-        arms.B = judge(await pathB(c.query, c.query), c.expected);
+      const survival = survivalOf(c.expected, present);
+      const { invalidated, strictlyInvalid } = invalidation(survival);
+      const arms: Partial<Record<ArmKey, ArmHit>> = {};
+      if (!verifyOnly) {
+        arms.C = judge(pathC(history, c.query), c.expected);
+        arms["C'"] = judge(pathC(history, c.query), c.expected);
+        if (!cOnly) {
+          arms.A = judge(await pathA(c.query, c.query), c.expected);
+          arms.B = judge(await pathB(c.query, c.query), c.expected);
+        }
       }
       const weak = c.expected.length > WEAK_ANSWER_FILES;
-      const answer = answerMerge(history, c.query, c.expected);
-      twoRows.push({ label: c.label, expected: c.expected.length, weak, arms, note: noteOf(arms, answer) });
+      const answer = verifyOnly ? null : answerMerge(history, c.query, c.expected);
+      const attr = attribute && !verifyOnly ? attributeC(history, c.query) : null;
+      twoRows.push({
+        label: c.label,
+        expected: c.expected.length,
+        weak,
+        arms,
+        note: noteOf(arms, answer, survival, attr?.list[0] ?? null, history.length),
+        survival,
+        invalidated,
+        strictlyInvalid,
+        answer,
+        extra: { sha: c.sha, repo: c.repo, query: c.query },
+      });
       if (i % 10 === 0) console.log(`  …${i}/${commits.length}`);
       if (process.argv.includes('--verbose')) {
         console.log(`\n  ${armsToRun.map((k) => `${k} ${arms[k]?.rank ?? 0}`).join(' · ')}  查询：${c.query.slice(0, 40)}`);
@@ -593,17 +953,34 @@ async function main(): Promise<void> {
         console.log(`     C  ${arms.C?.picked.slice(0, 3).join(' , ') || '（空）'}`);
       }
     }
-    printSummary('面二：提交信息当查询（有泄漏，只看崩塌）', twoRows, armsToRun);
-    const strong = twoRows.filter((r) => !r.weak);
-    if (strong.length !== twoRows.length) {
-      console.log(`\n  （同上，排除 ${twoRows.length - strong.length} 条弱标准答案）`);
+    const validRows = twoRows.filter((r) => !r.invalidated);
+    printSummary('面二：提交信息当查询（有泄漏，只看崩塌）· 排除失效案例', validRows, armsToRun);
+    if (validRows.length !== twoRows.length) {
+      printSummary('面二 · 含失效案例（对照用）', twoRows, armsToRun);
+    }
+    const strong = validRows.filter((r) => !r.weak);
+    if (strong.length !== validRows.length) {
+      console.log(`\n  （同上，排除 ${validRows.length - strong.length} 条弱标准答案）`);
       printSummary('面二 · 排除弱标准答案', strong, armsToRun);
     }
     (report.surfaces as unknown[]).push({
-      ...summarize('面二：提交信息当查询', twoRows, armsToRun),
+      ...summarize('面二：提交信息当查询', validRows, armsToRun),
       sampled: twoRows.length,
       available: allCommits.length,
+      invalidated: twoRows.filter((r) => r.invalidated).length,
+      strictlyInvalid: twoRows.filter((r) => r.strictlyInvalid).length,
       strong: summarize('面二 · 排除弱标准答案', strong, armsToRun),
+      detail: twoRows.map((r) => ({
+        label: r.label,
+        ...r.extra,
+        expected: r.expected,
+        invalidated: r.invalidated,
+        strictlyInvalid: r.strictlyInvalid,
+        arms: Object.fromEntries(Object.entries(r.arms)
+          .filter(([, v]) => v !== undefined)
+          .map(([k, v]) => [k, { rank: v!.rank, tier: v!.tier }])),
+        note: r.note,
+      })),
     });
   }
 
