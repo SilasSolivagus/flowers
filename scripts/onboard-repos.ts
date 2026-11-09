@@ -58,8 +58,8 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 
 import { db, pool } from '../src/db/client.js';
-import { head, lsTreeEntries, resolveMirrorConfig, type MirrorResult } from '../src/core/codemirror/mirror.js';
-import { syncRepoIndex } from '../src/core/codemirror/index-store.js';
+import { head, resolveMirrorConfig, type MirrorResult } from '../src/core/codemirror/mirror.js';
+import { measureRepo } from '../src/core/codemirror/coverage-measure.js';
 import {
   DEFAULT_DISK_FLOOR_GB, coverageCounts, diskGuard, listCoverage, projectDisk, readCoverage,
   recordCoverage, shouldSkip, type CoverageRow,
@@ -444,32 +444,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: () => T): Pr
   });
 }
 
-/** 索引一个仓并量覆盖率。失败一律是 `{ ok: false, error }`，不抛。 */
-async function measureOne(
-  entry: InventoryLine,
-  sha: string,
-): Promise<{
-  ok: true;
-  counts: Pick<CoverageRow, 'filesTotal' | 'filesIndexed' | 'filesSkippedGenerated'
-    | 'pages' | 'outlineFiles' | 'imports'>;
-} | { ok: false; error: string }> {
-  // `files_total` 来自 `ls-tree`，与索引不是同一趟 I/O：索引只回答「我记得什么」，
-  // 树回答「实际有多少」——两者的差就是这张表的全部意义，所以必须真去列一次。
-  //
-  // 顺序（2026-11-09 起）：**先列树，再索引**。理由只在失败路径上——索引失败时那句
-  // 「git cat-file 读取超时」本身不含任何量级信息，读的人无法判断是「仓坏了」还是
-  // 「这个仓有 1.3 万个文件、单个 blob 106 MB」（`beats` 就是后者）。把树先数出来，
-  // 失败原因就能带上「树里有 N 个文件」，这是 `repo_coverage.error` 这一列唯一的价值：
-  // 让下一次的人不用重新跑一遍才知道为什么。
-  const tree = await lsTreeEntries(entry.id, { ref: sha });
-  if (!tree.ok) return { ok: false, error: `列树失败：${tree.message}` };
-  const synced = await syncRepoIndex(db, entry.id, sha);
-  if (!synced.ok) {
-    return { ok: false, error: `索引失败（树里 ${tree.data.length} 个文件）：${synced.message}` };
-  }
-  return { ok: true, counts: coverageCounts(synced.data.index, tree.data.length) };
-}
-
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -612,7 +586,7 @@ async function main(): Promise<number> {
       attempted += 1;
       const startedMs = Date.now();
       const result = await withTimeout(
-        measureOne(entry, headRes.data.sha),
+        measureRepo(db, entry.id, headRes.data.sha),
         args.indexTimeoutMs,
         () => ({
           ok: false as const,

@@ -185,6 +185,16 @@ export function inventoryPath(env: Record<string, string | undefined> = process.
   return path.join(REPO_ROOT, 'config', 'repos.txt');
 }
 
+/**
+ * 「**故意**不在清单里的仓」那份文件的相对路径（仓库根下）。
+ *
+ * 为什么它是仓库根相对的常量而不是环境变量：这份文件是**给人读的账本**（每行一个仓 +
+ * 理由），它与 `config/repos.txt` 必须一起可 diff、一起进代码库。清单能被
+ * `FLOWERS_REPO_INVENTORY` 整条换掉是为了用例与「从别处拷来的清单」，而
+ * 「哪些仓被排除、为什么」不接受这样的替换：换掉它等于让报告里的「排除」两字变成猜的。
+ */
+export const REPO_EXCLUDED_PATH = path.join('config', 'repos-excluded.txt');
+
 /** codeup 的镜像根目录：`MIRROR_ROOT` 与 shell 侧同名同义（`sync-mirrors.sh` 读同一个变量）。 */
 export function mirrorRoot(env: Record<string, string | undefined> = process.env): string {
   const value = (env[MIRROR_ROOT_ENV] ?? '').trim();

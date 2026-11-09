@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 
 import { db, pool } from '../src/db/client.js';
 import type { CodeIndex } from '../src/core/codemirror/code-index.js';
+import { zeroCauseOf } from '../src/core/codemirror/coverage-measure.js';
 import {
   DEFAULT_DISK_FLOOR_GB, coverageCounts, diskGuard, listCoverage, projectDisk, readCoverage,
   recordCoverage, shouldSkip, type CoverageRow,
@@ -193,5 +194,43 @@ describe('projectDisk：中位数点估计 + 样本区间', () => {
       samples: [], medianGb: 0, meanGb: 0, projectedGb: 0, lowGb: 0, highGb: 0,
     });
     expect(projectDisk([1], 0).projectedGb).toBe(0);
+  });
+});
+
+describe('zeroCauseOf：`files_indexed = 0` 的那一格要有一个词的理由', () => {
+  /**
+   * 这张表最容易被读歪的一格是「索引看得见 0 个文件」。`files_total - files_indexed` 是
+   * 「要解释的那部分」，而解释必须是一个**能照着下一步行动**的词：
+   *
+   * | 词 | 下一步 |
+   * |---|---|
+   * | `language` | 这个仓的语言我们没解析（Java/Python/C/Dart…），要不要补是选型问题 |
+   * | `generated` | 正当跳过，不用管（`.pb.go`、生成的前端 bundle） |
+   * | `docs` / `config` | 这个仓本来就不该进索引 |
+   * | `other` | 没人解释得通 —— 下一次要看的线索 |
+   */
+  const paths = (...items: string[]): { path: string }[] => items.map((path) => ({ path }));
+
+  it('generated：可索引的文件全被判成生成代码', () => {
+    expect(zeroCauseOf(paths('api/user.pb.go', 'api/user_grpc.pb.go'), 2)).toBe('generated');
+  });
+
+  it('language：有源码，但不是我们解析的语言', () => {
+    expect(zeroCauseOf(paths('src/Main.java', 'pom.xml'), 0)).toBe('language');
+    expect(zeroCauseOf(paths('lib/main.dart', 'pubspec.yaml'), 0)).toBe('language');
+  });
+
+  it('docs：只有文档与图片', () => {
+    expect(zeroCauseOf(paths('README.md', 'docs/logo.png'), 0)).toBe('docs');
+  });
+
+  it('config：只有配置/数据；空仓也算这一类', () => {
+    expect(zeroCauseOf(paths('docker-compose.yml', '.env'), 0)).toBe('config');
+    expect(zeroCauseOf([], 0)).toBe('config');
+  });
+
+  it('other：可索引的文件存在、却既没进索引也不是生成代码', () => {
+    // 这一格是「没人解释得通」，所以它必须能被判出来，而不是被上面四条吞掉。
+    expect(zeroCauseOf(paths('src/pages/Home/index.ts'), 0)).toBe('other');
   });
 });
