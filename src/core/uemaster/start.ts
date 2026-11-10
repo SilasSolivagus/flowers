@@ -11,6 +11,7 @@ import { resolveMirrorConfig } from '../codemirror/mirror.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
+import type { AttemptPhase, AttemptView } from './trace.js';
 import { composeEvaluation } from './compose.js';
 import { loadKnownSurfaces } from './surfaces.js';
 import { REVIEW_NEEDS_PRD, reviewRequirement } from './review.js';
@@ -20,7 +21,6 @@ import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
 import { adoptLegacyArtifact, artifactFile } from './store.js';
-import type { AttemptView } from './trace.js';
 
 /**
  * 生成作业的**起点**（服务层）与**执行体**（worker 里跑的那一段）。
@@ -109,11 +109,28 @@ export type JobView = {
   createdAt: string;
   finishedAt: string | null;
   /**
+   * 现在跑到哪一段（2026-11-10）。
+   *
+   * 为什么它必须挂在**这一条**读取上：生成要跑 2–5 分钟，抽屉里原来只有一个「生成中」
+   * 的字，读者分不出「在动」和「卡死」。`uemaster_job_attempts.phase` 本来就把这件事
+   * 记着（进度卡 P4-02 一直在读），抽屉那一行只是没有拿它。
+   *
+   * 一次都没问模型时是 `null`（那会儿在读 PRD / 备输入），中文由 `phases.ts` 给。
+   */
+  phase: AttemptPhase | null;
+  /**
+   * 走到第几次尝试（1 基；`0` = 一次都还没有）。
+   *
+   * 只在 `> 1` 时上屏（「第 2 次尝试」）：第 1 次是常态，写上去只是噪音。
+   */
+  attempt: number;
+  /**
    * 这一次作业留下的每一次尝试（P2.13），按发生顺序。
    *
    * 为什么挂在 `JobView` 上而不是另开一个 action：抽屉拿到「失败了」的那一刻，紧接着
    * 就要那块「详情」；分成两次往返，中间那一帧就是「有一句失败原因、点开详情是空的」。
-   * 还在跑的作业给空数组（那时留痕没意义，还会让每次轮询多一次查询）。
+   * 还在跑的作业给空数组（那**整张清单**在跑的时候没意义，每次轮询都为它多查一次不划算；
+   * 而「跑到哪一步、第几次」是另外两格，见上面）。
    */
   attempts: AttemptView[];
 };
@@ -508,15 +525,26 @@ export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> 
   const res = await db.execute<{
     id: string; stage: Stage; status: JobStatus; error: string | null;
     url: string | null; created_at: string; finished_at: string | null;
+    phase: string | null; attempt: number;
   }>(sql`
-    select j.id, j.stage, j.status, j.error, j.created_at, j.finished_at, a.url
+    select j.id, j.stage, j.status, j.error, j.created_at, j.finished_at, a.url,
+           -- 最新一次尝试属于哪一段、走到第几次。两格子查询而不是再发一轮查询：
+           -- 这条读取每 2 秒被抽屉问一次，往返次数比查询宽度贵。
+           (select t.phase
+              from uemaster_job_attempts t
+             where t.job_id = j.id
+             order by t.created_at desc, t.attempt desc, t.id desc
+             limit 1) as phase,
+           (select coalesce(max(t.attempt), 0)
+              from uemaster_job_attempts t
+             where t.job_id = j.id) as attempt
       from uemaster_jobs j
       left join uemaster_artifacts a on a.id = j.artifact_id
      where j.id = ${jobId}`);
   const row = res.rows[0];
   if (!row) return null;
-  // 还在跑的作业没有「详情」可看，给空数组：这一条轮询每 1.5 秒一次，不为了一个
-  // 不存在的答案多查一次。
+  // 还在跑的作业**不**给整张清单（`readAttempts` 是一次额外查询）：那几分钟里抽屉要的
+  // 是「现在在哪一步」，不是逐条历史——历史在失败之后才有地方显示。
   const attempts = row.status === 'running' ? [] : await readAttempts(db, jobId);
   return {
     id: row.id,
@@ -526,6 +554,8 @@ export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> 
     url: row.url,
     createdAt: new Date(row.created_at).toISOString(),
     finishedAt: row.finished_at === null ? null : new Date(row.finished_at).toISOString(),
+    phase: (row.phase ?? null) as AttemptPhase | null,
+    attempt: Number(row.attempt),
     attempts,
   };
 }

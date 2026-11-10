@@ -6,6 +6,7 @@ import {
   can, lineLabelOf, type Ability, type Member, type RequirementFacts,
 } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
+import type { AttemptPhase } from '../uemaster/trace.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
 import { normalizePlatforms, platformsLabel } from '../requirements/platforms.js';
@@ -124,11 +125,37 @@ export type DetailRef = {
    * 页面刷新、换一个人打开同一条需求，看到的都得是同一件事；一个只活在客户端
    * state 里的「生成中」在刷新之后就变成了「生成」，按下去只会撞一句「正在生成中」。
    *
-   * 只给 id：页面需要的动作是「继续轮询这条作业」，其余细节由 `jobStatus` 回答。
    * 失败不在这里——失败是一次性的提示（行内那句话），刷新之后行就回到「生成」，
    * 让用户可以重试；把上一次的失败永久挂在那一行会让这条需求看起来永远坏着。
+   *
+   * 2026-11-10 起**多了三格**（`startedAt` / `phase` / `attempt`）：抽屉里「正在跑」
+   * 那一行要显示「在第几步、跑了多久、第几次尝试」，而这三件事在服务端渲染时就已经
+   * 知道了。只靠客户端轮询拿它们的话，刷新页面后的第一帧仍然只有一个「生成中」——
+   * 而「刷新一下就看不见进度了」正是这次要修的那个观感。
    */
-  generation: { id: string } | null;
+  generation: {
+    id: string;
+    /** 作业开始的时刻（ISO）：秒表由客户端按它算，逐秒跳。 */
+    startedAt: string;
+    /** 最新一次尝试属于哪一段（null = 还没问过模型）。中文由 `phases.ts` 给。 */
+    phase: AttemptPhase | null;
+    /** 走到第几次尝试（0 = 一次都没有；界面只在 > 1 时显示）。 */
+    attempt: number;
+  } | null;
+};
+
+/**
+ * 一个 stage 上正在跑的那次作业（2026-11-10）。
+ *
+ * 四个格子全是抽屉那一行要的：`id` 用来继续轮询，`startedAt` 用来跳秒，
+ * `phase` / `attempt` 用来告诉读者「在第几步、第几次」。多读一格 `stage` 的活由
+ * 调用方按 `stage` 建 Map 收掉。
+ */
+type RunningJob = {
+  id: string;
+  startedAt: string;
+  phase: AttemptPhase | null;
+  attempt: number;
 };
 
 export type DetailReview = {
@@ -525,10 +552,15 @@ async function artifactRef(
   stage: DetailRef['stage'],
   label: string,
   artifact: ArtifactRef | undefined,
-  runningJobId: string | null,
+  running: RunningJob | null,
   currentHash: string,
 ): Promise<DetailRef> {
-  const generation = runningJobId === null ? null : { id: runningJobId };
+  const generation = running === null ? null : {
+    id: running.id,
+    startedAt: running.startedAt,
+    phase: running.phase,
+    attempt: running.attempt,
+  };
   if (!artifact) {
     // 没有产物：新鲜度这一格没有意义（界面上那一行是「生成」入口，不是链接）。
     // 给 'unknown' 而不是留空：类型只有三态，而这一格只在 `present` 时被读。
@@ -707,12 +739,29 @@ export async function getRequirementDetail(
    * 成功会变成产物链接（`listArtifacts` 已经给了），失败是行内一次性的提示。
    * `distinct on (stage)` 与 `listArtifacts` 同一个口径：一个 stage 只认最近一次。
    */
-  const runningJobs = await db.execute<{ id: string; stage: string }>(sql`
-    select distinct on (stage) id, stage
-      from uemaster_jobs
-     where requirement_id = ${id} and status = 'running'
-     order by stage, created_at desc, id desc`);
-  const running = new Map(runningJobs.rows.map((job) => [job.stage, job.id]));
+  const runningJobs = await db.execute<{
+    id: string; stage: string; created_at: string; phase: string | null; attempt: number;
+  }>(sql`
+    select distinct on (j.stage) j.id, j.stage, j.created_at,
+           -- 2026-11-10：抽屉里那一行要显示「在第几步」，所以同一条查询把它带回来
+           -- （进度卡 progress.ts 早就在读同两格；两处口径一致，不各写一套）。
+           (select t.phase
+              from uemaster_job_attempts t
+             where t.job_id = j.id
+             order by t.created_at desc, t.attempt desc, t.id desc
+             limit 1) as phase,
+           (select coalesce(max(t.attempt), 0)
+              from uemaster_job_attempts t
+             where t.job_id = j.id) as attempt
+      from uemaster_jobs j
+     where j.requirement_id = ${id} and j.status = 'running'
+     order by j.stage, j.created_at desc, j.id desc`);
+  const running = new Map<string, RunningJob>(runningJobs.rows.map((job) => [job.stage, {
+    id: job.id,
+    startedAt: new Date(job.created_at).toISOString(),
+    phase: (job.phase ?? null) as AttemptPhase | null,
+    attempt: Number(job.attempt),
+  }]));
 
   return {
     id: row.id,

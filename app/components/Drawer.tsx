@@ -118,7 +118,7 @@ export function RefRow({
             <GenerateButton
               requirementId={id}
               stage={item.stage}
-              runningJobId={item.generation?.id ?? null}
+              generation={item.generation}
               generator={generator}
               present={item.present}
               fresh={item.freshness === 'fresh'}

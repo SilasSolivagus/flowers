@@ -4,9 +4,11 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
+import type { DetailRef } from '../../src/core/read/detail';
 import { attemptLine, classifyFailure, type AttemptView, type Failure } from '../../src/core/uemaster/trace';
 import { generateAction, generationStatusAction } from '../actions';
 import { GeneratorDialog } from './GeneratorDialog';
+import { RunningRow, runningRowOf, type RunningRowProps } from './RunningRow';
 import { Toast } from './Toast';
 
 /**
@@ -20,11 +22,15 @@ import { Toast } from './Toast';
  *   存过之后，这一支再也不会走到——story map 第 2、3 行。
  * - `none`（一个可执行文件都没有）：按钮禁用，一句原因 + 去设置那一格。
  *
- * 三条从 P2.6 留下来的取舍：
- * 1. **没有进度条、没有 spinner**。真正要告诉用户的只有两件：「在跑」和「结果 / 原因」。
+ * 三条从 P2.6 留下来的取舍（第 1 条 2026-11-10 修订）：
+ * 1. **没有进度条、没有 spinner**——但**有字**。原来这一格只有两个字「生成中」，而一次
+ *    生成 2–5 分钟，那两个字不随时间变，读者只能判断它卡死了。现在它在跑的时候显示
+ *    「正在按六问拆流程 · 00:47」(+「第 2 次尝试」)：三件事都来自库里已经有的东西
+ *    （`uemaster_job_attempts.phase` / `attempt` 与作业的 `created_at`），没有一个
+ *    是编出来的进度百分数。见 `RunningRow.tsx`。
  * 2. **错误就在行里**，由服务端作业的 `error` 原文加前缀「生成失败：」组成。
  *    `OAuth session expired` 是合法且有用的句子；「生成失败」四个字什么也没说。
- * 3. **刷新之后状态还在**。初始的 `runningJobId` 由服务端读模型给出（正在跑的作业），
+ * 3. **刷新之后状态还在**。初始的 `generation` 由服务端读模型给出（正在跑的作业），
  *    所以刷新页面、换一个人打开同一条需求，看到的都是「生成中」。
  *
  * P2.13 起失败多两件东西，各管一件事：
@@ -35,18 +41,31 @@ import { Toast } from './Toast';
  * 三者只在**失败**时出现；成功的作业一条尝试记录也会写库，只是界面不显示（无噪音）。
  */
 
-/** 轮询间隔：够快看到结果，又不至于把 server action 当日志刷。 */
-const POLL_MS = 1500;
+/**
+ * 轮询间隔：够快看到结果，又不至于把 server action 当日志刷。
+ *
+ * 2026-11-10 从 1500 调到 2000：这一格现在多了一格「现在在哪一步」，而秒数是**本地**
+ * 跳的（`elapsed` 每秒自己算），所以「新到一步」这件事 2 秒的延迟看不出来；把轮询压到
+ * 2 秒以内只是让一个 server action 当日志刷。**不要低于 2000**。
+ */
+const POLL_MS = 2000;
 
 /** 客户端等不到结果的上限。服务端的硬超时是 10 分钟，这里多留一分钟。 */
 const GIVE_UP_MS = 11 * 60 * 1000;
 
 export function GenerateButton({
-  requirementId, stage, runningJobId, generator, present, fresh, versions,
+  requirementId, stage, generation, generator, present, fresh, versions,
 }: {
   requirementId: string;
   stage: string;
-  runningJobId: string | null;
+  /**
+   * 这个阶段**正在跑**的那次作业（服务端读模型给的，`null` = 没有）。
+   *
+   * 比原来那个 `runningJobId: string | null` 多了三格（`startedAt` / `phase` /
+   * `attempt`）：刷新页面、换一个人打开同一条需求，第一帧就该看见「在第几步、跑了
+   * 多久」——只给 id 的话第一帧仍然只有「生成中」，而那正是这次要修掉的观感。
+   */
+  generation: DetailRef['generation'];
   generator: GeneratorView;
   /**
    * 这一阶段已经有一份产物（P4-02）。
@@ -69,7 +88,23 @@ export function GenerateButton({
   versions: number;
 }) {
   const router = useRouter();
-  const [jobId, setJobId] = useState<string | null>(runningJobId);
+  const [jobId, setJobId] = useState<string | null>(generation?.id ?? null);
+  /**
+   * 抽屉里那一行现在要画的东西（`RunningRow`）。`null` = 没有在跑的作业。
+   *
+   * 它是**状态**而不是从 `jobId` 推导：轮询每 2 秒回来一次「现在在哪一步」，那一格
+   * 变了这一行就得跟着变；`jobId` 只说明「还有作业在跑」。
+   */
+  const [row, setRow] = useState<RunningRowProps | null>(runningRowOf(generation === null
+    ? null
+    : {
+      status: 'running',
+      phase: generation.phase,
+      attempt: generation.attempt,
+      startedAt: generation.startedAt,
+    }));
+  /** 秒表：每秒自增一次，只为让「已用时」重新算（没有它 React 不会重渲染）。 */
+  const [, setBeat] = useState(0);
   const [error, setError] = useState<string | null>(null);
   /**
    * 这一次失败的那条作业的尝试清单（P2.13）。只在失败时非空：成功的作业不显示任何东西，
@@ -79,10 +114,29 @@ export function GenerateButton({
   /** 浮层：`seq` 让「又失败了一次」重新计时，而不是沿用上一次那 6 秒。 */
   const [toast, setToast] = useState<{ seq: number; failure: Failure } | null>(null);
   const [pending, setPending] = useState(false);
+  /**
+   * 这一帧的时刻。**每渲染一次就取一次**（不写进 state）：秒表的 interval 只负责触发
+   * 重渲染，秒数本身每次重渲染重新算——两处都不需要假时钟。
+   */
+  const now = Date.now();
   /** 第一次用时的那个对话框：只在「还没配」时开，而且只开一次（答完就落库）。 */
   const [asking, setAsking] = useState(false);
   /** 这一次轮询的截止时刻：作业可以被杀掉，客户端不能陪着一起永远转。 */
   const deadline = useRef<number>(0);
+
+  /**
+   * 秒表（2026-11-10）：只在有作业在跑时走。1 秒一格——「它还在动」这件事只能靠秒针说，
+   * 而秒数不能在轮询那一格（2 秒一次）里等，否则秒针会跟着网络抖。
+   *
+   * 依赖写的是 `row === null` 那个**布尔**，不是 `row` 本身：写成 `row` 的话每 2 秒
+   * 轮询回来一次都会把 interval 拆了重建，秒针于是被轮询节奏带着抖——而那正好是这一格
+   * 要证明「没在抖」的东西。
+   */
+  useEffect(() => {
+    if (row === null) return undefined;
+    const beat = setInterval(() => setBeat((n) => n + 1), 1000);
+    return () => clearInterval(beat);
+  }, [row === null]);
 
   useEffect(() => {
     if (jobId === null) return undefined;
@@ -109,11 +163,14 @@ export function GenerateButton({
         // 作业不见了（库被重置 / id 被改坏）：停手，把控制权还给按钮。
         deadline.current = 0;
         setJobId(null);
+        setRow(null);
         return;
       }
       if (status.status === 'done') {
         deadline.current = 0;
         setJobId(null);
+        // 那一行消失，材料那一行接着出现（产物链接来自服务端渲染，见下面 `router.refresh`）。
+        setRow(null);
         // 让服务端重新渲染这一行：产物链接、日期、时间轴上的新事件都从库里来。
         router.refresh();
         return;
@@ -121,6 +178,7 @@ export function GenerateButton({
       if (status.status === 'failed') {
         deadline.current = 0;
         setJobId(null);
+        setRow(null);
         const message = status.error ?? '未知原因';
         setError(message);
         // 详情与浮层同源：都是这条作业的尝试清单 / 那句原文的分类。分类只决定浮层
@@ -129,6 +187,17 @@ export function GenerateButton({
         setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure(message) }));
         return;
       }
+      /**
+       * 还在跑：把这一步写回那一行（`runningRowOf` 是唯一的判据——它给 null 就说明
+       * 这次不该再画那一行）。`startedAt` 用服务端给的，不用本地时钟：刷新之后秒表
+       * 接着数，而不是从头数。
+       */
+      setRow(runningRowOf({
+        status: status.status,
+        phase: status.phase ?? null,
+        attempt: status.attempt,
+        startedAt: status.createdAt,
+      }));
       timer = setTimeout(() => void tick(), POLL_MS);
     };
 
@@ -161,6 +230,10 @@ export function GenerateButton({
       }
       deadline.current = Date.now() + GIVE_UP_MS;
       setJobId(result.jobId);
+      // 按下之后立刻点亮那一行：模型还没回话，所以 phase 是 null → 「正在读 PRD」。
+      setRow(runningRowOf({
+        status: 'running', phase: null, attempt: 0, startedAt: new Date().toISOString(),
+      }));
     } catch {
       setError('生成请求没有送达');
       setToast((was) => ({ seq: (was?.seq ?? 0) + 1, failure: classifyFailure('生成请求没有送达') }));
@@ -169,8 +242,10 @@ export function GenerateButton({
     }
   };
 
-  if (jobId !== null) {
-    return <span className="pill warn">生成中</span>;
+  // 有作业在跑：这一格就是那一行（步 + 秒表 + 第几次）。作业一结束 `row` 变 null，
+  // 这里落回下面的「生成 / 重新生成」按钮，材料那一行由服务端刷新出来。
+  if (row !== null) {
+    return <RunningRow view={row} now={now} />;
   }
 
   // 一个可执行文件都没有：按钮禁用，理由在行里，指路就在旁边（设置页那一格）。

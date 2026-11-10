@@ -14,7 +14,7 @@ import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
 import { evaluateReadsCode } from './features.js';
 import {
-  openCount, openRows, readOpen, sanitizeOpen, type OpenQuestions,
+  emptyOpenRow, openCount, openRows, readOpen, sanitizeOpen, type OpenQuestions,
 } from './annotations.js';
 import { EMPTY_SURFACES, PRODUCT_BODY_RULE } from '../locate/copy.js';
 import type { KnownSurface, KnownSurfaces } from '../locate/copy.js';
@@ -832,12 +832,16 @@ export function readFragments(
   text: string,
   ids: string[],
   /**
-   * 要不要强制「右栏两组待确认」至少有一条（2026-11-10）。
+   * 要不要**再问一次**「右栏两组待确认」（2026-11-10）。
    *
-   * 只有**评估**这一路要：v1 承诺的是「三栏材料」，右栏那两栏就是承诺本身。
+   * 只有**评估**这一路的第一轮要：v1 承诺的是「三栏材料」，右栏那两栏就是承诺本身，
+   * 所以第一次没提到就退回去再问一遍。
    * 评审 / 走查不走这一条——它们的右栏是问题清单 / 差异清单（`review.ts` / `inspect.ts`
    * 会把模型交的标注整片换掉），在这里要求两组待确认等于让它们交一份会被丢掉的东西。
    * 默认 `false`：这个函数有多个调用方，默认值必须是最不改变别人行为的那一个。
+   *
+   * **它不是死判**：第二轮一条都没有照样收（`buildPages` 只给第一轮传 `true`），
+   * 右栏由 `assembleWalkmap` 铺 `emptyOpenRow()`。见那一段的注解。
    */
   opts: { requireOpen?: boolean } = {},
 ): { ok: true; doc: FragmentDoc } | { ok: false; why: string } {
@@ -905,16 +909,22 @@ export function readFragments(
   if (extra.length > 0) return { ok: false, why: `多出了图里不存在的节点：${extra.join('、')}` };
 
   /**
-   * 右栏两栏标注（2026-11-10）：**整份至少要有一条**，否则这条 v1 承诺就没兑现。
+   * 右栏两栏标注（2026-11-10）：**整份一条都没有** → 退回一次，让模型补。
    *
    * 为什么判「整份」而不是「每个节点」：这一层手里有节点清单，能说清是哪个节点缺；
    * 但一份材料里十几个节点，任何一屏都可能真的一个问题都没有（比如那一屏只是展示
    * 一句话）。判到每个节点，一次漏写就整份退回、重烧两分钟，而读者看到的东西一个
-   * 字不会变好。判整份是一个更硬的界：一份材料连一条待确认都没有，它就不是
-   * 「三栏材料」，只是一张图。
+   * 字不会变好。
+   *
+   * **它不是「整份材料的死判」（owner 裁决，同日改）**：这里说「再问一次」，而不是
+   * 「这份作废」。区别在调用方——`buildPages` 只在**第一次尝试**要这一条，第二次
+   * 一条都没有就照收，右栏铺 `emptyOpenRow()` 那一行（「本版没发现待确认项」）。
+   * 理由：模型在两轮里都提不出问题，最可能的原因是这份需求真的写得完整；为它再烧
+   * 一个两分钟的调用、把材料判失败，读者一个字也拿不到。空右栏要说话，但不是用
+   * 「生成失败」说。
    *
    * 这句话必须说清「补什么」而不是「格式不对」：`open` 是这版新增的字段，模型第一次
-   * 很容易整个漏掉。
+   * 很容易整个漏掉——所以第一次问到它时，得说清两组各问什么。
    */
   const asked = nodes.reduce((sum, node) => sum + openCount(node.open), 0);
   if (opts.requireOpen === true && asked === 0) {
@@ -1022,10 +1032,20 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
   /**
    * 右栏最终的行序：先这一屏的事实标注（它说什么），再两组待确认（还差什么决定）。
    * 顺序不能反过来：问题挂在「这一屏有什么」之后才读得懂问的是哪一屏的哪件事。
+   *
+   * **整份一条待确认都没有时**（owner 裁决，2026-11-10）：右栏铺一行「本版没发现待
+   * 确认项」，而不是留一列空白。为什么铺在**每个节点**上、而不是只铺第一个：
+   * 右栏是跟着节点走的，读者点到哪一屏就看哪一屏的右栏。只铺一个节点，另外九屏的
+   * 右栏依旧是空的——而「点开是空的」正是这条裁决要修的那件事。
+   *
+   * 这一行是**我们的固定文案**（`emptyOpenRow`），与组标题同一条规矩：不过 `sanitize`
+   * 那道网，因为里面不归模型写。
    */
+  const noOpenAtAll = cleaned.reduce((sum, item) => sum + openCount(item.open), 0) === 0;
+  const stand: Anno[] = noOpenAtAll ? [emptyOpenRow()] : [];
   const nodes0: PageFragment[] = cleaned.map((item) => ({
     ...item.fragment,
-    anno: [...item.anno, ...openRows(item.open)],
+    anno: [...item.anno, ...openRows(item.open), ...stand],
   }));
 
   const pageOf = new Map<string, string>();
@@ -1417,7 +1437,16 @@ export async function buildPages(
     }
     spent = addUsage(spent, reply.usage);
 
-    const read = readFragments(reply.text, ids, { requireOpen: stage === 'evaluate' });
+    // 两条待确认那一条**只在第一轮**要求（2026-11-10，owner 裁决）。
+    //
+    // 第二轮还是要这样问，但一条都没提到就**照收**：模型两轮都提不出问题，最可能的
+    // 原因是这份需求本身写得完整。为它把整份材料判死，读者一个字都拿不到；而空右栏
+    // 的那件事已经由 `assembleWalkmap` 用一行「本版没发现待确认项」说清楚了。
+    // 结构性坏掉（少节点、JSON 不对、没有页面也没有步骤）不在这条豁免里——那些
+    // 仍然在每一轮都判退，因为它们是「这份东西读不了」，不是「这一栏空着」。
+    const read = readFragments(reply.text, ids, {
+      requireOpen: stage === 'evaluate' && attempt === 1,
+    });
     let passed: { assembly: Assembly; warnings: string[] } | null = null;
     if (!read.ok) {
       why = read.why;

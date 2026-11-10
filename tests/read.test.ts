@@ -839,7 +839,17 @@ describe('参考段：三处槽位从产物表读', () => {
     const jobId = job.rows[0]!.id;
 
     const after = (await getRequirementDetail(id))!;
-    expect(after.refs.find((x) => x.stage === 'review')!.generation).toEqual({ id: jobId });
+    // 2026-11-10 起这一格多了三格（`startedAt` / `phase` / `attempt`）：抽屉里
+    // 「正在跑」那一行要显示「在第几步、跑了多久、第几次尝试」，而这三件事在服务端
+    // 渲染时就该知道（否则刷新后的第一帧又只剩下「生成中」三个字）。
+    // 刚造出来的这条作业一次尝试都没有 → `phase` 为 null、`attempt` 为 0，
+    // 界面按 `phases.ts` 折成「正在读 PRD」。
+    expect(after.refs.find((x) => x.stage === 'review')!.generation).toMatchObject({
+      id: jobId, phase: null, attempt: 0,
+    });
+    expect(
+      (after.refs.find((x) => x.stage === 'review')!.generation as { startedAt: string }).startedAt,
+    ).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     // 另外两行不受影响：一条作业只属于它自己的那个阶段。
     expect(after.refs.find((x) => x.stage === 'evaluate')!.generation).toBeNull();
     expect(after.refs.find((x) => x.stage === 'inspect')!.generation).toBeNull();

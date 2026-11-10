@@ -291,6 +291,21 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
                    color:var(--c-text-3);font:400 var(--t-caption) var(--f-sans)}
 /* 一行一条，不要行距：这四条要能被横着比。 */
 .row3 .gen-trace-l li{padding:1px 0}
+/* 新增（2026-11-10）：「正在生成」那一行。原来是两个字「生成中」（一个 pill），
+   一跑 2–5 分钟不变，读者只能判断它卡死。现在这一格有三段：到哪一步了（b）、
+   跑了多久（i.tm，每秒跳）、第几次尝试（.at，只在重试时出现）。
+   为什么用 grid 而不是 flex：秒数那一格要**定宽**，否则 `00:59` → `01:00` 时整行会
+   往左挪一像素——一条一直在抖的行读起来像坏了。三段同一号字（caption），只有第一步
+   用正文色，另两段是辅助色：读者先看「在哪一步」。
+   为什么这一行不换行（nowrap）：`.acts` 是 flex-wrap 的，如果这一格允许换行，
+   「第 2 次尝试」会掉到按钮那一行下面单占一行，看着像两条消息。 */
+.row3 .run{display:inline-grid;grid-template-columns:auto 46px auto;align-items:center;
+          gap:6px;white-space:nowrap;font:400 var(--t-caption) var(--f-sans);
+          color:var(--c-text-2)}
+.row3 .run b{display:inline;font-weight:500;color:var(--c-text-1)}
+.row3 .run .tm{font-family:var(--f-mono);color:var(--c-text-2);
+              font-variant-numeric:tabular-nums;text-align:right}
+.row3 .run .at{color:var(--c-text-4)}
 /* 新增（P2.13）：终端失败的浮层。位置在底部中间——抽屉占着右边 560px，
    右下角会被它盖住；居中之后它落在抽屉左边，读得到又不挡动作条。
    颜色只取 token（没有一个字面色值）：边框用 --c-line-strong，左边那条竖线用负向色，

@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import type { Stage } from '../uemaster/packs.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
+import { IDLE_PHASE_LABEL, PHASE_LABEL } from '../uemaster/phases.js';
 
 /**
  * 生成进度（P4-02）：界面上那张角落卡片的数据源。
@@ -34,7 +35,7 @@ export type JobProgress = {
   stageLabel: string;
   /** 最新一次尝试属于哪一段；`null` = 还一次都没问模型（在读 PRD / 准备输入）。 */
   phase: AttemptPhase | null;
-  /** 那一段的中文：`正在读 PRD` / `正在画流程图` … */
+  /** 那一段的中文：`正在读 PRD` / `正在按六问拆流程` …（表在 `uemaster/phases.ts`） */
   phaseLabel: string;
   /** 作业开始的时刻（ISO）。客户端用它算「00:47」。 */
   startedAt: string;
@@ -56,20 +57,14 @@ const STAGE_ZH: Record<Stage, string> = {
 /**
  * 六档 phase → 一句人话。
  *
- * 这一串是 `uemaster_job_attempts.phase` 的**唯一**中文出口（库里存的是英文标识符，
- * 界面上不能出现）。漏一档的表现是卡片上冒出 `locate` 这种串，一眼睛就能看出来。
+ * **这张表搬到了 `uemaster/phases.ts`**（2026-11-10）：抽屉里「生成中」那一行现在也要
+ * 显示同一句话，而它是客户端组件——把表留在这里，那句映射会连着 `pg` 一起进浏览器包。
+ * 这里只做转手：进度卡与抽屉说的必须是同一句，所以只有一个来源。
  */
-const PHASE_ZH: Record<AttemptPhase, string> = {
-  flow: '正在画流程图',
-  pages: '正在画线框页',
-  build: '正在装配材料',
-  locate: '正在找页面',
-  verify: '正在复核',
-  findings: '正在写问题清单',
-};
+const PHASE_ZH = PHASE_LABEL;
 
 /** 还一次尝试都没有时的说法：PRD 快照 / 图之前的准备。 */
-const IDLE_PHASE = '正在读 PRD';
+const IDLE_PHASE = IDLE_PHASE_LABEL;
 
 type Row = {
   job_id: string;
