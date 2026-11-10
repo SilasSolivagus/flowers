@@ -19,6 +19,8 @@ import { RailNav } from './RailNav';
 import { RailToggle } from './RailToggle';
 import { roleLabel } from '../settings/roles';
 import { railFromCookie, RAIL_COOKIE } from './rail-pref';
+import { ThemeToggle } from './ThemeToggle';
+import { THEME_COOKIE, themeFromCookie } from './theme-pref';
 import { cookies } from 'next/headers';
 
 /**
@@ -70,7 +72,7 @@ export async function Shell({ children }: { children: ReactNode }) {
    */
   if (self === null) {
     return (
-      <main className="view" style={{ padding: 24 }}>
+      <main className="view pad">
         <h2>还没法开始</h2>
         <p>{NO_MEMBER}</p>
         <p>
@@ -86,6 +88,7 @@ export async function Shell({ children }: { children: ReactNode }) {
 
   const jar = await cookies();
   const rail = railFromCookie(jar.get(RAIL_COOKIE)?.value);
+  const theme = themeFromCookie(jar.get(THEME_COOKIE)?.value);
 
   /**
    * 正在跑的生成（P4-02）。放在外壳里、而不是某一页：生成是由抽屉发起的，但人往往
@@ -124,6 +127,9 @@ export async function Shell({ children }: { children: ReactNode }) {
         {/* 顶栏只放当前页的标题（需求 / 版本 / 设置）。字由路径推出来，见 PageTitle。 */}
         <header className="topbar">
           <PageTitle />
+          {/* 主题开关在最右一组的最左边：它是偏好、不是这一页的内容，放在标题附近
+              会让人以为它属于当前页。深色档是 silas-UX 的配套组，不是反相（见 theme-pref.ts）。 */}
+          <ThemeToggle initial={theme} />
           {/* 铃铛在「新建需求」左边：先看发生过什么，再动手新建。
               P4-07：站内档位是 `off` 时整个不渲染——「关」的语义是「我不看」，
               留一个永远 0 的铃铛在顶栏上，等于每天提醒他一次「你关掉了通知」。 */}

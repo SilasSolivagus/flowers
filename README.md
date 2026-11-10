@@ -278,6 +278,13 @@ npm run seed -- --reset
 
 ## 设计是哪来的
 
+- 界面规范：<https://github.com/SilasSolivagus/silas-UX>（**唯一真源**：颜色、字阶、间距、圆角、动效、尺寸、断点）
+  - `app/tokens.css` 是**生成产物**，不要手改：真源在 `vendor/silas-ux/tokens.json`（带 `COMMIT` 戳），
+    `npm run tokens:sync` 重新生成，`npm run tokens:check` 校验有没有漂
+  - `npm run design:check` 扫全部样式表：颜色字面量、裸 px 字号、非 4 倍间距、越档圆角、越档动效时长，
+    零违规才算过；同一条断言在 `tests/design-tokens.test.ts` 里，`npm test` 会拦住回潮
+  - 主题三档（随系统 / 浅色 / 深色）由顶栏开关写 cookie（`flowers_theme`），`<html data-theme>`
+    服务端直出，不闪白
 - 产品口径：`docs/superpowers/specs/2026-11-05-flower-gate-product-design.md`
 - 实施计划：`docs/superpowers/plans/`
   - `2026-11-05-flowers-gate-p1-core.md` + `…-p1-core-ledger.md`（P1 领域内核与执行台账，含控制器裁决 R1–R44）

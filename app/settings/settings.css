@@ -14,11 +14,16 @@
    铁律与 globals.css 一致：颜色一律 var(--c-*)，不写字面色值。 */
 
 /* 上游 .setwrap 用 24px 的左右内边距、880px 的上限：设置是读的表，不是看板，
-   1280 宽下不该被拉成一张横跨全屏的表格。 */
+   1280 宽下不该被拉成一张横跨全屏的表格。
+
+   tab 的分隔线用 `box-shadow:inset` 而不是容器的 border-bottom：选中态那条 2px 主色
+   下划线要**盖住**分隔线才是一条线，而原来靠 `margin-bottom:-1px` 把 tab 往下拽了
+   1px——那个负数不在 4 的倍数上，也让 tab 的盒子跨在容器边界上。现在两者贴同一个底边，
+   2px 自然盖住 1px 的投影。 */
 .setwrap{padding:16px 24px 32px;max-width:880px}
 
-.stabs{display:flex;gap:4px;border-bottom:1px solid var(--c-line);margin-bottom:16px}
-.stab{display:inline-flex;align-items:center;height:36px;padding:0 12px;font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-3);border-bottom:2px solid transparent;margin-bottom:-1px;text-decoration:none}
+.stabs{display:flex;gap:4px;box-shadow:inset 0 -1px 0 var(--c-line);margin-bottom:16px}
+.stab{display:inline-flex;align-items:center;height:var(--h-row);padding:0 12px;font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-3);border-bottom:2px solid transparent;text-decoration:none}
 .stab[aria-current="page"]{color:var(--c-text-1);font-weight:600;border-bottom-color:var(--c-accent)}
 .stab:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
 
@@ -78,10 +83,10 @@
 .sg .i.mcp-line .v{flex:1 1 auto;margin-left:0;text-align:left;display:flex;align-items:flex-start;gap:8px}
 .mcp-pair{display:flex;align-items:flex-start;gap:8px;min-width:0;width:100%}
 .mcp-pair code{flex:1 1 auto;min-width:0;font:400 var(--t-caption) var(--f-mono);color:var(--c-text-1);overflow-wrap:anywhere;user-select:all}
-.mcp-sub{display:block;margin-top:2px;font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
+.mcp-sub{display:block;margin-top:4px;font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
 /* 表单与原文块都是**一组行**，不是一行：`.sg .i` 是 flex，这里要盖成 grid。 */
 .sg .i.mcp-form{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px;padding-top:0;padding-bottom:12px}
-.sg .i.mcp-token{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding-top:0;padding-bottom:12px}
+.sg .i.mcp-token{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding-top:0;padding-bottom:12px}
 
 /* P4-05：成员管理、通知开关、自改密码。
    仍然是「标签 + 值 + 控件」三样，没有解释段落；颜色只取 var(--c-*)。 */
@@ -113,14 +118,14 @@
 
 /* 新增成员表单里那行「初始密码」：与 .mk-f 的标签同一档字，但不成一格输入框。 */
 .mk-note{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
-.mk-note code{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:2px 6px;border-radius:var(--r-xs);user-select:all}
+.mk-note code{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:4px 8px;border-radius:var(--r-xs);user-select:all}
 
 /* 通知频道那两行的三档分段控件（P4-07）。
    三格连成一条，不是三个独立开关：它是一个「选哪个」的问题，选中态靠
    `[aria-pressed="true"]`（组件里只有这一个状态，没有 class 切换）。
    数值全走 tokens——颜色、圆角、字号各只在这里出现一次。 */
 .seg{display:inline-flex;border:1px solid var(--c-line-strong);border-radius:var(--r-sm);overflow:hidden;background:var(--c-surface-2)}
-.seg-b{height:26px;padding:0 10px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);border-right:1px solid var(--c-line)}
+.seg-b{height:26px;padding:0 12px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);border-right:1px solid var(--c-line)}
 .seg-b:last-child{border-right:0}
 .seg-b:hover{color:var(--c-text-1)}
 .seg-b[aria-pressed="true"]{background:var(--c-accent);color:var(--c-on-accent);font-weight:600}

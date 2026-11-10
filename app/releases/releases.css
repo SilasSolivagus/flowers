@@ -13,7 +13,7 @@
 /* 标题 + 版本切换：切换是链接（?release=<id>），不是客户端 state。 */
 .vpage .vbar{display:flex;align-items:center;gap:12px;margin:0 0 12px}
 .vpage .vbar h2{margin:0;font:600 var(--t-title-2) var(--f-sans);color:var(--c-text-1)}
-.vpage .vsw{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.vpage .vsw{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .vpage .vsw a{text-decoration:none}
 .vpage .vsw a:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 
@@ -28,21 +28,21 @@
            letter-spacing:.06em;color:var(--c-text-3)}
 
 /* 时间窗：三行「标签 / 数字」。 */
-.vpage .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0;padding:12px;
+.vpage .kv{display:grid;grid-template-columns:auto 1fr;gap:8px 12px;margin:0;padding:12px;
            font:400 var(--t-body-s) var(--f-sans)}
 .vpage .kv dt{color:var(--c-text-3)}
 .vpage .kv dd{margin:0;text-align:right;font-family:var(--f-num);color:var(--c-text-1)}
 /* 目标 / 备注（P4-02 录进来的两段话）：比例字、左对齐、可折行。
    它们是句子而不是数字，右对齐 + 等宽字会把一段话排成一面斜墙。 */
-.vpage .kv dd.long{text-align:left;font-family:var(--f-sans);line-height:18px;white-space:pre-line;overflow-wrap:anywhere}
+.vpage .kv dd.long{text-align:left;font-family:var(--f-sans);white-space:pre-line;overflow-wrap:anywhere}
 
 /* 进度：一个大的时间百分比 + 三个计数。 */
 .vpage .kpi{display:flex;align-items:flex-end;gap:8px;padding:12px 12px 0}
-.vpage .kpi b{font:600 30px/34px var(--f-num);color:var(--c-accent);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.vpage .kpi b{font:600 var(--t-display) var(--f-num);color:var(--c-accent);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .vpage .kpi span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);padding-bottom:4px}
 .vpage .k3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px;
            font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
-.vpage .k3 div{display:flex;flex-direction:column;gap:2px}
+.vpage .k3 div{display:flex;flex-direction:column;gap:4px}
 .vpage .k3 b{font:600 var(--t-title-2)/1 var(--f-num);color:var(--c-text-1)}
 
 /* ── 甘特 ─────────────────────────────────────────────
@@ -71,7 +71,7 @@
 .vpage a.grow:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
 
 /* 列头：日号。发版日那一列加重——它就是竖虚线所在的那一列。 */
-.vpage .ghead .wk{justify-content:center;padding:0 2px;overflow:hidden;white-space:nowrap;font-size:10px}
+.vpage .ghead .wk{justify-content:center;padding:0 4px;overflow:hidden;white-space:nowrap;font:400 var(--t-caption) var(--f-mono)}
 .vpage .ghead .wk.rel{color:var(--c-text-2);font-weight:600}
 
 /* 条。移植版给的四档底色留着（accent / positive / negative / line-strong），这里补两处：
@@ -79,24 +79,26 @@
    - `neg`（延期）从实心红条改成**虚线 + 淡底**：线稿的口径是「虚线粗条 = 已延期」，
      而且实心红条会和「已上线条」抢同一块视觉重量。 */
 .vpage .barx{overflow:hidden}
-.vpage .barx span{font:600 10px/1 var(--f-num);padding-right:4px}
+.vpage .barx span{font:600 var(--t-caption) var(--f-num);padding-right:4px}
 .vpage .barx.pool{background:color-mix(in srgb, var(--c-text-1) 10%, var(--c-surface))}
 .vpage .barx.pool span{color:var(--c-text-3)}
 .vpage .barx.neg{background:color-mix(in srgb, var(--c-negative) 16%, var(--c-surface));
                  border:1px dashed var(--c-negative)}
 .vpage .barx.neg span{color:var(--c-negative)}
 
-@media (max-width:1023px){
+@media (max-width:1024px){
   .vpage .vver{grid-template-columns:minmax(0,1fr)}
 }
 
 /* 手机：左栏收窄到 140px（编号 46px + 一截标题，贴住左边不滚走），剩下的宽度
    交给横向滚动。不改日宽——20px 已经是「列头两个字 + 条还能看出长度」的下限。
    140 是量出来的：390 宽下面板内宽 308，留 168 给轴 = 8.4 列，第 9 列故意露出半格，
-   那就是「这里能横着滑」唯一需要的提示，不必写一行说明。 */
-@media (max-width:767px){
+   那就是「这里能横着滑」唯一需要的提示，不必写一行说明。
+
+   这一档原来还把日号压到 9px、KPI 压到 26px：两个数都在 silas-UX 的七档之外
+   （下限是 caption 11）。现在两处都不再单独改字号——caption 与 display 在 390 宽下
+   本来就读得下，为了「更小一点」跳出字阶不值当。 */
+@media (max-width:768px){
   .vpage{--g-gut:140px}
   .vpage .vbar{gap:8px}
-  .vpage .ghead .wk{font-size:9px}
-  .vpage .kpi b{font-size:26px;line-height:30px}
 }

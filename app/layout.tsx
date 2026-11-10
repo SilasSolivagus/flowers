@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 
 import { RAIL_COOKIE, railFromCookie } from './components/rail-pref';
+import { THEME_COOKIE, themeFromCookie, type ThemePref } from './components/theme-pref';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -30,9 +31,15 @@ export const metadata: Metadata = {
 export default async function RootLayout({ children }: { children: ReactNode }) {
   const jar = await cookies();
   const rail = railFromCookie(jar.get(RAIL_COOKIE)?.value);
+  /**
+   * 主题（silas-UX 深色档）。'system' 时**不写** `data-theme`——属性一存在，CSS 里
+   * `@media (prefers-color-scheme: dark)` 那条就被 `:not([data-theme])` 挡在外面了。
+   * 服务端不知道用户的系统设置，这件事只能交给浏览器答（见 theme-pref.ts）。
+   */
+  const theme: ThemePref = themeFromCookie(jar.get(THEME_COOKIE)?.value);
 
   return (
-    <html lang="zh-CN" data-rail={rail}>
+    <html lang="zh-CN" data-rail={rail} {...(theme === 'system' ? {} : { 'data-theme': theme })}>
       {/*
         suppressHydrationWarning 是给**浏览器扩展**用的，不是给我们的标记用的：装着的
         扩展会往 <body> 上注入属性（线上那一例是 `data-atm-ext-installed`），而

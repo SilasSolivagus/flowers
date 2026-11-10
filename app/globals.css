@@ -54,7 +54,7 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 /* 角色：比姓名小一档、比正文浅一档（线稿的「更安静的第二行」）。 */
 .me .r{margin-top:4px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 退出：和角色同一档字，但可点。不做成按钮外形——左轨底部不该出现一个描边按钮。 */
-.me .logout{margin-top:6px;padding:0;border:0;background:none;cursor:pointer;
+.me .logout{margin-top:8px;padding:0;border:0;background:none;cursor:pointer;
   font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);text-align:left}
 .me .logout:hover{color:var(--c-text-1)}
 
@@ -79,10 +79,10 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
      改成可用信息也不用改结构），只是不占位。
      全名用「视觉隐藏」而不是 display:none：display:none 会把可访问名字一起删掉，
      读屏与悬停的 title 都要的是「吕品」，不是「吕」。 */
-  .rail .me{margin:0 8px;padding:10px 0 0;text-align:center}
+  .rail .me{margin:0 8px;padding:12px 0 0;text-align:center}
   .rail .me b{display:flex;justify-content:center}
   .rail .me .abbr{display:inline}
-  .rail .me .lbl{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+  .rail .me .lbl{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
   .rail .me .r{display:none}
 }
 
@@ -90,6 +90,14 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 .main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
 .topbar{height:var(--h-topbar);flex:0 0 var(--h-topbar);display:flex;align-items:center;gap:12px;padding:0 24px;background:var(--c-surface);border-bottom:1px solid var(--c-line)}
 .topbar h1{margin:0;font:600 var(--t-title-2) var(--f-sans)}
+/* 主题开关（新）。`margin-left:auto` 归它：顶栏右侧那一簇（主题 / 铃铛 / 录入入口）
+   因此被一起推到尽头，中间的空隙由这一条 auto 吸收——铃铛自己不再抢这一格。
+   三档（随系统 / 浅色 / 深色）用两个字说，图标说不出「随系统」。 */
+.themetoggle{display:inline-flex;align-items:center;height:var(--h-control);margin-left:auto;
+             padding:0 8px;border-radius:var(--r-xs);white-space:nowrap;
+             font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.themetoggle:hover{background:var(--c-surface-2);color:var(--c-text-1)}
+.themetoggle:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
 .view{flex:1;min-height:0;overflow:auto;background:var(--c-bg)}
 .view.pad{padding:16px 24px 32px}
 
@@ -99,14 +107,14 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 .btn.primary{background:var(--c-accent);border-color:var(--c-accent);color:var(--c-on-accent)}
 .btn.primary:hover{opacity:.92}
 .btn.ghost{border-color:transparent;color:var(--c-text-3)}
-.btn.sm{height:28px;padding:0 12px}
+.btn.sm{height:var(--h-row-dense);padding:0 12px}
 .btn[disabled]{opacity:.45;cursor:not-allowed}
 
 /* ── 看板 ──────────────────────────────────────────── */
 /* `.board` 是横向滚动容器（10 列 × 220px = 2272px，1280 视口放不下，也不该放下）。
    `overscroll-behavior-x:contain` 是给触控板的：滚到最左/最右之后继续横推，
    浏览器不该把它当成前进/后退手势——否则「看板滑到头」会变成「页面退到上一页」。 */
-.board{display:flex;flex-direction:column;padding:10px 24px 16px;height:100%;min-height:0;overflow-x:auto;overscroll-behavior-x:contain}
+.board{--colw:220px;display:flex;flex-direction:column;padding:12px 24px 16px;height:100%;min-height:0;overflow-x:auto;overscroll-behavior-x:contain}
 
 /* 新增（P4-13）：看板顶部的筛选工具条（`?q=` / `?owner=`）。
    它是 `.board` 的第一个 flex 项、在 `.gcols` 之上；`position:sticky;left:0` 让它在
@@ -117,7 +125,7 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 .fbar{position:sticky;left:0;z-index:2;display:flex;align-items:center;gap:8px;
       padding:0 0 8px;background:var(--c-bg);flex:0 0 auto}
 .fbar input,.fbar select{height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);
-      padding:0 10px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
+      padding:0 12px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
 .fbar .fq{width:260px}
 .fbar select{min-width:132px}
 .fbar input:focus-visible,.fbar select:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
@@ -128,8 +136,8 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
    看板不渲染这一行；类留在原处是因为它是 views.css 原样移植的一段，删掉就看不出省略了什么。
    列宽必须与 .gcols 逐字相同：今天没人渲染它，但哪天真的画了分组带，11 列叠在 10 列网格上
    就是一个从头到尾错位的 1:9 栅格——那种错位在代码里看不出来，只在截图上。 */
-.gband{display:grid;grid-template-columns:repeat(10,220px);gap:8px;padding:0 0 6px}
-.gb{font:600 11px/16px var(--f-sans);letter-spacing:.08em;color:var(--c-text-4);padding-left:2px}
+.gband{display:grid;grid-template-columns:repeat(10,var(--colw));gap:8px;padding:0 0 8px}
+.gb{font:600 var(--t-caption) var(--f-sans);letter-spacing:.08em;color:var(--c-text-4);padding-left:4px}
 
 /* 列网格：10 列 × 220px **固定**宽，超出就横向滚。
  *
@@ -143,16 +151,16 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
  * `.gcols` 作为 flex 项会被拉成视口宽、列溢出到盒子外面，`.board` 的 scrollWidth
  * 就会算成「视口宽」而不是内容宽，滚动到底会差一截。
  * `flex:1;min-height:0` 不动：列仍是满高（列内 `.colbody` 自己纵向滚）。 */
-.gcols{display:grid;grid-template-columns:repeat(10,220px);gap:8px;flex:1;min-height:0;width:max-content}
+.gcols{display:grid;grid-template-columns:repeat(10,var(--colw));gap:8px;flex:1;min-height:0;width:max-content}
 
 .col{display:flex;flex-direction:column;min-width:0;min-height:0;
-     border:0.5px solid var(--c-line);border-radius:12px;
+     border:0.5px solid var(--c-line);border-radius:var(--r-md);
      background:color-mix(in srgb, var(--c-text-1) 3%, var(--c-bg))}
-.colhd{display:flex;align-items:center;gap:6px;min-height:34px;padding:4px 10px 0}
-.colhd b{font:600 12px/16px var(--f-sans);letter-spacing:.02em;color:var(--c-text-1);white-space:nowrap}
-.colhd .pill2{margin-left:auto;min-width:18px;height:18px;padding:0 5px;display:inline-grid;place-items:center;
-              border-radius:99px;background:color-mix(in srgb, var(--c-text-1) 6%, transparent);
-              color:var(--c-text-3);font:600 11px/1 var(--f-num);font-variant-numeric:tabular-nums}
+.colhd{display:flex;align-items:center;gap:8px;min-height:var(--h-table-head);padding:4px 12px 0}
+.colhd b{font:600 var(--t-body-s) var(--f-sans);letter-spacing:.02em;color:var(--c-text-1);white-space:nowrap}
+.colhd .pill2{margin-left:auto;min-width:18px;height:18px;padding:0 4px;display:inline-grid;place-items:center;
+              border-radius:var(--r-pill);background:color-mix(in srgb, var(--c-text-1) 6%, transparent);
+              color:var(--c-text-3);font:600 var(--t-caption) var(--f-num);font-variant-numeric:tabular-nums}
 .colbody{display:flex;flex-direction:column;gap:8px;padding:8px 8px 8px;overflow-y:auto;flex:1;min-height:0}
 /* 新增：待排期列头的「导出」（P1b）。它出现在 `.colhd` 里、计数 pill 之前，
    所以列宽（220px）就是它的全部预算：按钮做成文字链接大小，成功之后同一个位置
@@ -168,11 +176,11 @@ html[data-rail="collapsed"] .shell{--rail-w:56px}
 .colhd .hdexport .hdlink{color:var(--c-accent);font:500 var(--t-caption) var(--f-sans);
                          text-decoration:none;white-space:nowrap}
 .colhd .hdexport a.hdlink:hover{text-decoration:underline}
-.colhd .hdexport .hdfail{flex:1 1 100%;color:var(--c-danger);font:400 var(--t-caption) var(--f-sans);
+.colhd .hdexport .hdfail{flex:1 1 100%;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);
                          overflow-wrap:anywhere}
 
-.card{display:flex;flex-direction:column;gap:6px;padding:10px;border:0.5px solid var(--c-line-strong);
-      border-radius:10px;background:var(--c-surface);cursor:pointer;
+.card{display:flex;flex-direction:column;gap:8px;padding:12px;border:0.5px solid var(--c-line-strong);
+      border-radius:var(--r-md);background:var(--c-surface);cursor:pointer;
       transition:background var(--d-fast) var(--e-standard),border-color var(--d-fast) var(--e-standard)}
 .card:hover{background:color-mix(in srgb, var(--c-text-1) 1.5%, var(--c-surface))}
 /* 新增：卡片本身是一个链接（抽屉的入口），所以要把 <a> 的默认蓝字下划线摘掉，
@@ -182,13 +190,13 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 标题将来来自 PRD 提交，可能是一个没有空格的 URL / 英文 slug。`.colbody` 是 overflow-y:auto
    （另一轴被算成 auto），所以不折断的长词会把**整列**撑出一条横向滚动条——列宽不再变，但
    卡片被横着推走。overflow-wrap:anywhere 让长串就地折行，与 .card .w 同一道兜底。 */
-.card .t{font:400 var(--t-body-s) var(--f-sans);line-height:17px;color:var(--c-text-1);overflow-wrap:anywhere}
+.card .t{font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-1);overflow-wrap:anywhere}
 /* 编号 + 停留天数：单行，天数右对齐。
    97.6px 列宽时代这里靠 `flex-wrap:wrap` 兜「PAN-12」与「0 天」粘连（两张卡的名字会读成
    「PAN-120 天」）。列宽回到 220px（卡片内容宽 ≈ 182px）后两者加起来不到 80px，
    折行不再可能发生，于是回到线稿的单行：编号贴左、天数贴右，中间空着。
    `white-space:nowrap` 是这一行的定义（它本来就该是一行），不是省略号兜底。 */
-.card .m{display:flex;align-items:center;justify-content:space-between;gap:0 6px;font:400 10.5px/14px var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
+.card .m{display:flex;align-items:center;justify-content:space-between;gap:0 8px;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4);white-space:nowrap;overflow:hidden}
 .card .m .k{flex:0 0 auto;font-family:var(--f-mono)}
 .card .m .d{flex:0 0 auto;font-family:var(--f-num)}
 /* 「等谁」是这块看板唯一的信息（同一列里等的东西各不相同），所以它必须能读全。
@@ -199,7 +207,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    加一个日期），折行总比省略号强——它一个字都不丢。
    `overflow-wrap:anywhere` 是第二道兜底：`.colbody` 的 overflow 在另一轴被算成 auto，
    不折断的长词会把整列撑出一条横向滚动条。 */
-.card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);white-space:normal;overflow-wrap:anywhere}
+.card .w{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-2);white-space:normal;overflow-wrap:anywhere}
 .card .w.neg{color:var(--c-negative)}
 /* v1 只有「收集」那条链（进收集 → 点评估 → 出材料），其余状态一行标记说明这一版没开放。
    用最轻的一档灰（`--c-text-4` + caption 字号）：它不是告警，也不是错误，只是一句
@@ -219,7 +227,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .dh .k{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
 .dh h2{margin:4px 0 8px;font:600 var(--t-title-1) var(--f-sans);padding-right:32px}
 .dh .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.dh .x{position:absolute;top:16px;right:20px;color:var(--c-text-4);font-size:12px}
+.dh .x{position:absolute;top:16px;right:20px;color:var(--c-text-4);font:400 var(--t-body-s) var(--f-sans)}
 .chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:var(--r-xs);font:400 var(--t-caption) var(--f-sans);background:var(--c-surface-2);color:var(--c-text-2)}
 .chip.dev{background:var(--c-accent-weak);color:var(--c-accent)}
 .chip.tst{background:var(--c-positive-weak);color:var(--c-positive)}
@@ -232,17 +240,17 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .dsec h3{margin:0 0 12px;font:600 var(--t-caption) var(--f-sans);letter-spacing:.06em;color:var(--c-text-3)}
 /* 以下五组（fields / timeline / row3 / pill / rec）在 views.css 里同属抽屉，
    Task 3 只移植到 .dsec 为止，这里补齐——逐字复制，没有新造样式。 */
-.fields{display:grid;grid-template-columns:88px 1fr 88px 1fr;gap:10px 12px;font:400 var(--t-body-s) var(--f-sans)}
+.fields{display:grid;grid-template-columns:88px 1fr 88px 1fr;gap:12px;font:400 var(--t-body-s) var(--f-sans)}
 .fields dt{color:var(--c-text-3)}
 .fields dd{margin:0;color:var(--c-text-1);min-width:0;overflow:hidden;text-overflow:ellipsis}
 .fields .full{grid-column:1 / -1}
-.fields .desc{color:var(--c-text-2);line-height:20px;white-space:pre-line;background:var(--c-surface-2);border-radius:var(--r-xs);padding:8px 10px}
+.fields .desc{color:var(--c-text-2);white-space:pre-line;background:var(--c-surface-2);border-radius:var(--r-xs);padding:8px 12px}
 .fields .att{color:var(--c-accent)}
 .timeline{display:flex;align-items:center;gap:12px;font:400 var(--t-body-s) var(--f-sans)}
-.timeline .bar{flex:1;height:4px;border-radius:2px;background:var(--c-sunken);position:relative}
-.timeline .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--c-accent);border-radius:2px}
+.timeline .bar{flex:1;height:4px;border-radius:var(--r-xs);background:var(--c-sunken);position:relative}
+.timeline .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--c-accent);border-radius:var(--r-xs)}
 .timeline b{font-family:var(--f-num)}
-.row3{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--c-line);font:400 var(--t-body-s) var(--f-sans)}
+.row3{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:12px 0;border-bottom:1px solid var(--c-line);font:400 var(--t-body-s) var(--f-sans)}
 .row3:last-child{border-bottom:0}
 .row3 b{display:block;font-weight:500}
 .row3 .l span{color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
@@ -254,7 +262,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .pill.ok{background:var(--c-positive-weak);color:var(--c-positive)}
 .pill.warn{background:var(--c-warning-weak);color:var(--c-warning)}
 .pill.no{background:var(--c-surface-2);color:var(--c-text-4)}
-.rec{display:grid;grid-template-columns:40px 1fr;gap:12px;padding:6px 0;font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-2)}
+.rec{display:grid;grid-template-columns:40px 1fr;gap:12px;padding:8px 0;font:400 var(--t-body-s) var(--f-sans);color:var(--c-text-2)}
 .rec .t{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-4)}
 /* 新增：参考段「生成」那个按钮。`.btn` 是默认控制高度（32px），塞进一行里
    会把行撑高；这里按 caption 的字号与 pill 的高度对齐，让「链接 + 日期」和
@@ -280,7 +288,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    详情要**另起一行**而不是挤在按钮旁边，只能靠一个占满整行、自己换行的项。
    为什么右对齐：它挂在右边的控件列下面，左对齐会跟左列的阶段名连成一句读不通的话。 */
 .row3 .gen-trace{flex:0 0 100%;display:flex;flex-direction:column;align-items:flex-end;
-                 margin-top:2px}
+                 margin-top:4px}
 .row3 .gen-trace summary{list-style:none;cursor:pointer;color:var(--c-text-4);
                          font:400 var(--t-caption) var(--f-sans)}
 .row3 .gen-trace summary::-webkit-details-marker{display:none}
@@ -290,7 +298,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .row3 .gen-trace-l{margin:4px 0 0;padding:0;list-style:none;text-align:right;
                    color:var(--c-text-3);font:400 var(--t-caption) var(--f-sans)}
 /* 一行一条，不要行距：这四条要能被横着比。 */
-.row3 .gen-trace-l li{padding:1px 0}
+.row3 .gen-trace-l li{padding:4px 0}
 /* 新增（2026-11-10）：「正在生成」那一行。原来是两个字「生成中」（一个 pill），
    一跑 2–5 分钟不变，读者只能判断它卡死。现在这一格有三段：到哪一步了（b）、
    跑了多久（i.tm，每秒跳）、第几次尝试（.at，只在重试时出现）。
@@ -300,7 +308,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    为什么这一行不换行（nowrap）：`.acts` 是 flex-wrap 的，如果这一格允许换行，
    「第 2 次尝试」会掉到按钮那一行下面单占一行，看着像两条消息。 */
 .row3 .run{display:inline-grid;grid-template-columns:auto 46px auto;align-items:center;
-          gap:6px;white-space:nowrap;font:400 var(--t-caption) var(--f-sans);
+          gap:8px;white-space:nowrap;font:400 var(--t-caption) var(--f-sans);
           color:var(--c-text-2)}
 .row3 .run b{display:inline;font-weight:500;color:var(--c-text-1)}
 .row3 .run .tm{font-family:var(--f-mono);color:var(--c-text-2);
@@ -327,10 +335,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
        background:var(--c-surface);box-shadow:var(--sh-overlay);
        color:var(--c-text-1);font:400 var(--t-body-s) var(--f-sans)}
 .toast .toast-t{grid-column:1;font-weight:500}
-.toast .toast-d{grid-column:1;margin-top:2px;color:var(--c-text-3);
+.toast .toast-d{grid-column:1;margin-top:4px;color:var(--c-text-3);
                 font:400 var(--t-caption) var(--f-sans);overflow-wrap:anywhere}
 .toast .toast-x{grid-row:1;grid-column:2;align-self:start;width:20px;height:20px;
-                margin:-2px -4px 0 0;border:0;border-radius:var(--r-xs);background:transparent;
+                margin:-4px -4px 0 0;border:0;border-radius:var(--r-xs);background:transparent;
                 color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans);cursor:pointer}
 .toast .toast-x:hover{color:var(--c-text-2)}
 /* 新增（视图 CSS 没有对应件）：承诺段里进度条与上面的字段表之间的间距 */
@@ -341,12 +349,12 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 新增：无字段的动作是「一个 form 包一个按钮」，form 自己当 flex 项（去掉 UA 的块级外边距） */
 .db form{display:flex;margin:0}
 /* 新增：动作失败的那一句。位置在动作条上方（.dfoot 里 .db 之前），颜色只取 token */
-.dfail{padding:10px 24px;border-top:1px solid var(--c-line);color:var(--c-negative);
+.dfail{padding:12px 24px;border-top:1px solid var(--c-line);color:var(--c-negative);
        background:color-mix(in srgb, var(--c-negative) 8%, var(--c-surface));
        font:400 var(--t-caption) var(--f-sans)}
 /* 新增：同一句话在 sheet 里再显示一遍（失败的表单不关，原因就在眼前）。
    sheet 的左右内边距是 20px，且 header 已经有下边框，所以去掉这条上边框。 */
-.sheet .dfail{border-top:0;padding:10px 20px}
+.sheet .dfail{border-top:0;padding:12px 20px}
 /* 新增：抽屉表单里的控件焦点环，与左轨链接同一套（UA 默认的蓝色焦点环不属这套 tokens） */
 .fld input:focus-visible,.fld select:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
 
@@ -359,7 +367,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .sheet .f{display:flex;gap:8px;padding:12px 20px;border-top:1px solid var(--c-line);justify-content:flex-end}
 .fld{margin-bottom:12px}
 .fld label{display:block;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);margin-bottom:4px}
-.fld input,.fld select{width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 10px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
+.fld input,.fld select{width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 12px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
 .fld .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
 /* ── 甘特（views.css 里没有 .gantt 这个类名，这一组就是甘特组） ── */
@@ -383,10 +391,25 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .barx.neg{background:var(--c-negative)}
 .barx.pool{background:var(--c-line-strong)}
 
+/* ── 列宽三档（silas-UX 的断点表） ───────────────────────────────────
+ * 列宽只认一件事：一屏里放得下几个「能读的卡」。220px 是量出来的（一张卡放得下一行
+ * 标题 + 一行等谁 + 一行编号/天数）；视口不够就退 200，再不够就让列按视口比例缩。
+ *
+ * 两个断点直接取 silas-UX tokens 里的 --bp-three-col-wide(1586) 与
+ * --bp-three-col-phone(1271)：那两个数原本是评审材料三栏并排的临界值，这里问的是
+ * 同一件事——屏幕上还剩多少横向预算。数值照抄 tokens.css 的注释，不另立一套。
+ */
+@media (max-width:1585px){
+  .board{--colw:200px}
+}
+@media (max-width:1270px){
+  .board{--colw:min(72vw,200px)}
+}
+
 /* ── 手机（<768px，与 tokens.css 的 --bp-phone 同一个数） ──────────── */
 /* 断点里只写数值：媒体查询不能读 CSS 变量，而 tokens.css 已经把 768 记在 --bp-phone 上。
  *
- * 这一档的四件事，全部是「一屏放不下」的直接后果：
+ * 这一档的五件事，全部是「一屏放不下」的直接后果：
  * 1. 左轨默认 56px（`--rail-w` 改一个值，栅格规则不重写）。用户亲手展开过
  *    （cookie = open）时仍按 184px 给他——选择优先于断点。不管哪一档，开关都在
  *    左轨顶部，收起了也点得回来。
@@ -395,16 +418,25 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
  *    那一角就是「这里能横着滑」唯一的提示，不需要任何一行说明文字。
  * 3. 抽屉整屏（100vw）：屏幕只有 390，520px 的抽屉会横着捅出去。
  * 4. 顶栏与看板的左右内边距从 24px 收到 12px：390 宽下 48px 的白边是奢侈品。
- *    顶栏现在只有一行页面标题，没有别的控件要在 390 宽里排队。 */
+ *    顶栏现在只有一行页面标题，没有别的控件要在 390 宽里排队。
+ * 5. **控件高度从 32 抬到 44**（`--h-control-phone` / `--h-btn-phone`）：桌面用指针，
+ *    32px 点得准；拇指点 32px 的按钮，命中率靠运气。这一档不带任何视觉装饰的改动，
+ *    只是把可点区域放大到 iOS HIG 的下限。 */
 @media (max-width:767px){
   .shell{--rail-w:56px}
   html[data-rail="open"] .shell{--rail-w:184px}
   .topbar{padding:0 12px;gap:8px}
   .view.pad{padding:16px 12px 32px}
-  .board{padding:10px 12px 16px}
-  .gcols{grid-template-columns:repeat(10,min(78vw,220px))}
-  .gband{grid-template-columns:repeat(10,min(78vw,220px))}
+  .board{--colw:min(78vw,220px);padding:12px 12px 16px}
   .drawer{width:100vw;max-width:100vw}
+  /* 触控面：`.btn` 用按钮档，其余输入类用控件档，与桌面那套一一对应。 */
+  .btn{height:var(--h-btn-phone)}
+  .btn.sm{height:var(--h-control-phone)}
+  .fld input,.fld select,.fbar input,.fbar select,.gen-sel,.gen-input{height:var(--h-control-phone)}
+  .railtoggle{height:var(--h-control-phone)}
+  .themetoggle{height:var(--h-btn-phone)}
+  /* 铃铛同样抬到 44：它是最容易被误点的一个（19px 的图标塞在 32px 的格子里）。 */
+  .bell{width:var(--h-btn-phone);height:var(--h-btn-phone)}
   /* 动作表单（sheet）里的 480px 定宽在 390 宽下同样会捅出去：抽屉里的每个动作都从这里开。 */
   .sheet .box{width:min(480px,calc(100vw - 32px))}
 }
@@ -426,10 +458,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .gen-ask{display:block}
 .gen-ask .gen-line{display:flex;align-items:center;gap:8px}
 .gen-ask .gen-sel{flex:1 1 auto;height:var(--h-control);font-weight:400}
-.gen-ask .gen-input{margin-top:10px}
-.gen-input{display:block;width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 10px;font:400 var(--t-caption) var(--f-mono);background:var(--c-surface);color:var(--c-text-1)}
+.gen-ask .gen-input{margin-top:12px}
+.gen-input{display:block;width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 12px;font:400 var(--t-caption) var(--f-mono);background:var(--c-surface);color:var(--c-text-1)}
 .gen-input:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
-.gen-err{margin-top:10px;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);overflow-wrap:anywhere}
+.gen-err{margin-top:12px;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans);overflow-wrap:anywhere}
 .gen-foot{display:flex;justify-content:flex-end;gap:8px;padding-top:12px}
 /* 一条都没有时：理由与禁用按钮排在同一行，理由在前（与「生成失败：…」同一个位置）。 */
 .gen-off{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
@@ -443,9 +475,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    2. .sechd —— 抽屉「描述」段的标题行（标题 + 编辑）；
    3. .jobcard —— 右下角的生成进度卡（**不是**遮罩：owner 明确否决了全局遮挡）。 */
 
-/* 顶栏右侧的录入入口（新建需求 / 新建版本）。标题在左、入口在右，`margin-left:auto`
-   把按钮推到尽头——顶栏只有这两样东西，不需要额外的分隔线。 */
-.topbar .newentry{margin-left:auto;text-decoration:none}
+/* 顶栏右侧的录入入口（新建需求 / 新建版本）。它紧跟在主题开关与铃铛后面：
+   `margin-left:auto` 归 `.themetoggle`，这一格不再自己抢，否则两个 auto 会把这簇
+   推到顶栏中间去。 */
+.topbar .newentry{margin-left:0;text-decoration:none}
 
 /* 录入表单：720px 的框，比抽屉里的动作 sheet（480px）宽——里面是六个 textarea，
    480 宽会让每一行只剩三四十个字，而这几问要写的恰恰是段落。
@@ -467,9 +500,8 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 
 /* textarea：与 input 同一套边框与字号，只是高度由 rows 决定、可纵向拉。 */
 .fld textarea{width:100%;min-height:52px;border:1px solid var(--c-line-strong);
-              border-radius:var(--r-xs);padding:6px 10px;font:400 var(--t-body-s) var(--f-sans);
-              background:var(--c-surface);color:var(--c-text-1);resize:vertical;
-              line-height:18px}
+              border-radius:var(--r-xs);padding:8px 12px;font:400 var(--t-body-s) var(--f-sans);
+              background:var(--c-surface);color:var(--c-text-1);resize:vertical}
 .fld textarea:focus-visible{outline:2px solid var(--c-accent);outline-offset:1px}
 
 /* ── 平台 chips（P4-08） ─────────────────────────────────────────────────────
@@ -480,8 +512,8 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    （视觉上藏起来、语义上留着）：键盘能用、读屏能读、`name="platforms"` 能提交。 */
 .fld .flabel{display:block;font:400 var(--t-caption) var(--f-sans);
              color:var(--c-text-3);margin-bottom:4px}
-.chips{display:flex;flex-wrap:wrap;gap:6px}
-.chipbox{display:inline-flex;align-items:center;height:26px;padding:0 10px;
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chipbox{display:inline-flex;align-items:center;height:26px;padding:0 12px;
          border:1px solid var(--c-line-strong);border-radius:var(--r-xs);
          font:400 var(--t-caption) var(--f-sans);color:var(--c-text-2);
          background:var(--c-surface);cursor:pointer;user-select:none}
@@ -493,15 +525,15 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 
 /* 「从原文拆六问」（P4-08）：工具块 + 它的依据清单。
    左边一条竖线把它和六问分开——它是**辅助**，不是第七个问题。 */
-.splitbox{border-left:2px solid var(--c-line-strong);padding-left:10px}
-.splithead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.splitbox{border-left:2px solid var(--c-line-strong);padding-left:12px}
+.splithead{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .splitlead{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4)}
-.splitreport{margin-top:6px;padding:8px 10px;border-radius:var(--r-xs);
+.splitreport{margin-top:8px;padding:8px 12px;border-radius:var(--r-xs);
              background:var(--c-surface-2)}
 .splitsum{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-2)}
-.splitnotes{margin:6px 0 0;padding-left:14px;list-style:none;
+.splitnotes{margin:8px 0 0;padding-left:16px;list-style:none;
             font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4)}
-.splitnotes li{margin-top:2px;overflow-wrap:anywhere}
+.splitnotes li{margin-top:4px;overflow-wrap:anywhere}
 .splitnotes li.no{color:var(--c-warning)}
 .mk-acts{display:flex;gap:8px;margin-top:8px}
 
@@ -512,7 +544,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 
 /* 版本表单顶上那行策略（「上一个版本：v1.4 11-01 → 11-15」）。
    给它一块浅底：它是**上下文**，与下面的输入框不是同一类东西。 */
-.strat{margin-bottom:12px;padding:8px 10px;border-radius:var(--r-xs);
+.strat{margin-bottom:12px;padding:8px 12px;border-radius:var(--r-xs);
        background:var(--c-surface-2);color:var(--c-text-3);
        font:400 var(--t-caption) var(--f-sans)}
 
@@ -538,14 +570,14 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
          border-radius:var(--r-sm);background:var(--c-surface);
          box-shadow:var(--sh-overlay);overflow:hidden}
 .jobcard .hd{display:flex;align-items:center;justify-content:space-between;gap:8px;
-             width:100%;padding:8px 10px;color:var(--c-text-1);
+             width:100%;padding:8px 12px;color:var(--c-text-1);
              font:500 var(--t-caption) var(--f-sans)}
 .jobcard.folded .hd{border-bottom:0}
 .jobcard:not(.folded) .hd{border-bottom:1px solid var(--c-line)}
 .jobcard .hd:hover{background:var(--c-surface-2)}
 .jobcard .hd:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
 .jobcard .cv{color:var(--c-text-4)}
-.jobcard .row{display:flex;flex-direction:column;gap:2px;padding:8px 10px;
+.jobcard .row{display:flex;flex-direction:column;gap:4px;padding:8px 12px;
               border-bottom:1px solid var(--c-line);color:var(--c-text-1);
               text-decoration:none}
 .jobcard .row:last-child{border-bottom:0}
@@ -553,7 +585,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .jobcard .row b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-1)}
 .jobcard .row span{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);
                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.jobcard .row .k{font-family:var(--f-mono);color:var(--c-text-4);margin-right:6px;font-style:normal}
+.jobcard .row .k{font-family:var(--f-mono);color:var(--c-text-4);margin-right:8px;font-style:normal}
 
 /* ── 站内通知（P4-03） ───────────────────────────────────────────────
    顶栏铃铛 + 锚在下拉的面板。四条尺寸的来由：
@@ -566,10 +598,9 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
      入口。
    颜色一律 var(--c-*)，没有一个字面色值；未读只用「字重 + 一个 6px 主色点」表示，
    没有一行说明文字。 */
-.notify{position:relative;margin-left:auto;display:flex;align-items:center}
-/* margin-left:auto 归铃铛，紧跟其后的录入入口不再抢这一格（否则两个 auto 会把
-   铃铛推到顶栏中间）。铃铛不在这一页时（非需求页）这条规则不成立，入口照旧靠右。 */
-.topbar .notify + .newentry{margin-left:0}
+.notify{position:relative;display:flex;align-items:center}
+/* auto 归主题开关（见 .themetoggle）：铃铛与录入入口都紧挨着它排，不再各自抢这一格。 */
+
 
 .bell{position:relative;display:grid;place-items:center;width:var(--h-control);height:var(--h-control);
       border-radius:var(--r-xs);border:1px solid transparent;color:var(--c-text-3)}
@@ -579,9 +610,9 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 角标：数字用等宽字体（--f-num），两位数的宽度才不会把圆点撑歪。 */
 .bell .cnt{position:absolute;top:-1px;right:-2px;min-width:16px;height:16px;padding:0 4px;
            border-radius:var(--r-pill);background:var(--c-accent);color:var(--c-on-accent);
-           font:600 10px/16px var(--f-num);text-align:center}
+           font:600 var(--t-caption) var(--f-num);text-align:center}
 
-.npanel{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:360px;max-height:420px;
+.npanel{position:absolute;top:calc(100% + 8px);right:0;z-index:50;width:360px;max-height:420px;
         display:flex;flex-direction:column;background:var(--c-surface);
         border:1px solid var(--c-line-strong);border-radius:var(--r-sm);
         box-shadow:var(--sh-overlay);overflow:hidden}
@@ -600,10 +631,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .nrow:last-child{border-bottom:0}
 .nrow:hover{background:var(--c-surface-2)}
 .nrow:focus-visible{outline:2px solid var(--c-accent);outline-offset:-2px}
-.nrow .nt{font:400 var(--t-caption) var(--f-num);color:var(--c-text-4);padding-top:1px}
+.nrow .nt{font:400 var(--t-caption) var(--f-num);color:var(--c-text-4);padding-top:4px}
 .nrow .nl{font:400 var(--t-body-s) var(--f-sans);overflow-wrap:anywhere}
 .nrow.un .nl{color:var(--c-text-1);font-weight:500}
-.nrow .nd{width:6px;height:6px;border-radius:50%;margin-top:6px;background:transparent}
+.nrow .nd{width:6px;height:6px;border-radius:50%;margin-top:8px;background:transparent}
 .nrow.un .nd{background:var(--c-accent)}
 
 /* 空状态一行字，没有插图（house rule：标签与值，没有解释性文案）。 */
@@ -625,7 +656,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    改这一行的人。 */
 .fields dd .ownline{margin-left:4px;color:var(--c-text-4);font:400 var(--t-caption) var(--f-sans)}
 .fields dd .claim{display:inline}
-.fields dd .claim .dfail{margin-left:8px;color:var(--c-danger);font:400 var(--t-caption) var(--f-sans)}
+.fields dd .claim .dfail{margin-left:8px;color:var(--c-negative);font:400 var(--t-caption) var(--f-sans)}
 
 /* 卡片上的「认领」：和编号同一行、同一档字，右侧。它不是按钮外形——
    一张卡上出现一个描边按钮，会把「这是一张卡」变成「这是一个表单」。 */
@@ -648,7 +679,7 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .row3 .l .hist[open] summary::before{content:'▾ '}
 .row3 .l .hist summary:hover{color:var(--c-text-2)}
 .row3 .l .hist ul{margin:4px 0 0;padding:0;list-style:none}
-.row3 .l .hist li{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:1px 0}
+.row3 .l .hist li{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:4px 0}
 .row3 .l .hist a{color:var(--c-accent);font:400 var(--t-caption) var(--f-mono)}
 /* 两句话用的是同一个负向色：都是「这一份读不到原样」，只是原因不同（文件没了 / 内容被覆盖）。 */
 .row3 .l .hist .miss{color:var(--c-negative)}

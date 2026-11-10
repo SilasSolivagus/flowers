@@ -4,6 +4,14 @@
  * 不 import 任何组件样式表：这一页在 `Shell` 之外，而 `globals.css` 里的按钮 `.btn`
  * 与输入框样式是全局的（根布局已经引入）。这里只补三件这一页独有的东西——居中、
  * 卡片、字段的上下排布。
+ *
+ * 2026-11-10 起全部落到 silas-UX 变量上（这一页原来是唯一一份 `var(--t-*)` 引用数为 0
+ * 的样式表：字号写 12/20、间距写 6/14/18/20、圆角写 12）：
+ * - 标题走 title-1，副标题与正文走 body-s，标签与脚注走 caption——不出现 10 档以下的字；
+ * - 间距只用 4 的倍数（卡片 32/24，字段 16，标签 8）；
+ * - 卡片靠描边分层（`--c-line`），不再自带投影：silas-UX 的规矩是「浮层才用阴影」，
+ *   而登录卡片不是浮层，它就长在页面底色上；
+ * - 错误色取 `--c-negative`（语义表：negative = 错误、阻塞），不用 warning。
  */
 
 .loginwrap{
@@ -16,41 +24,40 @@
 
 .logincard{
   width:min(360px,100%);
-  padding:28px 24px 20px;
+  padding:32px 24px 24px;
   border:1px solid var(--c-line);
-  border-radius:12px;
+  border-radius:var(--r-md);
   background:var(--c-surface);
-  box-shadow:0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.04);
 }
 
 .logincard h1{
   margin:0;
-  font:600 20px/1.2 var(--f-sans);
+  font:600 var(--t-title-1) var(--f-sans);
   letter-spacing:.01em;
 }
 
 .logincard .sub{
-  margin:6px 0 20px;
+  margin:8px 0 24px;
   color:var(--c-text-3);
-  font-size:12px;
+  font:400 var(--t-body-s) var(--f-sans);
 }
 
-.loginform{display:flex;flex-direction:column;gap:14px}
+.loginform{display:flex;flex-direction:column;gap:16px}
 
-.loginform label{display:flex;flex-direction:column;gap:6px}
+.loginform label{display:flex;flex-direction:column;gap:8px}
 
 .loginform label span{
-  font-size:12px;
   color:var(--c-text-2);
+  font:400 var(--t-caption) var(--f-sans);
 }
 
 .loginform input{
-  height:36px;
-  padding:0 10px;
+  height:var(--h-control);
+  padding:0 12px;
   border:1px solid var(--c-line-strong);
   border-radius:var(--r-xs);
-  font:inherit;
-  color:inherit;
+  font:400 var(--t-body-s) var(--f-sans);
+  color:var(--c-text-1);
   background:var(--c-surface-2);
 }
 
@@ -59,19 +66,24 @@
   outline-offset:-1px;
 }
 
-.loginform .btn{height:36px;margin-top:4px}
+.loginform .btn{height:var(--h-control);margin-top:4px}
 
 .err{
   margin:0;
-  color:var(--c-warning);
-  font-size:12px;
-  line-height:1.5;
+  color:var(--c-negative);
+  font:400 var(--t-body-s) var(--f-sans);
 }
 
 .hint{
-  margin:18px 0 0;
-  padding-top:14px;
+  margin:24px 0 0;
+  padding-top:16px;
   border-top:1px solid var(--c-line);
   color:var(--c-text-3);
-  font-size:12px;
+  font:400 var(--t-caption) var(--f-sans);
+}
+
+/* 手机：控件抬到 44（`--h-btn-phone` / `--h-control-phone`），与全站同一档触控面。
+   登录页是整站唯一「第一次用手点」的页面，这里的命中率比别处更要紧。 */
+@media (max-width:768px){
+  .loginform input,.loginform .btn{height:var(--h-btn-phone)}
 }
