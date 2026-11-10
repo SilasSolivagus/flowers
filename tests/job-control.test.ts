@@ -48,7 +48,7 @@ async function runningJob(requirementId: string, pid: number | null = null): Pro
 async function seedRequirement(): Promise<string> {
   const r = await createRequirement(db, '吕品', {
     title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
-    context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
+    context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完', surfaces: '管理后台 · 权限页', edgeCases: '停用账号给出提示', outOfScope: '不做批量导入',
   });
   return r.id;
 }
@@ -223,7 +223,7 @@ describe('重试', () => {
 
     const error = await caught(retryJob(db, '吕品', failedId));
     expect(error.code).toBe('description_incomplete');
-    expect(error.message).toContain('还差三条没填');
+    expect(error.message).toContain('还差六条没填');
 
     const rows = await db.execute<{ n: number }>(sql`
       select count(*)::int as n from uemaster_jobs where requirement_id = ${r.id}`);

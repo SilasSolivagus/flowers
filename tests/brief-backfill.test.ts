@@ -29,10 +29,14 @@ import {
  * `reason` 与 `batch`（后者是 0028 那条「批量操作不该刷屏」的口令，见 `read/notify.ts`）。
  */
 
+// 2026-11-11 起六问全必填：夹具必须六格，否则每条用例都先撞同一道门。
 const FILLED = {
   context: '运营在后台给客户开权限时',
   problem: '每次要跳七个页面，容易漏配',
   outcome: '一次点完，漏配为 0',
+  surfaces: '管理后台 · 客户权限页',
+  edgeCases: '客户已停用、重复勾选时提示',
+  outOfScope: '不做批量导入',
 };
 
 type BriefKey = 'context' | 'problem' | 'outcome';

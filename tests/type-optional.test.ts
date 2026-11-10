@@ -100,7 +100,11 @@ describe('Ruling 1：类型可空', () => {
 
   it('type 不参与指纹：补上或清掉类型，指纹一个字都不变', async () => {
     // 只留场景那一格：这条用例比的是「指纹认得哪十格」，不是六问齐不齐。
-    const id = await make({ context: '访问者在分享页里找文件', problem: null, outcome: null });
+    // 六问里只留场景那一格：其余五格显式清空（`make` 会先铺 BRIEF 的六格）。
+    const id = await make({
+      context: '访问者在分享页里找文件',
+      problem: null, outcome: null, surfaces: null, edgeCases: null, outOfScope: null,
+    });
     const row = await db.execute<{
       title: string; context: string | null; problem: string | null; outcome: string | null;
       surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;

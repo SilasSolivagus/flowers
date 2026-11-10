@@ -76,7 +76,7 @@ async function caught(p: Promise<unknown>): Promise<AppError> {
 async function bare() {
   return createRequirement(db, '吕品', {
     title: '没有 PRD 的需求', type: 'feature', requester: '孙建宏',
-    context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
+    context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完', surfaces: '管理后台 · 权限页', edgeCases: '停用账号给出提示', outOfScope: '不做批量导入',
   });
 }
 

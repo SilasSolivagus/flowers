@@ -71,6 +71,7 @@ async function inbox() {
   return createRequirement(db, '吕品', {
     title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
     context: '运营在后台手工给客户开权限时', problem: '每次都要点七个页面，容易漏', outcome: '一次点击开完，漏配为 0',
+    surfaces: '管理后台 · 权限页', edgeCases: '停用账号给出提示', outOfScope: '不做批量导入',
   });
 }
 

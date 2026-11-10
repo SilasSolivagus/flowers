@@ -193,7 +193,7 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
    *
    * 为什么不是全局必填：新建时六问本来就允许空着（真实需求常常先建一条再补），
    * 把新建也拦住等于逼人填「无」。但编辑表单是另一个场景——它多半是被「立项 / 生成」
-   * 那一格送过来的（那两处缺三问时会直接跳到这里），所以在这里点名三格必填、并在
+   * 那一格送过来的（那两处缺六问时会直接跳到这里），所以在这里点名六格必填、并在
    * 提交时拦一下，才是用户要的「点按钮缺东西就弹编辑页并显示必填」。
    *
    * 拦的是**本地的一次无效提交**，不是第二条业务规则：判据仍然只有一处
@@ -211,7 +211,7 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
     }
     event.preventDefault();
     const labels = absent.map((key) => DESCRIPTIVE_FIELDS.find((f) => f.key === key)!.label);
-    setBlocked(`这三条要先填：${labels.join('、')}`);
+    setBlocked(`这几条要先填：${labels.join('、')}`);
     document.getElementById(`req-${absent[0]}`)?.focus();
   }
 

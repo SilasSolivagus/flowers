@@ -911,7 +911,17 @@ export async function getRequirementDetail(
    * 新建一条」，六问门只说「缺哪三格 + 补完才能评估」。任何一句都不许承诺状态机里
    * 不存在的边（比如「退回收集」）——那是空头支票。
    */
-  const evaluateReason = evaluateStageLock(row.state) ?? evaluateLock(row);
+  // 判据读的是对外的 camelCase 字段名，而这一行是库里的 snake_case：直接把 row 交给
+  // `evaluateLock` 会让 `edgeCases` / `outOfScope` 永远读成 undefined——六问改必填那天
+  // 的症状是「六格都填了，抽屉还说要补两条」。映射写在这里，与 `lock.ts` 的 `briefOf` 同义。
+  const evaluateReason = evaluateStageLock(row.state) ?? evaluateLock({
+    context: row.context,
+    problem: row.problem,
+    outcome: row.outcome,
+    surfaces: row.surfaces,
+    edgeCases: row.edge_cases,
+    outOfScope: row.out_of_scope,
+  });
 
   return {
     id: row.id,

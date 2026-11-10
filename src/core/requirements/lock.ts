@@ -43,12 +43,18 @@ export type Locked = {
    */
   owner_line: string | null;
   /**
-   * 核心三问的三格（`null` = 没写；空白串在写入端已归一成 null）。判据在 `brief.ts`，
+   * 六问的六格（`null` = 没写；空白串在写入端已归一成 null）。判据在 `brief.ts`，
    * 与读模型、生成前那道门共用同一份——这里只是把库里的值取回来给它。
+   *
+   * 2026-11-11 起是**六格**：三问变六问之后，只取前三格会让 `evaluateLock` 永远
+   * 认为后三格缺失（`undefined`），于是谁也立不了项——测试里当场就炸了。
    */
   context: string | null;
   problem: string | null;
   outcome: string | null;
+  surfaces: string | null;
+  edge_cases: string | null;
+  out_of_scope: string | null;
 };
 
 /**
@@ -71,13 +77,35 @@ export type Locked = {
  * 没有可以被推进的状态。何况调用方本来就按 code 分支，多一个码只会多一条没人测的路径。
  * 走到这里时还没有任何写入（锁行是先手），所以「失败」与「什么都没发生」是同一件事。
  */
+/**
+ * 锁回来的那一行 → `SixAnswers`（camelCase）。
+ *
+ * 为什么要这一层转换：库列是 snake_case（`edge_cases` / `out_of_scope`），而判据
+ * `missingRequired()` 读的是对外字段名（`edgeCases` / `outOfScope`）。直接把整行传进
+ * 去，后两问会永远读成 `undefined`——2026-11-11 三问改六问时，症状就是「填了也说没填」。
+ * 映射放在这一处，别处不再手抄字段名。
+ */
+export function briefOf(row: Locked): {
+  context: string | null; problem: string | null; outcome: string | null;
+  surfaces: string | null; edgeCases: string | null; outOfScope: string | null;
+} {
+  return {
+    context: row.context,
+    problem: row.problem,
+    outcome: row.outcome,
+    surfaces: row.surfaces,
+    edgeCases: row.edge_cases,
+    outOfScope: row.out_of_scope,
+  };
+}
+
 export async function lockRequirement(tx: Tx, requirementId: string): Promise<Locked> {
   // `for update of r`：join 进来的是 members（左侧是 r），不加 `of r` 的
   // `for update` 在 PG 里会撞上「FOR UPDATE cannot be applied to the nullable side
   // of an outer join」——而这里锁的本来也只是需求那一行。
   const cur = await tx.execute<Locked>(sql`
     select r.state, r.type, r.prd_url, r.owner_member_id, m.line as owner_line,
-           r.context, r.problem, r.outcome
+           r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope
       from requirements r
       left join members m on m.id = r.owner_member_id
      where r.id = ${requirementId}

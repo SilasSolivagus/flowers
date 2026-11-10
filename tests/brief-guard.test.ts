@@ -41,13 +41,17 @@ import { REPO_ROOT, cleanArtifacts } from './helpers/files.js';
  *    谁都不许承诺状态机里不存在的边（「退回收集」）。
  */
 
+// 2026-11-11 起六问全必填：这份"填满了"的样本必须是六格，否则每条用例都会先撞同一道门。
 const FILLED = {
   context: '运营在后台给客户开权限时',
   problem: '每次要跳七个页面，容易漏配',
   outcome: '一次点完，漏配为 0',
+  surfaces: '管理后台 · 客户权限页',
+  edgeCases: '客户已停用、权限重复勾选时提示并不落库',
+  outOfScope: '这次不做批量导入权限',
 };
 
-type BriefKey = 'context' | 'problem' | 'outcome';
+type BriefKey = 'context' | 'problem' | 'outcome' | 'surfaces' | 'edgeCases' | 'outOfScope';
 
 /** 三条里去掉一条（其余两条照 old 填）。 */
 function without(missing: BriefKey): Partial<Record<BriefKey, string>> {
@@ -60,6 +64,9 @@ const LABEL: Record<BriefKey, string> = {
   context: '谁在什么情况下用',
   problem: '现在怎么做/哪不好',
   outcome: '做成什么样算成功',
+  surfaces: '涉及哪些页面/入口',
+  edgeCases: '失败/空/无权限怎么办',
+  outOfScope: '这次不做什么',
 };
 
 async function seed(fields: Partial<Record<BriefKey, string>> = {}): Promise<string> {
@@ -129,16 +136,16 @@ describe('表：门挂在变迁上', () => {
   });
 });
 
-describe('判据：核心三条，逐条点名', () => {
-  it('三条齐 → 放行（返回那一条迁移）', () => {
+describe('判据：六问，逐条点名', () => {
+  it('六问齐 → 放行（返回那一条迁移）', () => {
     expect(evaluateLock(FILLED)).toBeNull();
     expect(assertTrigger('inbox', 'design', 'approve', { brief: FILLED })).toMatchObject({
       from: 'inbox', to: 'design', guard: 'brief',
     });
   });
 
-  it('缺 context / problem / outcome：各拒一次，且只点名真正缺的那一条', () => {
-    for (const missing of ['context', 'problem', 'outcome'] as BriefKey[]) {
+  it('六问各缺一次：各拒一次，且只点名真正缺的那一条', () => {
+    for (const missing of ['context', 'problem', 'outcome', 'surfaces', 'edgeCases', 'outOfScope'] as BriefKey[]) {
       const error = (() => {
         try {
           assertTrigger('inbox', 'design', 'approve', { brief: without(missing) });
@@ -150,14 +157,14 @@ describe('判据：核心三条，逐条点名', () => {
 
       expect(error.code).toBe('missing_brief');
       expect(error.message).toContain(`还差一条没填：${LABEL[missing]}`);
-      // 别的那两条不该出现在「还差」里：一次只该看到真正缺的那一条。
-      for (const key of ['context', 'problem', 'outcome'] as BriefKey[]) {
+      // 别的那五条不该出现在「还差」里：一次只该看到真正缺的那一条。
+      for (const key of ['context', 'problem', 'outcome', 'surfaces', 'edgeCases', 'outOfScope'] as BriefKey[]) {
         if (key !== missing) expect(error.message).not.toContain(LABEL[key]);
       }
     }
   });
 
-  it('三条全空 / 忘了传 ctx → 三条都点名（fail-closed，不是「跳过检查」）', () => {
+  it('六问全空 / 忘了传 ctx → 六条都点名（fail-closed，不是「跳过检查」）', () => {
     for (const ctx of [{ brief: {} }, {}]) {
       let message = '';
       try {
@@ -165,8 +172,8 @@ describe('判据：核心三条，逐条点名', () => {
       } catch (error) {
         message = (error as AppError).message;
       }
-      expect(message).toContain('还差三条没填');
-      for (const key of ['context', 'problem', 'outcome'] as BriefKey[]) {
+      expect(message).toContain('还差六条没填');
+      for (const key of ['context', 'problem', 'outcome', 'surfaces', 'edgeCases', 'outOfScope'] as BriefKey[]) {
         expect(message).toContain(LABEL[key]);
       }
     }
@@ -176,14 +183,14 @@ describe('判据：核心三条，逐条点名', () => {
     const error = (() => {
       try {
         assertTransition('inbox', 'design', {
-          brief: { context: '   ', problem: '\n', outcome: FILLED.outcome },
+          brief: { ...FILLED, context: '   ', problem: '\n' },
         });
       } catch (e) {
         return e as AppError;
       }
       throw new Error('三个空格被当成了内容');
     })();
-    expect(missingRequired({ context: '  ', problem: '', outcome: 'x' })).toHaveLength(2);
+    expect(missingRequired({ ...FILLED, context: '  ', problem: '' })).toHaveLength(2);
     expect(error.message).toContain('还差两条没填');
   });
 });
@@ -243,12 +250,12 @@ describe('服务层：立项被拒，而且什么都没发生', () => {
 });
 
 describe('读模型：抽屉那一行与服务说同一句话', () => {
-  it('缺两条 → 评估材料那一行的理由逐字等于服务端拒绝的原文', async () => {
+  it('只填一格 → 评估材料那一行的理由逐字等于服务端拒绝的原文', async () => {
     const requirementId = await seed({ context: FILLED.context });
 
     const detail = (await getRequirementDetail(requirementId))!;
     const reason = detail.refs.find((r) => r.stage === 'evaluate')!.needsDescription!;
-    expect(reason).toContain('还差两条没填');
+    expect(reason).toContain('还差五条没填');
     expect(reason).toContain('现在怎么做/哪不好');
     expect(reason).toContain('做成什么样算成功');
 
@@ -316,7 +323,7 @@ describe('生成前那道门仍然在（但判据不是它）', () => {
     expect(Number(jobs.rows[0]!.n)).toBe(0);
   });
 
-  it('三条齐 → 作业照旧落地（门不是「什么都不让做」）', async () => {
+  it('六问齐 → 作业照旧落地（门不是「什么都不让做」）', async () => {
     const requirementId = await seed(FILLED);
     const { jobId } = await startGeneration(db, '吕品', {
       requirementId, stage: 'evaluate',

@@ -3,7 +3,7 @@ import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
 import { parseRequirementId, requirePlainObject } from '../validate.js';
 import { assertCan } from '../auth/guard.js';
-import { lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
+import { briefOf, lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
 
 /**
  * **立项**这一步本身：门 + 推进 + 事件，**在调用方的事务里**。
@@ -67,7 +67,7 @@ export async function evaluateInTx(
   // `requirements/brief.ts`（状态机、生成前、读模型共用同一份）。
   // 类型仍然不传：Ruling 1 之后没有 `guard: 'type'`，传一个没人读的键会让下一个人
   // 以为类型还在判。
-  assertTrigger(row.state, 'design', 'approve', { brief: row });
+  assertTrigger(row.state, 'design', 'approve', { brief: briefOf(row) });
   await moveTo(tx, requirementId, 'design');
   await recordEvent(tx, {
     requirementId, actor, type: 'requirement.evaluated',

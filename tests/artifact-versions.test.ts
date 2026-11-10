@@ -280,9 +280,7 @@ describe('生成材料不改状态，立项是另一个动作', () => {
 
     const error = await caught(evaluate(db, '吕品', { requirementId: r.id }));
     expect(error.code).toBe('missing_brief');
-    expect(error.message).toBe(evaluateLock({
-      context: BRIEF.context, problem: BRIEF.problem, outcome: '',
-    }));
+    expect(error.message).toBe(evaluateLock({ ...BRIEF, outcome: '' }));
     expect(error.message).toContain('还差一条没填：做成什么样算成功');
     // 门一响，状态与事件都不动。
     expect(await stateOf(r.id)).toBe('inbox');

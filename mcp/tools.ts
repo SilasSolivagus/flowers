@@ -548,7 +548,7 @@ async function shelveTool(identity: Identity, raw: unknown): Promise<string[]> {
  *
  * 2026-11-10 起它**不再**是「交回评估材料」的副作用：`uemaster_attach` 只落产物、
  * 不改状态（owner 的第二次纠正：材料是产物，立项是决定）。所以 agent 想推进这条需求，
- * 必须显式调这个工具——这也是六问那道门（核心三问）唯一的入口。
+ * 必须显式调这个工具——这也是六问那道门（六格全必填，2026-11-11 起）唯一的入口。
  */
 async function startDesignTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId } = parseInput(restoreInput, raw);
@@ -714,7 +714,8 @@ export const TOOLS: readonly ToolDef[] = [
     inputSchema: restoreInput,
     purpose: '接手之后往下走一步：从「收集」进「待设计」，意思是「我去出正式 PRD」。'
       + '无主的需求要先 requirement_claim；有主之后只有负责人 / 条线负责人 / 超管能立项。'
-      + '核心三问（谁在什么情况下用 / 现在怎么做哪不好 / 做成什么样算成功）不齐会被拒，'
+      + '六问（谁在什么情况下用 / 现在怎么做哪不好 / 做成什么样算成功 / 涉及哪些页面入口 / '
+      + '失败空无权限怎么办 / 这次不做什么）缺任何一条都会被拒，'
       + '拒的那句话会点名缺哪几条。**它与生成评估材料是两件事**：uemaster_plan / '
       + 'uemaster_attach 只出材料、交材料，不改状态。',
     call: startDesignTool,

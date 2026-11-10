@@ -84,6 +84,8 @@ export type BackfillResult = {
 type Candidate = {
   id: string; number: number;
   context: string | null; problem: string | null; outcome: string | null;
+  // 2026-11-11 起六问全必填：判据是六格，只读三格会让每一行都「不齐」。
+  surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;
 };
 
 /** 当前全部未删除需求的状态分布，按状态表顺序排（`order by` 在 JS 里做，见下）。 */
@@ -108,18 +110,26 @@ export async function distribution(db: Db): Promise<Distribution> {
 }
 
 /**
- * 挑出「现在是待设计、但核心三条不齐」的行。
+ * 挑出「现在是待设计、但六问不齐」的行。
  *
  * 软删的行**不算**：`deleted_at is not null` 的行对外等于不存在（`lock.ts` 那一层
  * 就挡着），把它退回收集不会让任何人少补一格描述，只会让一条看不见的行多一条事件。
  */
 async function candidates(db: Db): Promise<Candidate[]> {
   const res = await db.execute<Candidate>(sql`
-    select id, number, context, problem, outcome
+    select id, number, context, problem, outcome,
+           surfaces, edge_cases, out_of_scope
       from requirements
      where state = 'design' and deleted_at is null
      order by number`);
-  return res.rows.filter((row) => missingRequired(row).length > 0);
+  return res.rows.filter((row) => missingRequired({
+    context: row.context,
+    problem: row.problem,
+    outcome: row.outcome,
+    surfaces: row.surfaces,
+    edgeCases: row.edge_cases,
+    outOfScope: row.out_of_scope,
+  }).length > 0);
 }
 
 /**

@@ -557,6 +557,7 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
     const r = await createRequirement(db, '吕品', {
       title: '没有生成器', type: 'feature', requester: '孙建宏',
       context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
+      surfaces: '管理后台 · 权限页', edgeCases: '停用账号给出提示', outOfScope: '不做批量导入',
     });
     const error = await startGeneration(db, '吕品', {
       requirementId: r.id, stage: 'evaluate',
@@ -575,6 +576,7 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
     const r = await createRequirement(db, '吕品', {
       title: '没选生成器', type: 'feature', requester: '孙建宏',
       context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
+      surfaces: '管理后台 · 权限页', edgeCases: '停用账号给出提示', outOfScope: '不做批量导入',
     });
     const error = await startGeneration(db, '吕品', {
       requirementId: r.id, stage: 'evaluate',

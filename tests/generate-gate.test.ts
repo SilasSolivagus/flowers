@@ -30,10 +30,14 @@ import { REPO_ROOT, cleanArtifacts } from './helpers/files.js';
  * 4. 读模型把**同一句话**交给抽屉（按钮先禁用，不是点了才被拒）。
  */
 
+// 2026-11-11 起六问全必填：这份"填满"的样本必须是六格。
 const FILLED = {
   context: '运营在后台给客户开权限时',
   problem: '每次要跳七个页面，容易漏配',
   outcome: '一次点完，漏配为 0',
+  surfaces: '管理后台 · 客户权限页',
+  edgeCases: '客户已停用、重复勾选时提示',
+  outOfScope: '不做批量导入',
 };
 
 /** 与其它生成用例同一个 stub 壳。 */
@@ -41,7 +45,7 @@ function stub(name: string): string {
   return `"${process.execPath}" "${path.join(REPO_ROOT, 'tests', 'stubs', name)}"`;
 }
 
-type Fields = Partial<Record<'context' | 'problem' | 'outcome', string>>;
+type Fields = Partial<Record<'context' | 'problem' | 'outcome' | 'surfaces' | 'edgeCases' | 'outOfScope', string>>;
 
 async function seed(fields: Fields): Promise<string> {
   const r = await createRequirement(db, '吕品', {
@@ -83,47 +87,44 @@ afterAll(async () => {
 });
 
 describe('判据（纯函数：一句话，两个地方用）', () => {
-  it('三问全空 → 三条都点名，顺序与裁定一致', () => {
+  it('六问全空 → 六条都点名，顺序与裁定一致', () => {
     expect(lockMessage(missingRequired({}))).toBe(
-      '还差三条没填：谁在什么情况下用、现在怎么做/哪不好、做成什么样算成功。'
-      + '补完才能立项，也才能出评估材料——立项要拿这三问站住，材料要按这三问画，缺了只能靠编。',
+      '还差六条没填：谁在什么情况下用、现在怎么做/哪不好、做成什么样算成功、'
+      + '涉及哪些页面/入口、失败/空/无权限怎么办、这次不做什么。'
+      + '补完才能立项，也才能出评估材料——立项要拿这六问站住，材料要按这六问画，缺了只能靠编。',
     );
   });
 
   it('只缺成功口径 → 只点名它（用户不必回头找是哪一条）', () => {
-    expect(lockMessage(missingRequired({
-      context: FILLED.context, problem: FILLED.problem,
-    }))).toBe('还差一条没填：做成什么样算成功。'
-      + '补完才能立项，也才能出评估材料——立项要拿这三问站住，材料要按这三问画，缺了只能靠编。');
+    expect(lockMessage(missingRequired({ ...FILLED, outcome: '' })))
+      .toBe('还差一条没填：做成什么样算成功。'
+        + '补完才能立项，也才能出评估材料——立项要拿这六问站住，材料要按这六问画，缺了只能靠编。');
   });
 
   it('只缺现状问题 / 只缺使用场景 → 各自点名', () => {
-    expect(lockMessage(missingRequired({
-      context: FILLED.context, outcome: FILLED.outcome,
-    }))).toContain('现在怎么做/哪不好');
-    expect(lockMessage(missingRequired({
-      problem: FILLED.problem, outcome: FILLED.outcome,
-    }))).toContain('谁在什么情况下用');
+    expect(lockMessage(missingRequired({ ...FILLED, problem: '' }))).toContain('现在怎么做/哪不好');
+    expect(lockMessage(missingRequired({ ...FILLED, context: '' }))).toContain('谁在什么情况下用');
   });
 
   it('只有空白字符也算没填（与指纹的归一同一条口径）', () => {
-    expect(missingRequired({ context: '   ', problem: '\n', outcome: '\t' })).toHaveLength(3);
+    expect(missingRequired({ context: '   ', problem: '\n', outcome: '\t' })).toHaveLength(6);
   });
 
-  it('三问齐 → null；而且那三问之外的字段空不空不影响', () => {
+  it('六问齐 → null；后三问缺一条就不再放行（2026-11-11 起没有「之外的字段」）', () => {
     expect(evaluateLock(FILLED)).toBeNull();
-    // surfaces / edgeCases / outOfScope 空着是允许的（收集阶段本来就常常没有）。
-    expect(evaluateLock({ ...FILLED, surfaces: '', edgeCases: '', outOfScope: '' })).toBeNull();
+    for (const key of ['surfaces', 'edgeCases', 'outOfScope'] as const) {
+      expect(evaluateLock({ ...FILLED, [key]: '' })).toContain('还差一条没填');
+    }
   });
 });
 
 describe('服务层：生成被拒（唯一真相）', () => {
-  it('三问全空 → 拒绝，作业一行都不落', async () => {
+  it('六问全空 → 拒绝，作业一行都不落', async () => {
     const requirementId = await seed({});
     const error = await caught(startGeneration(db, '吕品', { requirementId, stage: 'evaluate' }));
 
     expect(error.code).toBe('description_incomplete');
-    expect(error.message).toContain('还差三条没填');
+    expect(error.message).toContain('还差六条没填');
     expect(error.message).toContain('补完才能立项');
     expect(await jobCount(requirementId)).toBe(0);
   });
@@ -178,19 +179,19 @@ describe('服务层：生成被拒（唯一真相）', () => {
 });
 
 describe('读模型：按钮先禁用，理由是同一句话', () => {
-  it('三问没填 → 评估那一行带着理由；评审 / 走查两行不带（它们的输入不是六问）', async () => {
+  it('六问没填 → 评估那一行带着理由；评审 / 走查两行不带（它们的输入不是六问）', async () => {
     const requirementId = await seed({ problem: FILLED.problem });
     const detail = (await getRequirementDetail(requirementId))!;
 
     const evaluate = detail.refs.find((r) => r.stage === 'evaluate')!;
-    expect(evaluate.needsDescription).toContain('还差两条没填');
+    expect(evaluate.needsDescription).toContain('还差五条没填');
     expect(evaluate.needsDescription).toContain('谁在什么情况下用');
     expect(evaluate.needsDescription).toContain('做成什么样算成功');
     expect(detail.refs.find((r) => r.stage === 'review')!.needsDescription).toBeNull();
     expect(detail.refs.find((r) => r.stage === 'inspect')!.needsDescription).toBeNull();
   });
 
-  it('三问齐 → 评估那一行没有理由（按钮照旧能按）', async () => {
+  it('六问齐 → 评估那一行没有理由（按钮照旧能按）', async () => {
     const requirementId = await seed(FILLED);
     const detail = (await getRequirementDetail(requirementId))!;
     expect(detail.refs.find((r) => r.stage === 'evaluate')!.needsDescription).toBeNull();
@@ -203,12 +204,15 @@ describe('读模型：按钮先禁用，理由是同一句话', () => {
       values (${requirementId}, 'evaluate', ${'/uemaster/PAN-99/evaluate.html'}, '吕品')`);
     // 之后有人把描述清空了：材料还在（历史不动），但新生成会被拒。
     await db.execute(sql`
-      update requirements set context = null, problem = null, outcome = null where id = ${requirementId}`);
+      update requirements
+         set context = null, problem = null, outcome = null,
+             surfaces = null, edge_cases = null, out_of_scope = null
+       where id = ${requirementId}`);
 
     const detail = (await getRequirementDetail(requirementId))!;
     const evaluate = detail.refs.find((r) => r.stage === 'evaluate')!;
     expect(evaluate.present).toBe(true);
     expect(evaluate.url).toBe('/uemaster/PAN-99/evaluate.html');
-    expect(evaluate.needsDescription).toContain('还差三条没填');
+    expect(evaluate.needsDescription).toContain('还差六条没填');
   });
 });

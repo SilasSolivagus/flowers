@@ -189,9 +189,11 @@ describe('规则 1 的结构保证：无主需求只有认领这一条路', () =
   async function ownerless(): Promise<string> {
     const res = await db.execute<{ id: string }>(sql`
       insert into requirements
-             (title, type, requester, state, owner_member_id, context, problem, outcome)
+             (title, type, requester, state, owner_member_id,
+              context, problem, outcome, surfaces, edge_cases, out_of_scope)
       values ('没有人接的需求', 'feature', '王妍', 'inbox', null,
-              ${BRIEF.context}, ${BRIEF.problem}, ${BRIEF.outcome})
+              ${BRIEF.context}, ${BRIEF.problem}, ${BRIEF.outcome},
+              ${BRIEF.surfaces}, ${BRIEF.edgeCases}, ${BRIEF.outOfScope})
       returning id`);
     return res.rows[0]!.id;
   }

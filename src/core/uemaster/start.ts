@@ -199,10 +199,15 @@ export async function startGeneration(
   const stage = parseStage(input.stage);
 
   const jobId = await db.transaction(async (tx) => {
+    // 六问全部取回来：2026-11-11 起这道门判的是六格，只取前三格会让后三问永远
+    // 「没填」（同一处踩过的坑见 `requirements/lock.ts` 的 `briefOf`）。
     const found = await tx.execute<{
       id: string; prd_url: string | null; state: State;
       context: string | null; problem: string | null; outcome: string | null;
-    }>(sql`select id, prd_url, state, context, problem, outcome from requirements
+      surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;
+    }>(sql`select id, prd_url, state, context, problem, outcome,
+                  surfaces, edge_cases, out_of_scope
+           from requirements
            where id = ${requirementId} and deleted_at is null for update`);
     if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
 
@@ -293,7 +298,11 @@ export async function startGeneration(
      * 不以六问为前提（v1 里这两条本来也还没开放）。
      */
     if (stage === 'evaluate') {
-      const lock = evaluateLock(found.rows[0]);
+      const row = found.rows[0];
+      const lock = evaluateLock({
+        context: row.context, problem: row.problem, outcome: row.outcome,
+        surfaces: row.surfaces, edgeCases: row.edge_cases, outOfScope: row.out_of_scope,
+      });
       if (lock !== null) throw new AppError('description_incomplete', lock);
     }
 

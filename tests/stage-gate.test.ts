@@ -33,10 +33,14 @@ import { REPO_ROOT, cleanArtifacts } from './helpers/files.js';
  */
 
 /** 六问填齐：这一组判的是阶段门，别让六问门先说话（两句话不一样，混了就测不出谁在拒）。 */
+// 2026-11-11 起六问全必填：夹具必须六格，否则每条用例都先撞同一道门。
 const FILLED = {
   context: '运营在后台给客户开权限时',
   problem: '每次要跳七个页面，容易漏配',
   outcome: '一次点完，漏配为 0',
+  surfaces: '管理后台 · 客户权限页',
+  edgeCases: '客户已停用、重复勾选时提示',
+  outOfScope: '不做批量导入',
 };
 
 /** 与其它生成用例同一个 stub 壳（silent：跑完不留产物，用例只关心「作业有没有落下」）。 */
@@ -133,7 +137,7 @@ describe('判据（纯函数：一句话，两个地方用）', () => {
     const stage = evaluateStageLock('live')!;
     expect(stage).not.toContain('还差');
     // 六问全空也照样有它自己那句——两道门不共用措辞（共用的是**形状**：一句话或 null）。
-    expect(evaluateLock({})).toContain('还差三条没填');
+    expect(evaluateLock({})).toContain('还差六条没填');
   });
 });
 
