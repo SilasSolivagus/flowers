@@ -38,15 +38,17 @@ export default async function BoardPage({
     new?: string | string[] | undefined;
     q?: string | string[] | undefined;
     owner?: string | string[] | undefined;
+    /** 时间范围（2026-11-10）：`all` 才把「上线超过 90 天」的历史放出来。 */
+    scope?: string | string[] | undefined;
   }>;
 }) {
-  const { open, edit, new: fresh, q, owner } = await searchParams;
+  const { open, edit, new: fresh, q, owner, scope } = await searchParams;
   const openId = typeof open === 'string' ? open : null;
   /**
    * 筛选：两个查询参数 → 一份纯值。`parseBoardFilter` 对同名参数取第一个、
    * 认不出的 owner 退回 `all`（见 `src/core/read/board-filter.ts`）。
    */
-  const filter = parseBoardFilter({ q, owner });
+  const filter = parseBoardFilter({ q, owner, scope });
   /** 卡片链接与抽屉关闭地址共用的那串筛选（空串 = 没筛，URL 保持干净的 `/`）。 */
   const query = boardQuery(filter);
   /**
@@ -140,6 +142,8 @@ export default async function BoardPage({
             platforms: detail.info.platforms,
             // 优先级（P4-09）：单选初值。null = 未定（新建时也是 null）。
             priority: detail.info.priority,
+            // 备注（2026-11-10）：只写进企微汇总表的那一列。
+            remark: detail.info.remark,
           }}
         />
       )}

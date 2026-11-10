@@ -49,6 +49,7 @@ export function Board({
       <BoardFilterBar
         q={filter.q}
         owner={filter.owner}
+        scope={filter.scope}
         members={members}
         shown={view.shown}
         total={view.total}

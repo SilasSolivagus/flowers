@@ -3,6 +3,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { assertTrigger } from '../state-machine.js';
 import { recordEvent } from '../events.js';
+import { enqueueQueueSheet } from '../sheet/sync.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
 import { memberByName } from '../auth/members.js';
 import { can, leadRoleOf } from '../auth/roles.js';
@@ -183,6 +184,15 @@ export async function reviewPass(db: Db, actor: string, raw: unknown) {
       requirementId, actor, type: 'requirement.review_passed',
       payload: { from: row.state, to: 'queue' },
     });
+    /**
+     * 进待排期 = 该往企微汇总表写一行（2026-11-10）。
+     *
+     * 这里只**登记**，不写表：追加一行要 spawn `wecom-cli`，失败率落在网络与授权上，
+     * 而「能不能进待排期」不该由企微的可用性决定。真正的写入由
+     * `scripts/sheet-sync.ts` 扫（见 src/core/sheet/sync.ts 的文件头）。
+     * 登记与状态迁移同一个事务：要么都成，要么都不成。
+     */
+    await enqueueQueueSheet(tx, requirementId);
     return { state: 'queue' as const };
   });
 }

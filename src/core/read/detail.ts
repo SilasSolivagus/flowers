@@ -42,7 +42,9 @@ import {
  */
 export type DetailAction =
   | 'approve' | 'submitReview' | 'reject' | 'shelve'
-  | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore';
+  | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore'
+  /** 回滚（2026-11-10）：live → queue。 */
+  | 'rollback';
 
 /**
  * 动作 → 它要求的那一格能力（P4-05）。
@@ -63,6 +65,8 @@ export const ACTION_ABILITY: Record<DetailAction, Ability> = {
   schedule: 'edit',
   bounce: 'edit',
   restore: 'edit',
+  // 回滚与搁置同一条能力：能决定「这条不做了」的人，也能决定「这条退回去重排」。
+  rollback: 'edit',
   reviewPass: 'review',
   reviewReject: 'review',
 };
@@ -268,6 +272,8 @@ export type Detail = {
     ownerLine: string | null;
     ownerLineLabel: string | null;
     prdUrl: string | null;
+    /** 备注（2026-11-10）：null = 没写。 */
+    remark: string | null;
     /**
      * 平台（P4-08）：这条需求落在哪几个端上。空数组 = 未标注。
      *
@@ -405,9 +411,12 @@ export function actionsFor(state: State): DetailAction[] {
     case 'test':
       return ['bounce', 'shelve'];
     case 'live':
-      // 走查在 P4 范围外（plan「不在 P4 范围」），所以这里只有搁置；
+      // 走查在 P4 范围外（plan「不在 P4 范围」），所以这里没有走查；
       // 参考段的「走查材料」留着槽位，等 P2 的 uemaster_artifacts 接上。
-      return ['shelve'];
+      //
+      // 回滚（2026-11-10）：发出去的东西有问题时把它退回待排期重排。
+      // 它在 `shelve` 之前——「撤回重排」比「这件事不做了」常用得多。
+      return ['rollback', 'shelve'];
     case 'rejected':
       return [];
     case 'shelved':
@@ -691,6 +700,8 @@ type Row = {
   state: State;
   requester: string;
   prd_url: string | null;
+  /** 备注（2026-11-10）：只给抽屉与汇总表看，不进生成链路。 */
+  remark: string | null;
   skip_reason: string | null;
   state_entered_at: string;
   commit_test_at: string | null;
@@ -752,7 +763,7 @@ export async function getRequirementDetail(
   // 版本的 join 也带：版本被删之后，那条需求的排期字段仍在，但**版本名不该再显示**
   // （`rel.id` 会因为 join 不成立变成 null，`commit.release` 随之整段消失）。
   const found = await db.execute<Row>(sql`
-    select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.skip_reason,
+    select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.remark, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
            r.platforms, r.priority, r.source, r.source_note,
@@ -919,6 +930,7 @@ export async function getRequirementDetail(
       ownerLine: row.owner_line,
       ownerLineLabel: lineLabelOf(row.owner_line),
       prdUrl: row.prd_url,
+      remark: row.remark,
       platforms: normalizePlatforms(row.platforms),
       platformsLabel: platformsLabel(normalizePlatforms(row.platforms)),
       priority: normalizePriority(row.priority),

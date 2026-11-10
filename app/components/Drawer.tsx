@@ -358,6 +358,14 @@ export function Drawer({
                   </dd>
                 </>
               )}
+              {/* 备注（2026-11-10）：只有写了才出现。它不是信息段的一格固定表头——
+                  多数需求没有备注，固定一行「备注 —」等于每天多读一个空行。 */}
+              {info.remark !== null && info.remark !== '' && (
+                <>
+                  <dt className="full">备注</dt>
+                  <dd className="full">{info.remark}</dd>
+                </>
+              )}
               {info.skipReason !== null && (
                 <>
                   <dt className="full">跳过评估</dt>

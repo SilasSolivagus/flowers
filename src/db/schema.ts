@@ -186,6 +186,14 @@ export const requirements = pgTable('requirements', {
   requester: text('requester').notNull(),                    // 只是字段，不是账号
   ownerMemberId: uuid('owner_member_id').references(() => members.id),
   prdUrl: text('prd_url'),
+  /**
+   * 备注（2026-11-10）：录入时随手记的一句上下文。
+   *
+   * 它**不是**第七问：六问各自对应生成链路上会猜错的一处，备注谁都不喂——它只去一个
+   * 地方，企微汇总表最后一列（`sheet_sync` 那条台账写出去的那一行）。所以它不进
+   * `DESCRIPTIVE_FIELDS`（那张表被表单、抽屉、指纹、事件短名共用），也不参与指纹。
+   */
+  remark: text('remark'),
   skipReason: text('skip_reason'),
   releaseId: uuid('release_id').references(() => releases.id),
   commitTestAt: timestamp('commit_test_at', { withTimezone: true }),
@@ -858,3 +866,52 @@ export const locateRuns = pgTable('locate_runs', {
   detail: jsonb('detail'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({ at: index('locate_runs_created_at').on(t.createdAt) }));
+
+/**
+ * 外部表格同步台账（2026-11-10）。
+ *
+ * 一条需求一个目标一行：`state='pending'` 是「该写了还没写」，`ok` 是「写成了或表里已经
+ * 有这一条」，`failed` 是「写失败、下次再来」。扫的人是 `scripts/sheet-sync.ts`。
+ *
+ * 为什么不在 `review_pass` 的事务里直接 append：那一次调用要 spawn `wecom-cli`，
+ * 失败率落在网络与授权上，而状态迁移不该被外部系统的可用性绑住（见 0039 的注释）。
+ *
+ * `row_values` 存的是**真正追加进表的那 11 格**，不是需求的快照：失败时它能回答
+ * 「当时准备写什么」，成功之后它就是那张表里那一行的唯一留底（表格在别人手里，
+ * 我们改不了它的历史）。
+ */
+export const sheetSync = pgTable('sheet_sync', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  requirementId: uuid('requirement_id').notNull().references(() => requirements.id, { onDelete: 'cascade' }),
+  /** 目前只有 `queue-sheet`。多一个目标就多一个值，不建新表。 */
+  target: text('target').notNull(),
+  /** pending / ok / failed。 */
+  state: text('state').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  appendedAt: timestamp('appended_at', { withTimezone: true }),
+  /** 按列顺序的那一行（jsonb 数组）。 */
+  rowValues: jsonb('row_values'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ unique: uniqueIndex('sheet_sync_requirement_target_key').on(t.requirementId, t.target) }));
+
+/**
+ * 群播报台账（2026-11-10）：状态变动播报与版本每日进展。
+ *
+ * 与 `notifyDeliveries` 分开的理由写在 0040 的注释里：那张表是「一条消息 → 一个人」，
+ * 这张是「一条消息 → 一个群」。`(kind, ref)` 唯一，ref 是 `evt:<seq>` 或 `daily:<YYYY-MM-DD>`——重跑与失败重试都靠它去重。
+ */
+export const groupPosts = pgTable('group_posts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /** `events` | `daily`。 */
+  kind: text('kind').notNull(),
+  ref: text('ref').notNull(),
+  /** 发出去（或准备发）的那段 markdown，留底用于排查。 */
+  content: text('content').notNull(),
+  /** pending / sent / failed。 */
+  status: text('status').notNull().default('pending'),
+  attempts: integer('attempts').notNull().default(0),
+  error: text('error'),
+  postedAt: timestamp('posted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ unique: uniqueIndex('group_posts_kind_ref_key').on(t.kind, t.ref) }));

@@ -166,10 +166,10 @@ describe('actionsFor 对齐（漂移探测器）', () => {
     expect(new Set(declared).size).toBe(declared.length);
 
     const covered = [...new Set(declared)].sort();
-    // `DetailAction` 的九个成员各有一个工具——包括 `approve`（立项）。
+    // `DetailAction` 的十个成员各有一个工具——包括 `approve`（立项）与 `rollback`（回滚）。
     expect(covered).toEqual([
-      'approve', 'bounce', 'reject', 'restore', 'reviewPass', 'reviewReject', 'schedule',
-      'shelve', 'submitReview',
+      'approve', 'bounce', 'reject', 'restore', 'reviewPass', 'reviewReject', 'rollback',
+      'schedule', 'shelve', 'submitReview',
     ]);
     for (const action of covered) expect(LEGAL_FROM[action].length).toBeGreaterThan(0);
   });

@@ -212,6 +212,8 @@ export const LEGAL_FROM: Record<DetailAction, readonly State[]> = {
   schedule: ['queue'],
   bounce: ['test'],
   restore: ['shelved'],
+  // 回滚（2026-11-10）：只有已上线的能撤回。
+  rollback: ['live'],
 };
 
 /** 一个工具的定义形状。`call` 返回**多段文本**，每段对应 MCP 结果里的一段。 */
@@ -526,6 +528,12 @@ async function rejectTool(identity: Identity, raw: unknown): Promise<string[]> {
   return [JSON.stringify(got, null, 2)];
 }
 
+async function rollbackTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId, reason } = parseInput(terminalReasonInput, raw);
+  const got = await SERVICES.rollbackRelease(db, identity.member, { requirementId, reason });
+  return [JSON.stringify(got, null, 2)];
+}
+
 async function shelveTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId, reason } = parseInput(terminalReasonInput, raw);
   const got = await SERVICES.shelveRequirement(db, identity.member, { requirementId, reason });
@@ -720,6 +728,17 @@ export const TOOLS: readonly ToolDef[] = [
     purpose: '这件事先不做：任何非终态都能搁置，原因必填（一年后翻事件流时，'
       + '唯一能回答「为什么」的就是这句话）。已挂着的评审派单会一起作废。',
     call: shelveTool,
+  }),
+  tool({
+    name: 'requirement_rollback',
+    title: '回滚（已上线 → 待排期）',
+    scope: 'write',
+    action: 'rollback',
+    inputSchema: terminalReasonInput,
+    purpose: '发出去的东西有问题时撤回：需求退回「待排期」，版本与两个日期一起清空，'
+      + '原因必填（它会进事件流）。退回的是待排期而不是开发中——开发中的时钟会立刻把它'
+      + '推回测试与已上线，等于没撤。之后要重新排期一次（requirement_schedule）。',
+    call: rollbackTool,
   }),
   tool({
     name: 'requirement_restore',

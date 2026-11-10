@@ -30,6 +30,8 @@ export const EDITABLE_FIELDS = [
   'prdUrl',
   'platforms',
   'priority',
+  // 备注（2026-11-10）：与六问一起改，但它不是第七问——不影响指纹、不喂生成。
+  'remark',
 ] as const;
 
 export type EditableField = (typeof EDITABLE_FIELDS)[number];
@@ -107,6 +109,8 @@ type CurrentRow = {
   platforms: string[] | null;
   /** `text` 可空（P4-09）：`p0|p1|p2|p3|green`；null = 未定。 */
   priority: string | null;
+  /** 备注（2026-11-10）：null = 没写。 */
+  remark: string | null;
 };
 
 /** 一次改动的「旧值 / 新值」：文本字段是字符串，平台是字符串数组，优先级是键。 */
@@ -123,6 +127,7 @@ function storedOf(row: CurrentRow, field: EditableField): Value {
     case 'edgeCases': return row.edge_cases;
     case 'outOfScope': return row.out_of_scope;
     case 'prdUrl': return row.prd_url;
+    case 'remark': return row.remark;
     // 平台：库里是 `text[]`（空数组 = 未标注），读到就是数组。
     case 'platforms': return normalizePlatforms(row.platforms);
     // 优先级：库里是 text（null = 未定）。认不出的历史值按未定处理——与指纹同口径。
@@ -152,6 +157,7 @@ function columnOf(field: EditableField): string {
     case 'platforms': return 'platforms';
     // 优先级（P4-09）同为「非六问」的单值列。
     case 'priority': return 'priority';
+    case 'remark': return 'remark';
     default: return DESCRIPTIVE_FIELDS.find((f) => f.key === field)!.column;
   }
 }
@@ -232,7 +238,7 @@ export async function updateRequirement(
   return db.transaction(async (tx) => {
     const found = await tx.execute<CurrentRow>(sql`
       select id, title, context, problem, outcome, surfaces, edge_cases, out_of_scope, prd_url,
-             platforms, priority
+             platforms, priority, remark
         from requirements
        where id = ${id} and deleted_at is null
        for update`);

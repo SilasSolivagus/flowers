@@ -286,3 +286,62 @@ describe('过滤发生在 SQL 里', () => {
     expect(columns.flatMap((c) => c.cards)).toHaveLength(1);
   });
 });
+
+/**
+ * 时间范围（2026-11-10）：默认不显示「已上线超过 90 天」的历史。
+ *
+ * 库里的实测分布是 265 条已上线、其中 207 条停在那儿超过 90 天——全部摊在板子上，
+ * 最左边几列就没人看了。这一组钉三件事：默认藏、`?scope=all` 放出来、
+ * 其余九列**不受影响**（收的只是「发完很久、没人再看」的那一批，不是所有老数据）。
+ */
+describe('window: 已上线超过 90 天的默认不显示', () => {
+  /** 把一条需求「钉」到某个进入状态的时间上（`seed` 只写形状，时间由这里改）。 */
+  async function backdate(id: string, days: number): Promise<void> {
+    await db.execute(sql`
+      update requirements set state_entered_at = now() - make_interval(days => ${days})
+       where id = ${id}`);
+  }
+
+  it('90 天前的已上线默认不显示，10 天前的显示；scope=all 两条都出来', async () => {
+    const old = await seed({ title: '去年发的那个功能', state: 'live' });
+    await backdate(old.id, 120);
+    const fresh = await seed({ title: '上周刚上线', state: 'live' });
+    await backdate(fresh.id, 10);
+
+    const active = await board({});
+    expect(count(active, 'live')).toBe(1);
+    expect(active.shown).toBe(1);
+    // 分母跟着范围走：「筛出 1 / 1」读得通，而不是「1 / 2」。
+    expect(active.total).toBe(1);
+
+    const all = await board({ scope: 'all' });
+    expect(count(all, 'live')).toBe(2);
+    expect(all.total).toBe(2);
+  });
+
+  it('其余九列不受影响：收集里停了一年的条目照旧显示', async () => {
+    const stale = await seed({ title: '提了但没人立项', state: 'inbox' });
+    await backdate(stale.id, 400);
+
+    expect(count(await board({}), 'inbox')).toBe(1);
+    // 默认范围下 total 就是 1——这条规则只对 live 生效。
+    expect((await board({})).total).toBe(1);
+  });
+
+  it('URL 解析：scope=all 才是含历史，其余（空串 / active / 垃圾值）都是默认', async () => {
+    expect(parseBoardFilter({ scope: 'all' }).scope).toBe('all');
+    expect(parseBoardFilter({ scope: 'active' }).scope).toBe('active');
+    expect(parseBoardFilter({ scope: '' }).scope).toBe('active');
+    // 手改坏了的 URL 不该把 200 张历史卡放出来。
+    expect(parseBoardFilter({ scope: 'ALL ' }).scope).toBe('active');
+    expect(parseBoardFilter({ scope: '1' }).scope).toBe('active');
+  });
+
+  it('URL 往返：默认范围不写进 URL，含历史才写 scope=all', () => {
+    expect(boardQuery({ q: '', owner: { kind: 'all' }, scope: 'active' })).toBe('');
+    expect(boardQuery({ q: '', owner: { kind: 'all' }, scope: 'all' })).toBe('scope=all');
+    // 与搜索词一起出现时顺序固定：q、owner、scope。
+    expect(boardQuery({ q: '风控', owner: { kind: 'me' }, scope: 'all' }))
+      .toBe('q=%E9%A3%8E%E6%8E%A7&owner=me&scope=all');
+  });
+});

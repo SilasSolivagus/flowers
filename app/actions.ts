@@ -16,6 +16,7 @@ import { bounce } from '../src/core/requirements/bounce';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal';
+import { rollbackRelease } from '../src/core/requirements/rollback';
 import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
 import { cancelJob, retryJob } from '../src/core/uemaster/control';
 import { credentialFor, testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
@@ -279,6 +280,13 @@ export async function shelveAction(formData: FormData): Promise<ActionResult> {
   return run((actor) => shelveRequirement(db, actor, { requirementId, reason }));
 }
 
+/** 回滚：live → queue（2026-11-10）。发出去的东西有问题，退回去重排。 */
+export async function rollbackAction(formData: FormData): Promise<ActionResult> {
+  const requirementId = field(formData, 'id');
+  const reason = field(formData, 'reason');
+  return run((actor) => rollbackRelease(db, actor, { requirementId, reason }));
+}
+
 /** 恢复：shelved → inbox。 */
 export async function restoreAction(formData: FormData): Promise<ActionResult> {
   const requirementId = field(formData, 'id');
@@ -299,6 +307,7 @@ const ACTIONS: Record<DetailAction, (formData: FormData) => Promise<ActionResult
   reject: rejectAction,
   shelve: shelveAction,
   restore: restoreAction,
+  rollback: rollbackAction,
 };
 
 /**
@@ -614,6 +623,8 @@ export async function createRequirementAction(formData: FormData): Promise<Entry
     surfaces: field(formData, 'surfaces'),
     edgeCases: field(formData, 'edgeCases'),
     outOfScope: field(formData, 'outOfScope'),
+    // 备注（2026-11-10）：只去企微汇总表，不进生成链路。
+    remark: field(formData, 'remark'),
   }));
 }
 
@@ -638,6 +649,8 @@ export async function updateRequirementAction(formData: FormData): Promise<Entry
     surfaces: field(formData, 'surfaces'),
     edgeCases: field(formData, 'edgeCases'),
     outOfScope: field(formData, 'outOfScope'),
+    // 备注（2026-11-10）：只去企微汇总表，不进生成链路。
+    remark: field(formData, 'remark'),
   }));
 }
 

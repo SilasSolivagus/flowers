@@ -42,6 +42,85 @@ npm run demo         # 领域冒烟脚本：一条需求从收集走到上线，
 
 `npm run demo` 会 `resetDb()` 清空数据，**跑完要补一次 `npm run seed -- --reset`**，否则界面是空的。
 
+## 待排期 → 企微汇总表
+
+需求**进待排期**（`review_pass`，`review → queue`）时，往一张别人维护的电子表格末尾追加一行：
+`迭代需求汇总-版本日志` 的「待排期需求」tab。
+
+```bash
+npm run sheet:sync          # 扫一轮：把 pending / failed 的写进表里
+npx tsx scripts/sheet-sync.ts --limit 20   # 这轮最多 20 条（默认 50）
+```
+
+三件事写在代码里，不是写在文档里：
+
+1. **不绑在请求上**。状态迁移的同一个事务里只登记一条 `sheet_sync`（pending），真正
+   的追加由上面那条命令扫。企微抖了不该让需求进不了待排期。
+2. **两层幂等**。台账层 `unique (requirement_id, target)`；表格层追加前先读 A 列，
+   `PAN-<编号>` 已经在表里就跳过（超时重跑不会写出两行）。读不到 A 列就整轮不写。
+3. **列映射**。`#` 写 `PAN-n`（表里那 22 行旧数据是人工连号，**不动**，新行往后接）；
+   需求名称 / 负责人 / 优先级 / 涉及端 / 需求描述（取 `outcome`，空则退 `problem`）/
+   PRD链接 / 备注 有值；迭代情况 / 涉及研发人员 / 预评审 三列留空——flowers 里没有
+   数据源，机器不猜（表里这三列本来就基本是空的）。
+
+目标表可以用环境变量换掉，不必改代码：`FLOWERS_QUEUE_SHEET_DOC`（整条文档链接）、
+`FLOWERS_QUEUE_SHEET_TAB`（工作表 id，现在是 `kvf2dh`）。
+
+定时跑（cron，每 10 分钟一次；分字段写 0,10,20…，别用星号斜杠，它会提前关注释）：
+
+```
+cd /path/to/flowers && npx tsx scripts/sheet-sync.ts >> /tmp/flowers-sheet.log 2>&1
+```
+
+## 群播报（状态变动 + 版本日报）
+
+发到**团队群**（企微群机器人），与「发给个人」的 `scripts/wecom-dispatch.ts` 是两条路，
+各有各的台账（`group_posts` / `notify_deliveries`）。
+
+```bash
+npx tsx scripts/group-dispatch.ts --webhook 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'
+npx tsx scripts/group-dispatch.ts --init      # 记起始水位：不补播历史事件
+npx tsx scripts/group-dispatch.ts             # 播状态变动（一轮合成一条，默认 ≤10 条）
+npx tsx scripts/group-dispatch.ts --daily     # 版本每日进展（一天一条，含所有在播版本）
+npx tsx scripts/group-dispatch.ts --dry-run   # 只打印要发什么（不需要先配 webhook）
+```
+
+进群的八种动静：认领、立项进待设计、提交评审、评审通过进待排期、被拒绝、被搁置、
+**已上线（附一句「请提出人验收」）**、回滚。每条带 `PAN-号 + 标题` 的抽屉链接。
+
+版本日报只播「发版日在过去 7 天到未来 45 天」的版本：剩余天数、需求数、已上线/在途、
+**今日到点**、**已延期（点名三条）**。数据来自 `listReleases()`——甘特用的同一个读模型。
+
+cron（每 5 分钟一个循环 + 每天 10:00 一条日报）：
+
+```
+*/5 * * * * cd /path/to/flowers && npx tsx scripts/group-dispatch.ts >> /tmp/flowers-group.log 2>&1
+0 10 * * *  cd /path/to/flowers && npx tsx scripts/group-dispatch.ts --daily >> /tmp/flowers-group.log 2>&1
+```
+
+## 时间范围、回滚、批量搁置
+
+三件事都是「简化」的一部分：板子上只留下还在动的东西，发错了能撤，堆积的能收。
+
+1. **看板默认不显示「已上线超过 90 天」的需求**（`LIVE_HISTORY_DAYS`，read/board.ts）。
+   库里 265 条已上线里 207 条停在那儿超过 90 天，全是迁移历史；`?scope=all` 或工具条
+   上那个「含历史」开关会把它们放回来。判据用 `state_entered_at`（发出去多久），
+   不是 `created_at`。其余九列不受影响。
+2. **回滚**：`live → queue`（抽屉里已上线那一行的「回滚」）。它退到**待排期**而不是
+   开发中——`dev` 的时钟会立刻把它推回测试与已上线，等于没撤；退到队列才有出路
+   （重新排期一次）。版本与两个日期一起清空，撤回来之前的那一版写进事件流。
+3. **批量搁置**（`scripts/shelve-stale.ts`）：默认只动「收集」、超过 180 天、dry-run。
+
+```bash
+npx tsx scripts/shelve-stale.ts                          # 预览清单
+npx tsx scripts/shelve-stale.ts --dry-run=false          # 真搁置
+npx tsx scripts/shelve-stale.ts --days 90 --states inbox,design
+```
+
+收集用 `created_at` 算年龄（迁移把 `state_entered_at` 压平成了迁移那一天），
+其余状态用 `state_entered_at`。原因写成「长期未推进：停在收集超过 N 天」，
+每一条都会在事件流里留下 actor = 超管。
+
 ## 三个页面
 
 | 路径 | 是什么 |

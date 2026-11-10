@@ -101,6 +101,8 @@ export const SHORT_LABEL: Record<string, string> = {
    * 不是六问里的文本，但它会出现在「更新描述」那条事件的一行里，所以短名必须在这张表。
    */
   priority: '优先级',
+  /** 备注（2026-11-10）：与 `priority` 同位——不是六问，但会出现在「更新描述」的事件行里。 */
+  remark: '备注',
   ...Object.fromEntries(DESCRIPTIVE_FIELDS.map((f) => [f.key, f.short])),
 };
 

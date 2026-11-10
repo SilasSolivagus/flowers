@@ -36,7 +36,9 @@ export const STATE_LABEL: Record<State, string> = {
 export type Trigger =
   | 'approve' | 'submit_review' | 'reject' | 'shelve'
   | 'review_pass' | 'review_reject' | 'schedule'
-  | 'clock' | 'bounce' | 'restore';
+  | 'clock' | 'bounce' | 'restore'
+  /** 回滚（2026-11-10）：已上线 → 待排期。发出去的东西有问题，退回去重排。 */
+  | 'rollback';
 
 /**
  * 状态机亲自执行的门禁。
@@ -124,6 +126,9 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: 'test',   to: 'live',    trigger: 'clock',         clock: true },
   { from: 'test',   to: 'dev',     trigger: 'bounce' },
   { from: 'shelved', to: 'inbox',  trigger: 'restore' },
+  // 回滚（2026-11-10）：唯一一条倒着走的边。落到 queue 而不是 dev 的理由写在
+  // requirements/rollback.ts 的文件头——dev 的时钟会立刻把它推回测试与已上线。
+  { from: 'live',   to: 'queue',   trigger: 'rollback' },
 ];
 
 /** 表里登记为时钟推进的迁移。tick 用它决定「哪些状态会被自动推进」。 */

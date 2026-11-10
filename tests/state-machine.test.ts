@@ -100,8 +100,8 @@ function caught(fn: () => unknown): AppError {
 }
 
 describe('state machine', () => {
-  it('13 条合法转移都能过', () => {
-    expect(TRANSITIONS).toHaveLength(13);
+  it('14 条合法转移都能过', () => {
+    expect(TRANSITIONS).toHaveLength(14);
     // ctx 把**两道门**都喂满（Ruling 2 之后 `inbox → design` 也要核心三问）：
     // 这条用例判的是「表里的边都走得通」，不是「门开不开」——门由下面几条各自的用例判。
     for (const t of TRANSITIONS) {
@@ -126,6 +126,8 @@ describe('state machine', () => {
       { from: 'test', to: 'live', trigger: 'clock', clock: true },
       { from: 'test', to: 'dev', trigger: 'bounce' },
       { from: 'shelved', to: 'inbox', trigger: 'restore' },
+      // 回滚（2026-11-10）：唯一一条倒着走的边，落到 queue 而不是 dev。
+      { from: 'live', to: 'queue', trigger: 'rollback' },
     ]);
   });
 

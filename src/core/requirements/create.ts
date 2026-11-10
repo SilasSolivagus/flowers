@@ -35,6 +35,11 @@ const SOURCES_LABEL = SOURCES.map((item) => item.key).join(' / ');
  * （见 `fingerprint.ts` 文件头第 2 条），写入端只保留一种写法。
  */
 export const DescriptiveInput = z.object({
+  /**
+   * 备注（2026-11-10）：随手记的一句上下文。它**不在六问里**，也不进生成链路——
+   * 唯一去处是企微汇总表最后一列（见 src/core/sheet/queue-sheet.ts）。
+   */
+  remark: z.string().nullish(),
   context: z.string().nullish(),
   problem: z.string().nullish(),
   outcome: z.string().nullish(),
@@ -234,14 +239,14 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
       insert into requirements
         (title, type, state, requester, owner_member_id,
          context, problem, outcome, surfaces, edge_cases, out_of_scope, platforms, priority,
-         source, source_note)
+         source, source_note, remark)
       values (
         ${input.title}, ${type}, 'inbox', ${input.requester}, ${ownerMemberId},
         ${blankToNull(input.context)}, ${blankToNull(input.problem)}, ${blankToNull(input.outcome)},
         ${blankToNull(input.surfaces)}, ${blankToNull(input.edgeCases)}, ${blankToNull(input.outOfScope)},
         ${sql.param(normalizePlatforms(input.platforms))}::text[],
         ${input.priority ?? null},
-        ${source}, ${sourceNote}
+        ${source}, ${sourceNote}, ${blankToNull(input.remark)}
       )
       returning id, number, state`);
     const row = inserted.rows[0]!;

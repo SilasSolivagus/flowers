@@ -7,6 +7,7 @@ import { bounce } from '../src/core/requirements/bounce.js';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal.js';
+import { rollbackRelease } from '../src/core/requirements/rollback.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listArtifacts } from '../src/core/uemaster/list.js';
 import { latestSnapshot } from '../src/core/prd/snapshots.js';
@@ -42,6 +43,7 @@ export type Services = {
   shelveRequirement: typeof shelveRequirement;
   evaluate: typeof evaluate;
   restoreRequirement: typeof restoreRequirement;
+  rollbackRelease: typeof rollbackRelease;
   attachArtifact: typeof attachArtifact;
   getRequirementDetail: typeof getRequirementDetail;
   listArtifacts: typeof listArtifacts;
@@ -61,6 +63,7 @@ export const SERVICES: Services = {
   shelveRequirement,
   evaluate,
   restoreRequirement,
+  rollbackRelease,
   attachArtifact,
   getRequirementDetail,
   listArtifacts,

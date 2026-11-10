@@ -288,6 +288,20 @@
       "when": 1794118000000,
       "tag": "0038_member_wecom_webhook",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794120000000,
+      "tag": "0039_sheet_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794122000000,
+      "tag": "0040_group_posts",
+      "breakpoints": true
     }
   ]
 }

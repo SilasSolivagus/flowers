@@ -67,6 +67,8 @@ export type RequirementFormProps = {
     platforms?: string[];
     /** 优先级（P4-09）：下拉初值。null / 缺省 = 未定。 */
     priority?: string | null;
+    /** 备注（2026-11-10）：随表里那一列走，不进六问。 */
+    remark?: string | null;
   };
 };
 
@@ -451,6 +453,20 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
               </div>
             );
           })}
+
+          {/* 备注（2026-11-10）：**不是第七问**——六问各自会喂到生成链路的某一处，
+              这一格只去企微汇总表最后一列。所以它单独放在六问之后、不参与
+              必填提示，也不进指纹（改了备注不会把产物打成「需求已更新」）。 */}
+          <div className="fld">
+            <label htmlFor="req-remark">备注</label>
+            <textarea
+              id="req-remark"
+              name="remark"
+              defaultValue={initial?.remark ?? ''}
+              rows={2}
+              placeholder="只写进企微汇总表的「备注」列，不影响生成"
+            />
+          </div>
 
           {message !== null && <div className="dfail">{message}</div>}
         </div>

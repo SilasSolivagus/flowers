@@ -94,6 +94,15 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
   'requirement.shelved': 'outcome',         // 被搁置
   'requirement.bounced': 'outcome',         // 打回开发
   'requirement.auto_live': 'outcome',       // 自动上线
+  /**
+   * 回滚（2026-11-10）：发出去的东西有问题、退回待排期重排。
+   *
+   * 归 `outcome` 而不是 `action`：它是一个**结果**（那版不发成了），要通知的是
+   * 「负责人与条线负责人」——接手重排的人自己知道；把它算 `action` 会让默认档
+   * `key` 的人也在铃铛里看到它，而 `key` 的含义是「要动手」：重排确实要动手，
+   * 但动手的人是负责人，不是收到这条广播的所有人。
+   */
+  'requirement.rolled_back': 'outcome',
 
   // ── change：一般变动 ────────────────────────────────────────────────────
   'requirement.created': 'change',          // 新建（进入收集）

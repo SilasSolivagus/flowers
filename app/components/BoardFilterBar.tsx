@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useRef, type ChangeEvent, type FormEvent } from 'react';
 
 import {
-  boardQuery, parseBoardFilter, type BoardFilter, type BoardOwner,
+  boardQuery, parseBoardFilter, type BoardFilter, type BoardOwner, type BoardScope,
 } from '../../src/core/read/board-filter';
 
 /**
@@ -36,10 +36,12 @@ import {
  * 「清空」只在真的筛过之后出现：一个点了什么都不会变的按钮会让人以为筛选还开着。
  */
 export function BoardFilterBar({
-  q, owner, members, shown, total, filtered,
+  q, owner, scope, members, shown, total, filtered,
 }: {
   q: string;
   owner: BoardOwner;
+  /** 时间范围（2026-11-10）：`active` 藏着上线超过 90 天的历史。 */
+  scope: BoardScope;
   /** 负责人下拉的候选：名册（停用的也照收，历史需求还挂在那些人名下）。 */
   members: ReadonlyArray<{ id: string; name: string }>;
   shown: number;
@@ -55,6 +57,8 @@ export function BoardFilterBar({
     const next: BoardFilter = parseBoardFilter({
       q: String(data.get('q') ?? ''),
       owner: String(data.get('owner') ?? ''),
+      // 隐藏字段带过来的范围：「筛一下标题」不该顺手把「含历史」关掉。
+      scope: String(data.get('scope') ?? ''),
     });
     const query = boardQuery(next);
     router.push(query === '' ? '/' : `/?${query}`);
@@ -72,6 +76,11 @@ export function BoardFilterBar({
   }
 
   const selected = owner.kind === 'member' ? owner.id : owner.kind;
+
+  /** 翻转时间范围的那条链接：当前的搜索词与负责人原样带过去。 */
+  const flipScope: BoardScope = scope === 'all' ? 'active' : 'all';
+  const flipQuery = boardQuery({ q, owner, scope: flipScope });
+  const flipHref = flipQuery === '' ? '/' : `/?${flipQuery}`;
 
   return (
     <form className="fbar" method="get" action="/" role="search" ref={form} onSubmit={submit}>
@@ -95,7 +104,19 @@ export function BoardFilterBar({
           <option key={member.id} value={member.id}>{member.name}</option>
         ))}
       </select>
+      {/* 时间范围是**表单的一部分**：提交「筛选」时它跟着走，否则一次搜索就会把
+          「含历史」悄悄关掉。切换用链接（与「清空」同一个形状），不新增一种控件语言。 */}
+      <input type="hidden" name="scope" value={scope} />
       <button className="btn sm" type="submit">筛选</button>
+      <Link
+        className={scope === 'all' ? 'btn sm fclear' : 'btn ghost sm fclear'}
+        href={flipHref}
+        title={scope === 'all'
+          ? '收起上线超过 90 天的需求'
+          : '把上线超过 90 天的需求也显示出来'}
+      >
+        {scope === 'all' ? '只看近期' : '含历史'}
+      </Link>
       {filtered && <Link className="btn ghost sm fclear" href="/">清空</Link>}
       <span className="hint">筛出 {shown} / {total}</span>
     </form>

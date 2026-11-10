@@ -35,10 +35,23 @@ export type BoardOwner =
   | { kind: 'none' }
   | { kind: 'member'; id: string };
 
-export type BoardFilter = { q: string; owner: BoardOwner };
+/**
+ * 看板的时间范围（2026-11-10）。
+ *
+ * `active`（默认）与 `all` 的差别只有一条：**已上线且停在那个状态超过 90 天的需求
+ * 默认不显示**。库里有 265 条「已上线」，其中 207 条是迁移来的历史，全摊在板子上
+ * 等于每天先翻 200 张早就不看的卡。`all` 是那条逃生门，不是另一个视图——
+ * 十列、筛选、计数全都一样，只是多带一群老卡。
+ *
+ * 判据用 `state_entered_at`（进「已上线」那天）而不是 `created_at`：一条三月的需求
+ * 上周上线，它是新的；一条上周建的需求三年前就上线了（迁移数据里就有），它是旧的。
+ */
+export type BoardScope = 'active' | 'all';
+
+export type BoardFilter = { q: string; owner: BoardOwner; scope: BoardScope };
 
 /** 什么都不筛。`?` 一个参数都不给时就是它，所以「没筛」只有一个表示。 */
-export const NO_FILTER: BoardFilter = { q: '', owner: { kind: 'all' } };
+export const NO_FILTER: BoardFilter = { q: '', owner: { kind: 'all' }, scope: 'active' };
 
 /**
  * `owner` 的「具体成员」只认 UUID 形状。
@@ -73,17 +86,30 @@ export const MAX_Q = 200;
 export function parseBoardFilter(params: RawParams): BoardFilter {
   const q = first(params.q).trim().slice(0, MAX_Q);
   const ownerRaw = first(params.owner).trim();
+  // 只有 `all` 是「含历史」，其余（空串、`active`、任何垃圾值）都落回默认的 active：
+  // 一个手改坏了的 URL 不该意外地把 200 张历史卡放出来。
+  const scope: BoardScope = first(params.scope).trim() === 'all' ? 'all' : 'active';
 
-  if (ownerRaw === 'me') return { q, owner: { kind: 'me' } };
-  if (ownerRaw === 'none') return { q, owner: { kind: 'none' } };
-  if (MEMBER_ID.test(ownerRaw)) return { q, owner: { kind: 'member', id: ownerRaw } };
-  // `all`、空串、以及任何认不出的值（`ME`、`null`、`42`、`%E4%B8`）都在这里落地。
-  return { q, owner: { kind: 'all' } };
+  const owner: BoardOwner = ownerRaw === 'me'
+    ? { kind: 'me' }
+    : ownerRaw === 'none'
+      ? { kind: 'none' }
+      : MEMBER_ID.test(ownerRaw)
+        ? { kind: 'member', id: ownerRaw }
+        // `all`、空串、以及任何认不出的值（`ME`、`null`、`42`、`%E4%B8`）都在这里落地。
+        : { kind: 'all' };
+
+  return { q, owner, scope };
 }
 
 /** 这条筛选是不是什么都不做（决定「清空」出不出现、工具条高不高亮）。 */
 export function isFiltered(filter: BoardFilter): boolean {
   return filter.q !== '' || filter.owner.kind !== 'all';
+}
+
+/** 时间范围算不算「被改过」：决定「含历史」那个开关要不要高亮。 */
+export function isWideScope(filter: BoardFilter): boolean {
+  return filter.scope === 'all';
 }
 
 /** `owner` 在 URL 上的写法（下拉的选中值也用它，所以只有一份）。 */
@@ -114,5 +140,7 @@ export function boardQuery(filter: BoardFilter): string {
   const parts: string[] = [];
   if (filter.q !== '') parts.push(`q=${encodeURIComponent(filter.q)}`);
   if (filter.owner.kind !== 'all') parts.push(`owner=${ownerParam(filter.owner)}`);
+  // `scope=active` 是默认值，不写进 URL（与空 q、owner=all 同一条规矩）。
+  if (filter.scope === 'all') parts.push('scope=all');
   return parts.join('&');
 }

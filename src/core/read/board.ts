@@ -369,7 +369,13 @@ export type BoardView = {
   columns: BoardColumn[];
   /** 筛后还剩几条 = 十列卡片数之和。 */
   shown: number;
-  /** 全库未删需求总数（分母）。筛选不影响它。 */
+  /**
+   * 分母：**当前时间范围**里的未删需求总数（不含 q / owner 的筛选）。
+   *
+   * 默认范围（`active`）下它不含那 207 条「上线超过 90 天」的历史，所以
+   * 「筛出 58 / 58」读得通；`?scope=all` 时它回到全库 814。两个数回答的是
+   * 「我现在这块板子上有多少条」，不是「数据库里有多少行」。
+   */
   total: number;
   /**
    * 这次 SQL **返回了多少行**。
@@ -401,8 +407,34 @@ export type BoardView = {
  * - `owner=<id>`：绑定成 `uuid`。解析器只放行 UUID 形状（`board-filter.ts`），
  *   所以这里的 `::uuid` 不会因为手改的 URL 而炸。
  */
+/**
+ * 已上线多久之后默认收起（天）。
+ *
+ * 为什么是 90：库里的实测分布是「265 条已上线，其中 207 条停在那个状态超过 90 天」
+ * ——90 天正好把迁移来的历史全部收起来，而近一个季度真正发出去的东西还在板上。
+ * 这条数只影响**看不看得到**，不影响任何数据：`?scope=all` 一条不少。
+ */
+export const LIVE_HISTORY_DAYS = 90;
+
 function boardWhere(filter: BoardFilter, viewer: string): SQL {
   const clauses: SQL[] = [sql`r.deleted_at is null`];
+
+  /**
+   * 时间范围（2026-11-10）：默认只藏着「已上线且停在那儿超过 90 天」的那一批。
+   *
+   * 写成 `not (...)` 而不是给每个状态列加条件：这条规则只对 `live` 一列生效，
+   * 其余九列（收集 287、已搁置 98、已拒绝 73…）照旧全显示——用户要收的是
+   * 「早就发完、没人再看」的东西，不是把所有老数据一次性藏起来。
+   *
+   * 用 `state_entered_at` 而不是 `created_at`：判的是「发出去多久了」。
+   * 90 天用 `make_interval` 拼，不把数字拼进字符串——它是参数，不是 SQL。
+   */
+  if (filter.scope === 'active') {
+    clauses.push(sql`not (
+      r.state = 'live'
+      and r.state_entered_at < now() - make_interval(days => ${LIVE_HISTORY_DAYS})
+    )`);
+  }
 
   if (filter.q !== '') {
     // `%` `_` 是 LIKE 的通配符，`\` 是它的转义符（PG 默认）。三者都要转成字面量，
@@ -499,7 +531,7 @@ export async function readBoard(
     select count(*)::int as n
       from requirements r
       left join members m on m.id = r.owner_member_id
-     where ${boardWhere(NO_FILTER, who)}`);
+     where ${boardWhere({ ...NO_FILTER, scope: filter.scope }, who)}`);
 
   // 列直接建出来，byState 只是它的索引：卡片推进 Map 里的数组，就是推进要返回的那个
   // 数组本身。所以最后一步不必再按 state 查一次，也就不存在「取不到」这条分支。
