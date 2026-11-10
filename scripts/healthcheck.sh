@@ -37,11 +37,16 @@ else
 fi
 
 db() {
-  # 优先用本机 psql；没有就借 flowers-postgres 容器里的 psql（部署机常见情况）。
+  # 优先用本机 psql；没有就借 flowers-postgres 容器里的 psql。
+  #
+  # 容器里**不能**直接用 DATABASE_URL：那是给宿主机进程的串（127.0.0.1:5434），
+  # 在容器里 127.0.0.1 指容器自己（5432），连不上——这正是首次部署时跑出来的假故障。
+  # 容器内走本地 socket + postgres 超级用户即可（库和角色都在同一个实例里）。
   if command -v psql >/dev/null 2>&1; then
     psql "${DATABASE_URL}" -At -c "$1" 2>/dev/null
   else
-    docker exec flowers-postgres psql "${DATABASE_URL}" -At -c "$1" 2>/dev/null
+    docker exec "${FLOWERS_DB_CONTAINER:-flowers-postgres}" \
+      psql -U postgres -d "${FLOWERS_DB_NAME:-flowers}" -At -c "$1" 2>/dev/null
   fi
 }
 
@@ -68,6 +73,15 @@ if [[ "${code}" == "200" ]]; then
   ok "https://${DOMAIN}/login 200"
 else
   bad "https://${DOMAIN}/login 返回 ${code}（nginx 上游 / 证书 / 进程）"
+fi
+
+# 域名背后是不是**新系统**：老 Flower 的登录页没有 `data-rail`（那是 flowers 外壳的
+# 首帧偏好）。切换前这一条必然是「还在老系统」，切换后必须变成新系统——否则
+# 「200」会一直绿着，而用户看到的是旧界面。
+if curl -s --max-time 8 "https://${DOMAIN}/login" | grep -q 'data-rail'; then
+  ok "域名背后是新系统（flowers）"
+else
+  warn "域名背后还不是 flowers（切换前正常；切换后仍这样说明 nginx 没切）"
 fi
 
 # cookie 必须是 Secure 的：生产里非 https 会「登录成功但立刻掉线」。

@@ -77,3 +77,18 @@ describe('映射表是老数据的兼容面', () => {
     expect(PLATFORM_MAP['管理后台']).toBe('admin');
   });
 });
+
+describe('花名册导入的名单', () => {
+  it('7 个人、邮箱唯一、恰好一个超管', async () => {
+    const { ROSTER } = await import('../src/core/migrate/roster.js');
+    expect(ROSTER).toHaveLength(7);
+    expect(new Set(ROSTER.map((p) => p.email)).size).toBe(7);
+    expect(ROSTER.filter((p) => p.role === 'product_owner')).toHaveLength(1);
+    // 两个评审人各自对应一条线，其余是 PM——这是 P4-04 的角色口径。
+    expect(ROSTER.filter((p) => p.role === 'feature_reviewer').map((p) => p.line))
+      .toEqual(['feature']);
+    expect(ROSTER.filter((p) => p.role === 'commercial_reviewer').map((p) => p.line))
+      .toEqual(['commercial']);
+    for (const person of ROSTER) expect(person.email.endsWith('@123pan.com')).toBe(true);
+  });
+});

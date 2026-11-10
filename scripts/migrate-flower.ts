@@ -697,7 +697,7 @@ async function apply(rows: FlowerRow[]): Promise<void> {
 
 type RefreshRow = {
   id: string; legacy_ref: string; title: string; state: string;
-  priority: string | null; platforms: string[];
+  priority: string | null; platforms: string[]; owner_name: string | null;
 };
 
 /**
@@ -713,14 +713,19 @@ type RefreshRow = {
  */
 async function refresh(rows: FlowerRow[], write: boolean): Promise<void> {
   const people = await membersByName();
+  // 负责人按**名字**比：库里存的是 member_id，而 Flower 那边只有 display_name。
+  // 空库上第一次跑迁移时花名册还不存在，负责人全被落成 null（待接单）——所以这一列
+  // 必须参与刷新，否则「补完人之后需求还是无主」，谁也改不了自己那几条。
   const current = await db.execute<RefreshRow>(sql`
-    select id, legacy_ref, title, state, priority, platforms
-      from requirements
-     where legacy_ref is not null`);
+    select r.id, r.legacy_ref, r.title, r.state, r.priority, r.platforms,
+           m.name as owner_name
+      from requirements r
+      left join members m on m.id = r.owner_member_id
+     where r.legacy_ref is not null`);
   const byRef = new Map(current.rows.map((row) => [row.legacy_ref, row]));
 
   let changedRows = 0;
-  const counts: Record<string, number> = { title: 0, state: 0, priority: 0, platforms: 0 };
+  const counts: Record<string, number> = { title: 0, state: 0, priority: 0, platforms: 0, owner: 0 };
   const lines: string[] = [];
 
   for (const row of rows) {
@@ -732,15 +737,19 @@ async function refresh(rows: FlowerRow[], write: boolean): Promise<void> {
     const wanted: LegacyWanted = {
       title: row.title, state: plan.state, priority: plan.priority, platforms: plan.platforms,
     };
+    const ownerId = row.owner_name === null ? null : people.get(row.owner_name) ?? null;
     const diff = legacyDiff(found, wanted);
-    if (diff.length === 0) continue;
+    // 负责人单独判：`legacyDiff` 只管四格（它被用例逐条钉着），而负责人是
+    // 「名字 ↔ id」的映射问题，判据在这里。
+    const ownerChanged = (found.owner_name ?? null) !== (row.owner_name ?? null);
+    if (diff.length === 0 && !ownerChanged) continue;
+    if (ownerChanged) diff.push('owner');
 
     changedRows += 1;
     for (const field of diff) counts[field] = (counts[field] ?? 0) + 1;
     lines.push(`Flower #${row.number} ${row.title}：${diff.join(' / ')}`);
 
     if (!write) continue;
-    const ownerId = row.owner_name === null ? null : people.get(row.owner_name) ?? null;
     await db.transaction(async (tx) => {
       await tx.execute(sql`
         update requirements
@@ -763,7 +772,8 @@ async function refresh(rows: FlowerRow[], write: boolean): Promise<void> {
 
   process.stdout.write(
     `\n${write ? '刷新' : '待刷新（dry-run）'}：${changedRows} 条`
-    + `（标题 ${counts.title ?? 0} / 状态 ${counts.state ?? 0} / 优先级 ${counts.priority ?? 0} / 平台 ${counts.platforms ?? 0}）\n`,
+    + `（标题 ${counts.title ?? 0} / 状态 ${counts.state ?? 0} / 优先级 ${counts.priority ?? 0}`
+    + ` / 平台 ${counts.platforms ?? 0} / 负责人 ${counts.owner ?? 0}）\n`,
   );
   for (const line of lines.slice(0, 50)) process.stdout.write(`  ${line}\n`);
   if (lines.length > 50) process.stdout.write(`  …… 还有 ${lines.length - 50} 条\n`);
