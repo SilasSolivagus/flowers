@@ -698,6 +698,12 @@ const SPLIT_LABEL: Record<string, string> = Object.fromEntries(
   DESCRIPTIVE_FIELDS.map((field) => [field.key, field.label]),
 );
 
+/**
+ * 注意（2026-11-11）：**表单上的入口已移除**（owner：「把这个去掉」）。
+ * 这个动作与 `intake.splitDescription` 一起留着——它是一条被用例钉住的纯能力
+ * （六问逐字核对、引文对不上就丢），要重新露出入口时不必从零写；但界面上已经没有
+ * 任何按钮会调它。
+ */
 export async function splitDescriptionAction(formData: FormData): Promise<SplitFillResult> {
   const empty: SplitFillResult['filled'] = Object.fromEntries(
     Object.values(SPLIT_TO_FORM).map((camel) => [camel, '']),
