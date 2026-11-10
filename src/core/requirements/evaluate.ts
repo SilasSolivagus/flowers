@@ -22,6 +22,17 @@ import { lockRequirement, moveTo, type Locked, type Tx } from './lock.js';
  * 负责人决定评审人，类型不承载权限）。锁行仍然照旧，`assertTrigger` 仍然要跑：
  * 它防的是「走错门的动作」，与类型无关。
  *
+ * Ruling 2（2026-11-10）：`inbox → design` 现在带 `guard: 'brief'`——**核心三问不齐不
+ * 能立项**。上下文就是刚锁回来的那一行（`Locked` 里有 context / problem / outcome），
+ * 所以这句话点名的是库里真实缺的那几格，不是调用方嘴上说的。为什么门在这条边上、
+ * 而不是只装在生成器里：立项是一个动作，材料是这个动作的产物（见 `brief.ts` 与
+ * `state-machine.ts` 的 Ruling 2）。
+ *
+ * 这条迁移有两个入口，都要过这道门：`evaluate()`（点评估 / MCP 的
+ * `requirement_start_design`）与 `uemaster/attach.ts`（生成完把材料交回来时顺手推进）。
+ * 后者走同一个函数，所以「材料落了库、需求没推进」与「改了状态、材料没落」这两种半成品
+ * 都不会出现——门一响，两件事一起回滚。
+ *
  * `locked` 是给「调用方已经锁过行」的场景（attach 要读状态判断该不该推进，那次
  * 读取就该顺手加锁，而不是在同一事务里再 select ... for update 一次）。不传就自己
  * 锁——顺序仍然是「先锁行、再判门」，与原来一样：后到者等前者提交后基于新状态
@@ -36,9 +47,12 @@ export async function evaluateInTx(
   const row = locked ?? (await lockRequirement(tx, requirementId));
   // 光看配对不够：review → design 也是合法的一对（那是评审打回），所以对着一条
   // 待评审的需求点「评估」会骑着它跑回待设计、静默顶掉打回。必须钉 trigger。
-  // Ruling 1：`inbox → design` 这条边上没有 guard 了（类型不再必填），所以这里不传
-  // 任何 ctx——传一个没人读的键会让下一个人以为类型还在判。
-  assertTrigger(row.state, 'design', 'evaluate');
+  //
+  // ctx 传的是刚锁回来的那一行：`brief` 那道门要逐条点名缺哪几格，判据与那句话都在
+  // `requirements/brief.ts`（状态机、生成前、读模型共用同一份）。
+  // 类型仍然不传：Ruling 1 之后没有 `guard: 'type'`，传一个没人读的键会让下一个人
+  // 以为类型还在判。
+  assertTrigger(row.state, 'design', 'evaluate', { brief: row });
   await moveTo(tx, requirementId, 'design');
   await recordEvent(tx, {
     requirementId, actor, type: 'requirement.evaluated',

@@ -8,6 +8,7 @@ import { reviewPass } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { shelveRequirement } from '../src/core/requirements/terminal.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeRelease } from './helpers/factory.js';
 import { getBoard } from '../src/core/read/board.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
@@ -115,7 +116,7 @@ async function seedOneTesting(opts: {
    * 后面的每一步都由同一个人做。
    */
   const owner = opts.owner ?? '吕品';
-  const r = await createRequirement(db, owner, {
+  const r = await createRequirement(db, owner, { ...BRIEF,
     title: opts.title ?? 'S3 协议支持',
     type: opts.type ?? 'feature',
     requester: '孙建宏',
@@ -137,7 +138,7 @@ async function seedOneTesting(opts: {
 async function seedInbox(requester = '房超', owner?: string) {
   // 由超管建：要造「没有负责人」的卡，只有超管能显式传 null（见 create.ts 的
   // resolveOwner）；有负责人时由超管指定也不受条线限制。
-  const r = await createRequirement(db, '房超', {
+  const r = await createRequirement(db, '房超', { ...BRIEF,
     title: 'PC 剪贴板读取 URL',
     type: 'commercial',
     requester,
@@ -150,7 +151,7 @@ async function seedInbox(requester = '房超', owner?: string) {
 async function seedReady(owner: string) {
   const windowStart = shiftDay(TODAY, 7);
   const releaseId = await makeRelease(`R-${windowStart}`, windowStart, shiftDay(TODAY, 14));
-  const r = await createRequirement(db, owner, {
+  const r = await createRequirement(db, owner, { ...BRIEF,
     title: 'PC 端支持打开分享页',
     type: 'feature',
     requester: '孙建宏',
@@ -176,7 +177,7 @@ async function seedReady(owner: string) {
  */
 async function seedInReview(type: 'commercial' | 'feature') {
   const owner = type === 'commercial' ? '王妍' : '吕品';
-  const r = await createRequirement(db, owner, {
+  const r = await createRequirement(db, owner, { ...BRIEF,
     title: type === 'commercial' ? '直链分享限速（二期）' : '导出任务队列改造',
     type,
     requester: owner,

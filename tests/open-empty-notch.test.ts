@@ -14,6 +14,7 @@ import {
   EMPTY_OPEN_HEAD, EMPTY_OPEN_NOTE, NO_OPEN, openRows, readOpen,
 } from '../src/core/uemaster/annotations.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
@@ -160,7 +161,9 @@ function clearEnv(): void {
 }
 
 async function inbox() {
-  return createRequirement(db, '吕品', { title: '寄养频道改版', type: 'feature', requester: '孙建宏' });
+  // 核心三问齐：这条需求最后会走到 attach（即 `inbox → design` 那条带 brief 门的边）。
+  return createRequirement(db, '吕品', { ...BRIEF,
+    title: '寄养频道改版', type: 'feature', requester: '孙建宏' });
 }
 
 async function caught(p: Promise<unknown>): Promise<AppError> {

@@ -6,7 +6,8 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { AppError } from '../src/core/errors.js';
 import { startGeneration } from '../src/core/uemaster/start.js';
 import { cancelJob, retryJob } from '../src/core/uemaster/control.js';
-import { EVALUATE_STAGE, evaluateLock, evaluateStageLock } from '../src/core/uemaster/gate.js';
+import { EVALUATE_STAGE, evaluateStageLock } from '../src/core/uemaster/gate.js';
+import { evaluateLock } from '../src/core/requirements/brief.js';
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 import { resetDb, seedPeople } from './helpers/db.js';
@@ -114,10 +115,17 @@ describe('判据（纯函数：一句话，两个地方用）', () => {
     }
   });
 
-  it('一字不差：规则 + 现在在哪 + 两条出路（owner 定的那句话）', () => {
+  /**
+   * 一字不差：规则 + 现在在哪 + **一条真能走的路**。
+   *
+   * 这句话里曾经有半句「或先把它退回收集」——那是空头支票：`TRANSITIONS` 里没有
+   * 「待设计 → 收集」这条边，照着做会撞一句「不能从「待设计」直接到「收集」」。
+   * 2026-11-10 的裁定把它删掉了（见下面那条用例：这句空头支票不许再出现）。
+   */
+  it('一字不差：规则 + 现在在哪 + 一条真能走的路（owner 定的那句话）', () => {
     expect(evaluateStageLock('design')).toBe(
       'v1 只在收集阶段生成评估材料。这条需求现在在「待设计」'
-      + '——想用这个能力，请把描述补在收集里新建一条，或先把它退回收集。',
+      + '——想用这个能力，请在收集里新建一条。',
     );
   });
 

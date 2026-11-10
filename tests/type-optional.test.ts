@@ -10,6 +10,7 @@ import { requirementFingerprint, fingerprintOfRow } from '../src/core/requiremen
 import { TRANSITIONS } from '../src/core/state-machine.js';
 import { TYPES, TYPE_UNSET, typeLabel, typeSuffix } from '../src/core/requirements/type.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 /**
  * Ruling 1（2026-11-08）：`requirements.type` 可空，立项不再要求类型。
@@ -37,7 +38,7 @@ afterAll(async () => {
 });
 
 async function make(extra: Record<string, unknown> = {}): Promise<string> {
-  const created = await createRequirement(db, '吕品', {
+  const created = await createRequirement(db, '吕品', { ...BRIEF,
     title: '分享页搜索', requester: '王妍', ...extra,
   });
   return created.id;
@@ -58,9 +59,15 @@ describe('Ruling 1：类型可空', () => {
     expect(after.rows[0]!.state).toBe('design');
   });
 
-  it('转移表里 inbox → design 那条边没有 guard 了（静态证据）', () => {
+  /**
+   * Ruling 2（2026-11-10）之后这条边上**有**门了，但不是 type：是 `brief`（核心三问）。
+   * 这条断言钉住 Ruling 1 本身没被推翻——`type` 仍然不是门的一种；而「六问不齐不能
+   * 立项」是另一条规则（`tests/brief-guard.test.ts` 判它）。
+   */
+  it('转移表里 inbox → design 那条边没有 type 门（现在是 brief）', () => {
     const edge = TRANSITIONS.find((t) => t.from === 'inbox' && t.to === 'design')!;
-    expect(edge.guard).toBeUndefined();
+    expect(edge.guard).not.toBe('type');
+    expect(edge.guard).toBe('brief');
     expect(edge.trigger).toBe('evaluate');
   });
 
@@ -84,7 +91,7 @@ describe('Ruling 1：类型可空', () => {
   });
 
   it('认不出的类型仍然报错（单选不该被静默丢掉）', async () => {
-    await expect(createRequirement(db, '吕品', {
+    await expect(createRequirement(db, '吕品', { ...BRIEF,
       title: 'x', type: 'other', requester: 'y',
     })).rejects.toMatchObject({
       code: 'invalid', message: '类型只能是 commercial / feature（或留空 = 未指定）',
@@ -92,7 +99,8 @@ describe('Ruling 1：类型可空', () => {
   });
 
   it('type 不参与指纹：补上或清掉类型，指纹一个字都不变', async () => {
-    const id = await make({ context: '访问者在分享页里找文件' });
+    // 只留场景那一格：这条用例比的是「指纹认得哪十格」，不是六问齐不齐。
+    const id = await make({ context: '访问者在分享页里找文件', problem: null, outcome: null });
     const row = await db.execute<{
       title: string; context: string | null; problem: string | null; outcome: string | null;
       surfaces: string | null; edge_cases: string | null; out_of_scope: string | null;

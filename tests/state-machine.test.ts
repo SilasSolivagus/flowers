@@ -9,6 +9,7 @@ import {
 } from '../src/core/state-machine.js';
 import { clockEdges } from '../src/core/clock/tick.js';
 import { resetDb } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 describe('AppError', () => {
   it('带上 code 和中文消息', () => {
@@ -101,15 +102,18 @@ function caught(fn: () => unknown): AppError {
 describe('state machine', () => {
   it('13 条合法转移都能过', () => {
     expect(TRANSITIONS).toHaveLength(13);
+    // ctx 把**两道门**都喂满（Ruling 2 之后 `inbox → design` 也要核心三问）：
+    // 这条用例判的是「表里的边都走得通」，不是「门开不开」——门由下面几条各自的用例判。
     for (const t of TRANSITIONS) {
-      expect(() => assertTransition(t.from, t.to, { hasPrd: true })).not.toThrow();
+      expect(() => assertTransition(t.from, t.to, { hasPrd: true, brief: BRIEF })).not.toThrow();
     }
   });
 
   it('转移表与规格逐条一致', () => {
     expect(TRANSITIONS).toEqual([
       // Ruling 1：立项不再有 type 门（类型可空，且不承载权限）。
-      { from: 'inbox', to: 'design', trigger: 'evaluate' },
+      // Ruling 2（2026-11-10）：换成 brief 门——核心三问不齐不能立项。
+      { from: 'inbox', to: 'design', trigger: 'evaluate', guard: 'brief' },
       { from: 'inbox', to: 'review', trigger: 'submit_review', guard: 'prd' },
       { from: 'inbox', to: 'rejected', trigger: 'reject' },
       { from: 'inbox', to: 'shelved', trigger: 'shelve' },
@@ -135,13 +139,14 @@ describe('state machine', () => {
       .toMatchObject({ code: 'missing_prd', message: '直接提交评审必须有正式 PRD 链接' });
   });
 
-  it('inbox → design 不再要求类型（Ruling 1：那道门已摘掉）', () => {
-    // 这条断言是「门已经不在表里」的静态证据；跑得通的那一半在 tests/type-optional.test.ts
-    // （真建一条没有类型的需求、真立项）。把 `guard: 'type'` 加回 TRANSITIONS，
-    // 这里与那条用例会一起变红。
-    expect(TRANSITIONS.find((t) => t.from === 'inbox' && t.to === 'design')!.guard)
-      .toBeUndefined();
-    expect(() => assertTransition('inbox', 'design')).not.toThrow();
+  it('inbox → design 不要求类型（Ruling 1），只要求核心三问（Ruling 2）', () => {
+    // Ruling 1 的静态证据：表里那一条带的不是 `type` 门（加回去这里就红）。
+    // Ruling 2 之后它带的是 `brief`：类型仍可空，六问不能空。
+    // 跑得通的那两半在 tests/type-optional.test.ts（没有类型、但三问齐 → 真立项）。
+    const edge = TRANSITIONS.find((t) => t.from === 'inbox' && t.to === 'design')!;
+    expect(edge.guard).not.toBe('type');
+    expect(edge.guard).toBe('brief');
+    expect(() => assertTransition('inbox', 'design', { brief: BRIEF })).not.toThrow();
   });
 
   it('TRANSITIONS 在类型上是只读的（表就是口径，运行期不许往里写）', () => {
@@ -234,10 +239,10 @@ describe('assertTrigger — 配对合法但动作不对', () => {
 });
 
 /**
- * I1：ctx 可选，且门禁 fail-closed。给一条带着 prd 门的迁移不传 ctx，
+ * I1：ctx 可选，且门禁 fail-closed。给一条带着门（prd / brief）的迁移不传 ctx，
  * 等于「没检查过」，必须拒绝——而不是安静放行。
  *
- * Ruling 1 之后表里只剩 prd 一道门；type 门的删除有它自己的断言（见上一条 describe）。
+ * 两道门各有一条用例；type 门的删除有它自己的断言（见上一条 describe）。
  */
 describe('assertTransition — ctx 可选，门禁 fail-closed', () => {
   it('prd 门不传 ctx 就拒绝', () => {
@@ -246,8 +251,16 @@ describe('assertTransition — ctx 可选，门禁 fail-closed', () => {
     });
   });
 
-  it('type 门已经不存在（Ruling 1）：不传 ctx 也放行', () => {
-    expect(() => assertTransition('inbox', 'design')).not.toThrow();
+  it('brief 门不传 ctx 就拒绝（fail-closed：三格全空也是「没检查过」）', () => {
+    expect(caught(() => assertTransition('inbox', 'design'))).toMatchObject({
+      code: 'missing_brief',
+    });
+  });
+
+  it('type 门已经不存在（Ruling 1）：只给 brief、不给 hasPrd 也放行', () => {
+    // 这两件事必须分开：不传 hasPrd 是「这条边没有 prd 门」，不是「跳过检查」——
+    // 而 inbox → design 上唯一的门是 brief。
+    expect(() => assertTransition('inbox', 'design', { brief: BRIEF })).not.toThrow();
   });
 
   it('没有 guard 的迁移不传 ctx 也放行', () => {

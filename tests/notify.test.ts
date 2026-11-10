@@ -11,6 +11,7 @@ import { shelveRequirement } from '../src/core/requirements/terminal.js';
 import { updateRequirement } from '../src/core/requirements/manage.js';
 import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeRelease } from './helpers/factory.js';
 import {
   latestNoticeSeq, markRead, notificationsFor, notifyView, pendingDeliveries, unreadCount,
@@ -101,7 +102,7 @@ function has(notices: Notice[], requirementId: string): boolean {
  */
 async function toTestState(owner: string, title = 'S3 协议支持') {
   // P4-04：以负责人身份建与推进（PM 只能改自己负责的需求；建人即负责，见 create.ts）。
-  const created = await createRequirement(db, owner, {
+  const created = await createRequirement(db, owner, { ...BRIEF,
     title, type: 'feature', requester: PM,
   });
   await evaluate(db, owner, { requirementId: created.id });
@@ -118,7 +119,7 @@ async function toTestState(owner: string, title = 'S3 协议支持') {
 
 describe('派生规则：谁收到哪条事件', () => {
   it('进入收集：提出人（按姓名）与全部 PM 收到，别人不收到', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: 'S3 协议支持', type: 'feature', requester: FEATURE_REVIEWER,
     });
 
@@ -134,7 +135,7 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('进入待设计：只有负责人收到（评估人、提出人都不收到）', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, owner.name, {
+    const created = await createRequirement(db, owner.name, { ...BRIEF,
       title: '权益套餐结构', type: 'commercial', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
@@ -151,7 +152,7 @@ describe('派生规则：谁收到哪条事件', () => {
   it('进入待评审：只有派单的评审人收到（负责人、PM 都不收到）', async () => {
     // 负责人放在功能线：这条需求派给吕正豪（P4-06 锚点是人的条线，不是类型）。
     const owner = member(PM);
-    const created = await createRequirement(db, owner.name, {
+    const created = await createRequirement(db, owner.name, { ...BRIEF,
       title: '导出任务队列', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
@@ -170,7 +171,7 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('评审打回：负责人收到，且行里带原因', async () => {
     const owner = member('王妍');
-    const created = await createRequirement(db, owner.name, {
+    const created = await createRequirement(db, owner.name, { ...BRIEF,
       title: '导出任务队列', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
@@ -232,7 +233,7 @@ describe('派生规则：谁收到哪条事件', () => {
 
   it('打回后重新提交：两轮 review_requested 都归同一个派单评审人', async () => {
     const owner = member(PM);
-    const created = await createRequirement(db, owner.name, {
+    const created = await createRequirement(db, owner.name, { ...BRIEF,
       title: '两轮评审', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
@@ -261,7 +262,7 @@ describe('派生规则：谁收到哪条事件', () => {
    */
   it('与这条需求无关的 PM 一条都不产生（扇出只给超管与本线负责人）', async () => {
     const owner = member(PM);
-    const created = await createRequirement(db, owner.name, {
+    const created = await createRequirement(db, owner.name, { ...BRIEF,
       title: '直链分享限速', type: 'feature', requester: PM,
     });
     await evaluate(db, owner.name, { requirementId: created.id });
@@ -291,7 +292,7 @@ describe('派生规则：谁收到哪条事件', () => {
   });
 
   it('已删除的需求整条消失（通知行不该指向一个打不开的抽屉）', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '删掉的需求', type: 'feature', requester: FEATURE_REVIEWER,
     });
     expect(has(await notificationsFor(db, member(FEATURE_REVIEWER)), created.id)).toBe(true);
@@ -320,7 +321,7 @@ describe('提出人：自由文本 → 成员', () => {
       insert into members (name, email, role)
       values ('另一个王妍','wangyan@123pan.com','pm')`)).rejects.toThrow(/duplicate key/);
 
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '外部提的需求', type: 'feature', requester: '王妍',
     });
 
@@ -331,7 +332,7 @@ describe('提出人：自由文本 → 成员', () => {
   });
 
   it('查无此人：只有 PM 收到，不报错', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '外部提的需求', type: 'feature', requester: '从来没见过的名字',
     });
 
@@ -353,7 +354,7 @@ describe('未读数与已读水位线', () => {
   async function threeForReviewer() {
     const made = [];
     for (const title of ['一', '二', '三']) {
-      made.push(await createRequirement(db, PM, {
+      made.push(await createRequirement(db, PM, { ...BRIEF,
         title, type: 'feature', requester: FEATURE_REVIEWER,
       }));
     }
@@ -410,7 +411,7 @@ describe('未读数与已读水位线', () => {
     expect((await notificationsFor(db, reviewer)).every((notice) => !notice.unread)).toBe(true);
 
     // 夹取的真正意义：下一个事件仍然会被看见（否则红点永远不会再亮）
-    const fresh = await createRequirement(db, PM, {
+    const fresh = await createRequirement(db, PM, { ...BRIEF,
       title: '水位线之后', type: 'feature', requester: FEATURE_REVIEWER,
     });
     expect(await unreadCount(db, reviewer)).toBe(1);
@@ -461,7 +462,7 @@ describe('排序与上限', () => {
   it('按 seq 倒序，limit 生效', async () => {
     const made = [];
     for (const title of ['甲', '乙', '丙']) {
-      made.push(await createRequirement(db, PM, {
+      made.push(await createRequirement(db, PM, { ...BRIEF,
         title, type: 'feature', requester: FEATURE_REVIEWER,
       }));
     }
@@ -517,7 +518,7 @@ describe('批量事件：只写账，不打扰', () => {
   it('批量搁置：一条通知都没有（超管也没有），企微也不发，账还在', async () => {
     const batched: string[] = [];
     for (const title of ['批量甲', '批量乙']) {
-      const created = await createRequirement(db, PM, {
+      const created = await createRequirement(db, PM, { ...BRIEF,
         title, type: 'feature', requester: PM,
       });
       batched.push(created.id);
@@ -549,7 +550,7 @@ describe('批量事件：只写账，不打扰', () => {
   });
 
   it('同一条需求、不带 batch 的搁置：照旧通知超管与本线负责人（企微也算）', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '手工搁置', type: 'feature', requester: PM,
     });
     await shelveRequirement(db, PM, { requirementId: created.id, reason: '先不做' });

@@ -16,6 +16,7 @@ import type { BuiltIndex } from '../src/core/codemirror/index-store.js';
 import type { FlowCheck } from '../src/core/uemaster/flow.js';
 import type { MirrorResult } from '../src/core/codemirror/mirror.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { cleanArtifacts } from './helpers/files.js';
 
 /**
@@ -473,7 +474,7 @@ function fakeDeps(prompts: string[], surfaces: () => Promise<KnownSurfaces>): Pa
 describe('reviewRequirement 也带现有页面', () => {
   it('图与页面片段两次调用都带清单', async () => {
     const prompts: string[] = [];
-    const r = await createRequirement(db, '吕品', { title: '分享页搜索补齐', type: 'feature', requester: '孙建宏' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: '分享页搜索补齐', type: 'feature', requester: '孙建宏' });
     await db.execute(sql`
       update requirements set prd_url = 'https://doc.weixin.qq.com/doc/w3_testPRD'
        where id = ${r.id}`);
@@ -534,7 +535,7 @@ describe('composeEvaluation 把现有页面接进提示词', () => {
   const ENV = 'FEATURE_EVALUATE_READS_CODE';
 
   async function compose(prompts: string[], surfaces: () => Promise<KnownSurfaces>) {
-    const r = await createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
     await composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' },
       fakeDeps(prompts, surfaces));
     return r;

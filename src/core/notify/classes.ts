@@ -106,6 +106,16 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
    * 放在 `action` 会让迁移一落地就给所有人推 803 条通知。
    */
   'requirement.migrated': 'change',
+  /**
+   * 系统改写过状态（2026-11-10 起：存量回退——六问核心三条不齐的待设计需求退回收集，
+   * 见 `scripts/migrate-brief-to-inbox.ts`）。归 `change`：它是一次数据口径的修订，
+   * 不是「现在需要谁动手」。
+   *
+   * 与迁移同一条理由再叠一层：那批事件**逐条**写、`actor` 是 `system`，扇出里
+   * 「排除自己做的事」谁都排除不掉——所以它们的 payload 带 `batch`，按 0028 的裁定
+   * 不进通知（`read/notify.ts` 的 `notBatch`）。审计记录照旧留着。
+   */
+  'requirement.state_changed': 'change',
   'uemaster.attached': 'change',            // 交了材料
   'prd.fetched': 'change',                  // 拉了 PRD 快照
   'release.created': 'change',              // 发版窗口新建

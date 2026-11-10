@@ -21,6 +21,7 @@ import {
 import { changePassword } from '../app/password-change.js';
 import { transferOwnedRequirements } from '../app/member-transfer.js';
 import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 /**
  * P4-05：权限的**界面那一半**。
@@ -198,7 +199,7 @@ describe('动作条 = 状态合法 ∩ 这个人能做（漂移探测器）', ()
 
 describe('真库：抽屉按人算出来的动作与按钮可见性', () => {
   async function reviewRequirement(): Promise<string> {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '权限界面的那一条', type: 'feature', requester: '孙建宏',
     });
     await evaluate(db, PM, { requirementId: created.id });
@@ -255,7 +256,7 @@ describe('真库：抽屉按人算出来的动作与按钮可见性', () => {
 
 describe('成员管理：只有超管，且停用被占用时要能转交', () => {
   it('memberAdminView 只给超管；负责需求数是真的', async () => {
-    await createRequirement(db, PM, { title: '占着一条', type: 'feature', requester: 'x' });
+    await createRequirement(db, PM, { ...BRIEF, title: '占着一条', type: 'feature', requester: 'x' });
 
     expect(await memberAdminView(memberOf(PM))).toBeNull();
     expect(await memberAdminView(memberOf(FEATURE_LEAD))).toBeNull();
@@ -275,7 +276,7 @@ describe('成员管理：只有超管，且停用被占用时要能转交', () =
   });
 
   it('停用还占着需求的负责人：中文原样；转交之后就能停用', async () => {
-    await createRequirement(db, PM, { title: '占着一条', type: 'feature', requester: 'x' });
+    await createRequirement(db, PM, { ...BRIEF, title: '占着一条', type: 'feature', requester: 'x' });
 
     let caught: AppError | null = null;
     try {
@@ -304,7 +305,7 @@ describe('成员管理：只有超管，且停用被占用时要能转交', () =
 
 describe('通知偏好：关掉 = 扇出停，关系不动', () => {
   it('条线负责人关掉后不再收本线扇出，派单给他的那条仍然在', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '会扇出的一条', type: 'feature', requester: '孙建宏',
     });
     await evaluate(db, PM, { requirementId: created.id });

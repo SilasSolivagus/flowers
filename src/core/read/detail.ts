@@ -6,7 +6,8 @@ import {
   can, lineLabelOf, type Ability, type Member, type RequirementFacts,
 } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
-import { evaluateLock, evaluateStageLock } from '../uemaster/gate.js';
+import { evaluateLock } from '../requirements/brief.js';
+import { evaluateStageLock } from '../uemaster/gate.js';
 import { healStaleJobs } from '../uemaster/liveness.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
@@ -484,6 +485,17 @@ function describe(type: string, payload: Payload): { label: string; note: string
       return { label: '搁置', note: text(payload, 'reason') };
     case 'requirement.restored':
       return { label: '恢复，回到收集', note: null };
+    case 'requirement.state_changed': {
+      // 系统改写过状态（2026-11-10 起：存量回退，见 `scripts/migrate-brief-to-inbox.ts`）。
+      // 两端都用 `STATE_LABEL` 的中文：`design` / `inbox` 这种键不该出现在时间轴上。
+      // `reason` 是这一行的全部意义——一年后翻事件流时，只有它能回答「为什么把它退回来」。
+      const from = STATE_LABEL[text(payload, 'from') as State] ?? text(payload, 'from');
+      const to = STATE_LABEL[text(payload, 'to') as State] ?? text(payload, 'to');
+      return {
+        label: from !== null && to !== null ? `状态变更：${from} → ${to}` : '状态变更',
+        note: text(payload, 'reason'),
+      };
+    }
     case 'requirement.migrated': {
       // 从 Flower 搬进来的行（P4-09）。时间轴上要说清「这是迁入的」，并给出原编号——
       // 想回旧系统对账时，PAN 编号对不上，原编号是唯一的锚。
@@ -804,11 +816,16 @@ export async function getRequirementDetail(
    * 顺序就是优先级，与 `startGeneration` 里那两段的顺序**必须一致**：
    * 1. v1 阶段门：不在「收集」就不生成（一条已经过了评估的需求，材料该是过门之前
    *    就有的东西，见 `gate.ts` 里 `evaluateStageLock` 的理由）；
-   * 2. 六问门：三问没填完，材料只能靠编。
+   * 2. 六问门：核心三问没填完（判据在 `requirements/brief.ts`，与状态机
+   *    `guard: 'brief'` 抛出的错误、以及生成前的拒绝是**同一个字符串**）。
    *
    * 一句话只说一个问题：阶段不对时，先补六问没有用（补完还是不能生成），所以阶段门
    * 在前。用 `??` 而不是 `||`：两道判据的返回值只有两种——`null`（放行）或一句非空
    * 中文，`??` 正好只认「上一道放行」，不必给一个不存在的「空串」留后路。
+   *
+   * 两道门各说各的事（owner 2026-11-10）：阶段门只说「现在这个阶段不能生成 + 在收集里
+   * 新建一条」，六问门只说「缺哪三格 + 补完才能评估」。任何一句都不许承诺状态机里
+   * 不存在的边（比如「退回收集」）——那是空头支票。
    */
   const evaluateReason = evaluateStageLock(row.state) ?? evaluateLock(row);
 

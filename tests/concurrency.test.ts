@@ -6,6 +6,7 @@ import { AppError, translatePgError } from '../src/core/errors.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { evaluate } from '../src/core/requirements/evaluate.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 /**
  * C1 的回归防线：编号（events.seq / requirements.number）曾经是 `max(col)+1`，
@@ -46,7 +47,7 @@ describe('C1：并发分配编号（序列，不是 max+1）', () => {
   it(`12 个并发 evaluate 打 12 条不同需求，全部成功且 seq 两两不同`, async () => {
     const created = [];
     for (let i = 0; i < N; i += 1) {
-      created.push(await createRequirement(db, '吕品', {
+      created.push(await createRequirement(db, '吕品', { ...BRIEF,
         title: `并发-${i}`, type: 'feature', requester: '孙建宏',
       }));
     }

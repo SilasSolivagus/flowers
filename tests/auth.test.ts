@@ -37,6 +37,7 @@ import { runTool, toolByName } from '../mcp/tools.js';
 import type { Identity } from '../mcp/tokens.js';
 import { memberByName } from '../src/core/auth/members.js';
 import { emailOf, resetDb, seedPeople, truncateMembersOnly, type SeededPerson } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeRelease } from './helpers/factory.js';
 
 /**
@@ -341,7 +342,7 @@ const LEAD_OF: Record<string, string> = {
  * （写死名字，不从实现反查——实现错了这里要红）。
  */
 async function makeFor(owner: string, type: 'feature' | 'commercial', state: string): Promise<string> {
-  const created = await createRequirement(db, owner, {
+  const created = await createRequirement(db, owner, { ...BRIEF,
     title: `${owner} 的${type === 'feature' ? '功能' : '商业'}需求`,
     type,
     requester: '孙建宏',
@@ -558,7 +559,7 @@ describe('评审：只有派单的评审人能签字', () => {
 
 describe('规则 1：录入即负责人', () => {
   it('PM 不指定负责人时，自己成为负责人', async () => {
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '录入手', type: 'feature', requester: '孙建宏',
     });
     const row = await db.execute<{ owner_member_id: string }>(
@@ -567,17 +568,17 @@ describe('规则 1：录入即负责人', () => {
   });
 
   it('PM 想把需求挂到别人头上 → forbidden', async () => {
-    expect(await caught(createRequirement(db, PM, {
+    expect(await caught(createRequirement(db, PM, { ...BRIEF,
       title: '甩锅', type: 'feature', requester: '孙建宏', ownerMemberId: idOf(PM_OTHER),
     }))).toMatchObject({ code: 'forbidden' });
   });
 
   it('条线负责人只能指定本线的人（与需求类型无关）', async () => {
     // 两条都写成**商业类**：一条挂本线、一条挂另一条线。允许与拒绝都不看类型。
-    const ok = await createRequirement(db, FEATURE_LEAD, {
+    const ok = await createRequirement(db, FEATURE_LEAD, { ...BRIEF,
       title: '本线', type: 'commercial', requester: '孙建宏', ownerMemberId: idOf(PM_OTHER),
     });
-    const cross = await caught(createRequirement(db, FEATURE_LEAD, {
+    const cross = await caught(createRequirement(db, FEATURE_LEAD, { ...BRIEF,
       title: '跨线', type: 'commercial', requester: '孙建宏', ownerMemberId: idOf(PM_COMMERCIAL),
     }));
     expect(cross).toMatchObject({ code: 'forbidden', message: '只能把需求交给本线的人' });
@@ -585,10 +586,10 @@ describe('规则 1：录入即负责人', () => {
   });
 
   it('超管可以指定任何人，也可以显式留空（那条「待接单」的卡）', async () => {
-    const assigned = await createRequirement(db, ADMIN, {
+    const assigned = await createRequirement(db, ADMIN, { ...BRIEF,
       title: '指定', type: 'commercial', requester: '孙建宏', ownerMemberId: idOf(PM_COMMERCIAL),
     });
-    const unowned = await createRequirement(db, ADMIN, {
+    const unowned = await createRequirement(db, ADMIN, { ...BRIEF,
       title: '待接单', type: 'commercial', requester: '孙建宏', ownerMemberId: null,
     });
     const rows = await db.execute<{ id: string; owner_member_id: string | null }>(sql`
@@ -617,7 +618,7 @@ describe('规则 1：录入即负责人', () => {
 describe('立项：任何 PM 都能认领，认领即成为负责人', () => {
   /** 超管显式留空造出来的「待接单」卡（种子 #1 就是它）。 */
   async function unownedRequirement(): Promise<string> {
-    const created = await createRequirement(db, ADMIN, {
+    const created = await createRequirement(db, ADMIN, { ...BRIEF,
       title: '待接单', type: 'commercial', requester: '孙建宏', ownerMemberId: null,
     });
     const row = await db.execute<{ owner_member_id: string | null }>(
@@ -989,8 +990,8 @@ describe('成员管理', () => {
   });
 
   it('还占着需求的负责人停不掉：说清有几条', async () => {
-    await createRequirement(db, PM_OTHER, { title: 'a', type: 'feature', requester: 'x' });
-    await createRequirement(db, PM_OTHER, { title: 'b', type: 'feature', requester: 'x' });
+    await createRequirement(db, PM_OTHER, { ...BRIEF, title: 'a', type: 'feature', requester: 'x' });
+    await createRequirement(db, PM_OTHER, { ...BRIEF, title: 'b', type: 'feature', requester: 'x' });
     expect(await caught(deactivateMember(db, ADMIN, { memberId: idOf(PM_OTHER) })))
       .toMatchObject({ code: 'member_busy', message: '这个人还负责 2 条需求，先转交' });
   });
@@ -1105,13 +1106,13 @@ describe('转交负责人', () => {
 describe('通知扇出：条线 / 超管 / 偏好', () => {
   it('条线负责人只收「自己线上的人负责」的需求，超管全都收', async () => {
     // 三张卡的**类型与负责人故意错开**：类型不再是扇出的判据。
-    const byFeaturePm = await createRequirement(db, PM_OTHER, {
+    const byFeaturePm = await createRequirement(db, PM_OTHER, { ...BRIEF,
       title: '功能线 PM 的功能类', type: 'feature', requester: '孙建宏',
     });
-    const commercialTypeByFeaturePm = await createRequirement(db, PM, {
+    const commercialTypeByFeaturePm = await createRequirement(db, PM, { ...BRIEF,
       title: '功能线 PM 的商业类', type: 'commercial', requester: '孙建宏',
     });
-    const byBusinessPm = await createRequirement(db, PM_COMMERCIAL, {
+    const byBusinessPm = await createRequirement(db, PM_COMMERCIAL, { ...BRIEF,
       title: '商业线 PM 的商业类', type: 'commercial', requester: '孙建宏',
     });
 
@@ -1150,7 +1151,7 @@ describe('通知扇出：条线 / 超管 / 偏好', () => {
 
   it('站内档位：off 一条都收不到，key 只收「要动手 + 有结果」', async () => {
     await saveNotifyChannels(db, ADMIN, { site: 'off' });
-    const created = await createRequirement(db, PM, {
+    const created = await createRequirement(db, PM, { ...BRIEF,
       title: '静音', type: 'feature', requester: '孙建宏',
     });
     const id = created.id;

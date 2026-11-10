@@ -5,6 +5,7 @@ import { evaluate } from '../../src/core/requirements/evaluate.js';
 import { submitReview } from '../../src/core/requirements/submit-review.js';
 import { reviewPass } from '../../src/core/requirements/review.js';
 import { schedule } from '../../src/core/requirements/schedule.js';
+import { BRIEF } from './brief.js';
 
 export async function makeRelease(name: string, windowStart: string, releaseDate: string) {
   const r = await db.execute<{ id: string }>(sql`
@@ -14,7 +15,11 @@ export async function makeRelease(name: string, windowStart: string, releaseDate
 }
 
 export async function makeQueued() {
-  const r = await createRequirement(db, '吕品', { title: 'q', type: 'feature', requester: 'b' });
+  // 核心三问要齐：`inbox → design` 现在带 `guard: 'brief'`（2026-11-10），
+  // 这三格空着的需求立不了项，也就走不到这条 factory 想要的「已排期」。
+  const r = await createRequirement(db, '吕品', {
+    title: 'q', type: 'feature', requester: 'b', ...BRIEF,
+  });
   await evaluate(db, '吕品', { requirementId: r.id });
   await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
   await reviewPass(db, '吕正豪', { requirementId: r.id });

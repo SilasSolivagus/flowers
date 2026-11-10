@@ -9,6 +9,7 @@ import { composeEvaluation } from '../src/core/uemaster/compose.js';
 import { runJob, jobStatus } from '../src/core/uemaster/start.js';
 import { attemptLine, classifyFailure, type AttemptView } from '../src/core/uemaster/trace.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { cleanArtifacts } from './helpers/files.js';
 
 /**
@@ -154,7 +155,9 @@ function clearEnv(): void {
 
 /** 一条收集里的需求（无 PRD，评估这条路走得通）。 */
 async function inbox(): Promise<{ id: string; number: number }> {
-  const r = await createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
+  // 核心三问齐：作业跑完会 attach，而 attach 要走 `inbox → design`（带 brief 门）。
+  const r = await createRequirement(db, '吕品', { ...BRIEF,
+    title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
   return { id: r.id, number: r.number };
 }
 

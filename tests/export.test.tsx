@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { db, pool } from '../src/db/client.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeQueued } from './helpers/factory.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import {
@@ -87,7 +88,7 @@ describe('待排期为空', () => {
 
   it('读模型问的就是 queue：别的状态不进导出', async () => {
     // 一条只在收集里的需求，不进待排期。
-    await createRequirement(db, '王妍', { title: '还没评估的', type: 'feature', requester: '王妍' });
+    await createRequirement(db, '王妍', { ...BRIEF, title: '还没评估的', type: 'feature', requester: '王妍' });
     expect(await loadQueueRows()).toHaveLength(0);
   });
 });
@@ -99,7 +100,7 @@ describe('导出成功', () => {
     await makeQueued();
     await makeQueued();
     // 一条别的状态：不该被算进行数。
-    await createRequirement(db, '王妍', { title: '还在收集', type: 'commercial', requester: '王妍' });
+    await createRequirement(db, '王妍', { ...BRIEF, title: '还在收集', type: 'commercial', requester: '王妍' });
 
     const { run } = cliOk();
     const outcome = await exportQueue({ run, now: new Date('2026-11-07T10:00:00+08:00') });

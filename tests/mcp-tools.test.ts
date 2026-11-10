@@ -13,6 +13,7 @@ import { runTool, toolByName, type ToolDef } from '../mcp/tools.js';
 import { SERVICES } from '../mcp/services.js';
 import type { Identity } from '../mcp/tokens.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeRelease, makeQueued } from './helpers/factory.js';
 import { cleanArtifacts, writeArtifact } from './helpers/files.js';
 
@@ -70,7 +71,7 @@ function jsonOf(result: CallToolResult): Record<string, unknown> {
 
 /** 造一条停在某个状态的需求（走真实服务，不手改状态）。 */
 async function inInbox(title = 'S3 协议支持'): Promise<string> {
-  const created = await createRequirement(db, '吕品', {
+  const created = await createRequirement(db, '吕品', { ...BRIEF,
     title, type: 'feature', requester: '孙建宏',
   });
   return created.id;

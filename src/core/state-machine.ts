@@ -1,4 +1,5 @@
 import { AppError } from './errors.js';
+import { evaluateLock, type SixAnswers } from './requirements/brief.js';
 
 export type State =
   | 'inbox' | 'design' | 'review' | 'queue' | 'ready'
@@ -27,8 +28,26 @@ export type Trigger =
 /**
  * 状态机亲自执行的门禁。
  *
- * 只剩一条：「需求身上就能验证」的那条——
- * - prd：进评审必须有正式 PRD 链接。
+ * 只有「需求身上就能验证」的那两条：
+ * - prd：进评审必须有正式 PRD 链接；
+ * - brief：立项（收集 → 待设计）必须有核心三问（谁在什么情况下用 / 现在怎么做哪不好 /
+ *   做成什么样算成功）。
+ *
+ * ## Ruling 2（2026-11-10）：`brief` 这道门挂在**变迁**上，不挂在生成器上
+ *
+ * owner 的裁决：「六问不齐不能立项。收集阶段必须填好核心三问才能点评估；点了评估就进
+ * 待设计，所以『六问不齐』既不能生成材料、也不能进待设计。」实测收集 244 条里六问全齐
+ * 只有 1 条（后三格在收集阶段本来就填不出来），卡「六问全齐」等于上线即空转，所以必填
+ * 只取核心三条；判据与那句话在 `requirements/brief.ts`，一处定义、三处共用。
+ *
+ * 门为什么在这条边上：**立项是一个动作，材料是这个动作的产物。** 只把门装进生成器，
+ * 挡住的是「不许出材料」，而「没有六问的需求照样能立项」会从别的入口漏过去——MCP 的
+ * `requirement_start_design`、直接 attach 一份材料（`uemaster/attach.ts` 走的也是这条
+ * 迁移）、以及将来的批量导入。装在这条边上，所有入口一次覆盖。
+ *
+ * 这道门**只作用于 `inbox → design`**：已经过了评估的需求（review / queue / ready /
+ * dev / test / live / rejected / shelved）的存量数据一个字不动——终态与进行中的位置是
+ * 已经发生过的判断，不能用一条今天的规则去改写（同 0021 那条迁移的口径）。
  *
  * ## Ruling 1（2026-11-08）：`type` 那道门**摘掉了**
  *
@@ -54,7 +73,7 @@ export type Trigger =
  * 表里因此仍然只有评审那两行带 `guard: 'prd'`，而「排期也要 PRD」这句话的唯一出处是
  * `schedule.ts` 与本段注释。
  */
-export type Guard = 'prd';
+export type Guard = 'prd' | 'brief';
 
 export type Transition = {
   from: State; to: State; trigger: Trigger;
@@ -70,7 +89,8 @@ export type Transition = {
  */
 export const TRANSITIONS: readonly Transition[] = [
   // Ruling 1：立项不再要求类型（`guard: 'type'` 已摘掉，见上面 `Guard` 的注释）。
-  { from: 'inbox',  to: 'design',  trigger: 'evaluate' },
+  // Ruling 2：立项要求核心三问（`guard: 'brief'`，判据在 `requirements/brief.ts`）。
+  { from: 'inbox',  to: 'design',  trigger: 'evaluate', guard: 'brief' },
   { from: 'inbox',  to: 'review',  trigger: 'submit_review', guard: 'prd'  },
   { from: 'inbox',  to: 'rejected', trigger: 'reject' },
   { from: 'inbox',  to: 'shelved', trigger: 'shelve' },
@@ -97,10 +117,14 @@ export function clockTransitions(): readonly Transition[] {
  * 传 `hasPrd: true` 而没有真的检查过任何东西，就是在注释里撒谎；反过来，
  * 省略它不会「跳过门禁」——门禁是 fail-closed（见下面 assertTransition）。
  *
+ * `brief` 是**整行六问**（只需要前三格，但传整行最省事，也避免了调用方重新挑字段）：
+ * 门要逐条点名缺哪几格，只给一个布尔就说不出来「还差哪一条」。
+ * 省略它 = 三格全空 = 拒绝（同样 fail-closed：忘记传 ctx 会立刻炸在开发机上）。
+ *
  * `hasType` 在 Ruling 1 之后不存在了：类型不再是门（`type` 列可空，且不承载权限）。
  * 删掉这个键而不是留着不用，是为了让「谁还在读类型」在类型检查里就暴露出来。
  */
-export type TransitionContext = { hasPrd?: boolean };
+export type TransitionContext = { hasPrd?: boolean; brief?: SixAnswers };
 
 /**
  * 按 from/to 取那一行迁移；没有这一对就是状态机的边界。
@@ -125,12 +149,24 @@ export function find(from: State, to: State): Transition {
 /**
  * 执行一条迁移自己的 guard。
  *
- * fail-closed：guard 需要 hasPrd 而调用方没给，就是没通过——不是「跳过检查」。
+ * fail-closed：guard 需要 hasPrd / brief 而调用方没给，就是没通过——不是「跳过检查」。
  * 这样「忘记传 ctx」会立刻炸在开发机上，而不是安静地放行。
+ *
+ * 两句中文的形状不同，因为两件事不同：
+ * - prd 是一道「有 / 没有」的门，没有可点的东西可说，所以只把要求说清；
+ * - brief 是**能逐条点名**的门（缺哪几格是可知的，而且补它就在同一个页面的 `?edit=1`
+ *   后面），所以给出缺项与下一步。这句话不承诺做不到的事：状态机里没有
+ *   「待设计 → 收集」这条边，所以它一个字都不提「退回收集」。
  */
 function assertGuards(t: Transition, ctx: TransitionContext): void {
   if (t.guard === 'prd' && ctx.hasPrd !== true) {
     throw new AppError('missing_prd', '直接提交评审必须有正式 PRD 链接');
+  }
+  if (t.guard === 'brief') {
+    // `?? {}`：三格全空 → 三格全点名（fail-closed）。判断与那句话都在 brief.ts，
+    // 生成前与抽屉读的是同一个函数、同一个字符串。
+    const refusal = evaluateLock(ctx.brief ?? {});
+    if (refusal !== null) throw new AppError('missing_brief', refusal);
   }
 }
 
@@ -159,8 +195,8 @@ export function assertTransition(
  *
  * 顺序：先查配对、再查动作、最后查门。动作不对时**不许**先报门——一个走错门的动作
  * 骑着一条合法的配对到达带门的迁移时，用户看到的会是「直接提交评审必须有正式 PRD
- * 链接」，而他其实只是点错了按钮。（Ruling 1 之前这里举的例子是 type 门，那道门已经
- * 摘掉；这条顺序规则本身不因为少了一道门而改变——现在唯一的门是 prd。）
+ * 链接」/「还差两条没填：…」，而他其实只是点错了按钮。（Ruling 1 之前这里举的例子是
+ * type 门，那道门已经摘掉；这条顺序规则本身不因为少了一道门而改变。）
  */
 export function assertTrigger(
   from: State, to: State, trigger: Trigger, ctx: TransitionContext = {},

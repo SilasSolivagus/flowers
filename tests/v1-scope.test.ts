@@ -5,6 +5,7 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { evaluate } from '../src/core/requirements/evaluate.js';
 import { getBoard } from '../src/core/read/board.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { EMPTY_SURFACES } from '../src/core/locate/copy.js';
 import {
   assembleWalkmap, flowPrompt, fragmentsPrompt, knownForEvaluate, readFragments,
@@ -253,7 +254,7 @@ describe('非收集状态的标记（对着真库）', () => {
   }
 
   it('收集里的卡不标；评估立项之后（待设计）标', async () => {
-    const created = await createRequirement(db, '吕品', {
+    const created = await createRequirement(db, '吕品', { ...BRIEF,
       title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
     });
     const id = created.id as string;

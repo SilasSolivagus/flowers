@@ -186,8 +186,11 @@ export async function attachArtifact(
     // `deleted_at is null`：软删除的需求对外等于不存在（P4-02）。这条检查同时守住了
     // 一条更隐蔽的路——一次生成跑完时需求已经被删了，attach 会在这里说不，而不是
     // 往一条看不见的需求上再挂一份材料、再推它一次状态。
+    // 取回来的就是 `Locked` 那一整行：`evaluateInTx` 会把这一行交给 `brief` 门，
+    // 而那道门要逐条点名缺哪几格（2026-11-10）。少取 context / problem / outcome，
+    // 迁移会被拒成「三条全空」——材料落了库、状态没推进，正是要防的那一半。
     const found = await tx.execute<Locked>(
-      sql`select state, type, prd_url from requirements
+      sql`select state, type, prd_url, context, problem, outcome from requirements
            where id = ${requirementId} and deleted_at is null
            for update`);
     const row = found.rows[0];
@@ -219,9 +222,11 @@ export async function attachArtifact(
      * - 只认 `evaluate`：review / inspect 是旁证，不是这道门的材料，永远不改状态。
      * - 只认 `inbox`：已经在待设计（或更后面）的需求重做评估，只该换一份新版本，
      *   不该被打回——「补材料」变成「回退」是最难解释的一种。
-     * - 走 `evaluateInTx`，即真 evaluate 的那道门：没有类型就抛同一个 missing_type。
-     *   它在**本事务里**执行，所以门一响，上面那行产物与 uemaster.attached 一起回滚——
-     *   要么材料落地且需求推进，要么两件都没发生。
+     * - 走 `evaluateInTx`，即真 evaluate 的那道门（Ruling 2 之后是 `brief`：核心三问
+     *   不齐不能立项）。它在**本事务里**执行，所以门一响，上面那行产物与
+     *   `uemaster.attached` 一起回滚——要么材料落地且需求推进，要么两件都没发生。
+     *   这就是为什么门必须在**变迁**上而不只在生成器上：这条 attach 路也是立项的入口
+     *   （人 / agent 把材料交回来），只装门在生成器里，这条路会绕过去。
      *
      * 事件用两条而不是一条：`uemaster.attached`（材料，payload 带 stage/url）在前，
      * `requirement.evaluated`（迁移，payload `{from,to}`）在后。理由见

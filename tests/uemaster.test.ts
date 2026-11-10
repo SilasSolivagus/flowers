@@ -9,6 +9,7 @@ import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listArtifacts } from '../src/core/uemaster/list.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { cleanArtifacts, removeArtifact, artifactExists, writeArtifact } from './helpers/files.js';
 
 beforeEach(async () => {
@@ -51,7 +52,7 @@ async function artifactCount(): Promise<number> {
 }
 
 async function newRequirement(): Promise<{ id: string; number: number }> {
-  const r = await createRequirement(db, '吕品', {
+  const r = await createRequirement(db, '吕品', { ...BRIEF,
     title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
   });
   return { id: r.id, number: r.number };
@@ -591,7 +592,7 @@ describe('listArtifacts', () => {
 
   it('只取本需求的产物', async () => {
     const a = await newRequirement();
-    const b = await createRequirement(db, '吕品', {
+    const b = await createRequirement(db, '吕品', { ...BRIEF,
       title: '另一个', type: 'commercial', requester: '孙建宏',
     });
     await attachOk(a.id, 'evaluate', '/uemaster/PAN-1/evaluate.html');

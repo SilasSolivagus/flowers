@@ -8,6 +8,7 @@ import { evaluate } from '../src/core/requirements/evaluate.js';
 import { updateRequirement } from '../src/core/requirements/manage.js';
 import { schedule } from '../src/core/requirements/schedule.js';
 import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeQueued, makeRelease } from './helpers/factory.js';
 
 /**
@@ -178,11 +179,19 @@ describe('规则 2 的写入口：没有 PRD 不能排期', () => {
  * 超管把一条无主需求推去别处之后，由 0027 的重复执行把它拉回收集。
  */
 describe('规则 1 的结构保证：无主需求只有认领这一条路', () => {
-  /** 一条真正的无主需求：`createRequirement` 只有在超管显式传 null 时才能造出来。 */
+  /**
+   * 一条真正的无主需求：`createRequirement` 只有在超管显式传 null 时才能造出来。
+   *
+   * 核心三问一起写上（2026-11-10）：这一组判的是**权限**（谁能认领 / 谁能改 / 谁能
+   * 立项），不是六问那道门；三格空着的行会让「认领之后这条路就通了」那条用例红在
+   * `missing_brief` 上，而那与它想证明的事无关。
+   */
   async function ownerless(): Promise<string> {
     const res = await db.execute<{ id: string }>(sql`
-      insert into requirements (title, type, requester, state, owner_member_id)
-      values ('没有人接的需求', 'feature', '王妍', 'inbox', null)
+      insert into requirements
+             (title, type, requester, state, owner_member_id, context, problem, outcome)
+      values ('没有人接的需求', 'feature', '王妍', 'inbox', null,
+              ${BRIEF.context}, ${BRIEF.problem}, ${BRIEF.outcome})
       returning id`);
     return res.rows[0]!.id;
   }

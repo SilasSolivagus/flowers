@@ -9,6 +9,7 @@ import { evaluate } from '../src/core/requirements/evaluate.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass } from '../src/core/requirements/review.js';
 import { resetDb, seedPeople, type SeededPerson } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 /**
  * P4-06 的数据迁移：把旧规则（按**需求类型**派单）留下的开着的派单，重算到
@@ -81,7 +82,8 @@ const OLD_RULE: Record<string, string> = {
 async function requirementWithOldAssignment(
   owner: string, type: 'feature' | 'commercial',
 ): Promise<{ id: string; number: number; oldReviewer: string }> {
-  const created = await createRequirement(db, owner, {
+  // 核心三问要齐：这条需求要走 `evaluate`，而那条边现在带 `guard: 'brief'`。
+  const created = await createRequirement(db, owner, { ...BRIEF,
     title: `${owner} 的${type === 'feature' ? '功能' : '商业'}需求`,
     type,
     requester: '孙建宏',
@@ -126,7 +128,7 @@ describe('迁移：开着的派单按负责人的条线重算', () => {
 
   it('负责人没有条线（超管）：派单作废，留给超管，错的那个人签不了', async () => {
     // 房超是超管、没有条线：新规则下提交评审**不落派单行**，所以这里要先补一行旧数据。
-    const created = await createRequirement(db, ADMIN, {
+    const created = await createRequirement(db, ADMIN, { ...BRIEF,
       title: '超管自己的需求', type: 'commercial', requester: '孙建宏',
     });
     await evaluate(db, ADMIN, { requirementId: created.id });
@@ -174,7 +176,7 @@ describe('迁移：开着的派单按负责人的条线重算', () => {
 
   it('本来就对的派单一行不动（幂等：第二遍什么都不改）', async () => {
     // 吕品（功能线）→ 提交之后派单已经是吕正豪，迁移不该动它。
-    const created = await createRequirement(db, '吕品', {
+    const created = await createRequirement(db, '吕品', { ...BRIEF,
       title: '本来就对', type: 'commercial', requester: '孙建宏',
     });
     await evaluate(db, '吕品', { requirementId: created.id });

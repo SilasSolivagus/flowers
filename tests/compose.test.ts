@@ -10,6 +10,7 @@ import { composeEvaluation } from '../src/core/uemaster/compose.js';
 import { resolveProviderConfig } from '../src/core/uemaster/provider.js';
 import { resolveStrategy, runJob } from '../src/core/uemaster/start.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
@@ -184,7 +185,7 @@ const PAGES_JSON = JSON.stringify({
 
 /** 一条收集里的需求（无 PRD、类型齐全）：评估这条路走得通。 */
 async function inbox() {
-  return createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
+  return createRequirement(db, '吕品', { ...BRIEF, title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
 }
 
 /** 抓服务抛出来的错误：instance + code + message 都要对得上。 */

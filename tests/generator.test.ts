@@ -20,6 +20,7 @@ import {
 import { runJob, startGeneration } from '../src/core/uemaster/start.js';
 import { createRequirement } from '../src/core/requirements/create.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { REPO_ROOT, artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
@@ -528,7 +529,8 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
 
   it('不写文件、只打 stdout 的命令：作业 done，产物文件真有内容', async () => {
     process.env.FLOWERS_GEN_CMD = stub('gen-stdout.mjs');
-    const r = await createRequirement(db, '吕品', {
+    // 核心三问齐：`runJob` 跑完会 attach，attach 要走带 brief 门的 `inbox → design`。
+    const r = await createRequirement(db, '吕品', { ...BRIEF,
       title: 'stdout 生成', type: 'feature', requester: '孙建宏',
     });
     const inserted = await db.execute<{ id: string }>(sql`

@@ -12,6 +12,7 @@ import { getRequirementDetail, type DetailAction } from '../src/core/read/detail
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
 import { LEGAL_FROM, TOOLS } from '../mcp/tools.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeRelease } from './helpers/factory.js';
 
 /**
@@ -48,7 +49,7 @@ afterAll(async () => {
 });
 
 async function inInbox(title: string): Promise<string> {
-  const created = await createRequirement(db, '吕品', { title, type: 'feature', requester: '孙建宏' });
+  const created = await createRequirement(db, '吕品', { ...BRIEF, title, type: 'feature', requester: '孙建宏' });
   return created.id;
 }
 

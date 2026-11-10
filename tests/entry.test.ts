@@ -22,6 +22,7 @@ import { DESCRIPTIVE_FIELDS, hintFor } from '../src/core/requirements/fields.js'
 import { overlapLine, previousLine } from '../src/core/releases/window.js';
 import { elapsedLabel } from '../src/core/read/elapsed.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 
 /**
  * 录入面的用例（P4-02）：指纹、新鲜度、改描述、软删除、版本重叠、表单校验。
@@ -487,7 +488,7 @@ describe('版本 CRUD', () => {
     const release = await createRelease(db, '吕品', {
       name: 'v1.4', windowStart: '2026-11-01', releaseDate: '2026-11-15',
     });
-    const req = await createRequirement(db, '吕品', {
+    const req = await createRequirement(db, '吕品', { ...BRIEF,
       title: 'q', type: 'feature', requester: 'b',
     });
     await evaluate(db, '吕品', { requirementId: req.id });

@@ -8,6 +8,7 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { ARTIFACT_ROOT, MAX_UPLOAD_BYTES } from '../src/core/uemaster/store.js';
 import { AppError } from '../src/core/errors.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { cleanArtifacts, writeArtifact } from './helpers/files.js';
 
 /**
@@ -49,7 +50,7 @@ afterAll(async () => {
 });
 
 async function newRequirement(): Promise<{ id: string; number: number }> {
-  const r = await createRequirement(db, '吕品', {
+  const r = await createRequirement(db, '吕品', { ...BRIEF,
     title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
   });
   return { id: r.id, number: r.number };

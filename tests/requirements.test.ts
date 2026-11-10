@@ -14,6 +14,7 @@ import { AppError } from '../src/core/errors.js';
 import { STATE_LABEL } from '../src/core/state-machine.js';
 import { startOfShanghaiDay, tick } from '../src/core/clock/tick.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { makeQueued, makeReadyAt, makeRelease, reviewerOf } from './helpers/factory.js';
 
 beforeEach(async () => {
@@ -49,7 +50,7 @@ async function requirementCount(): Promise<number> {
 
 describe('createRequirement', () => {
   it('建出来就是 inbox，编号从 1 开始', async () => {
-    const r = await createRequirement(db, '吕品', {
+    const r = await createRequirement(db, '吕品', { ...BRIEF,
       title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
     });
     expect(r.state).toBe('inbox');
@@ -62,7 +63,7 @@ describe('createRequirement', () => {
   });
 
   it('每次创建写一条事件', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     const rows = await db.execute<{ type: string; requirement_id: string; actor: string; payload: string }>(
       sql`select type, requirement_id, actor, payload from events`,
     );
@@ -79,8 +80,8 @@ describe('createRequirement', () => {
 
   it('类型缺省 / 空串都落成 null；不在枚举内的值仍然拒绝（Ruling 1）', async () => {
     // Ruling 1：类型不再必填。缺字段与空串（表单里那个「未指定」）都是**合法的空**。
-    const noType = await createRequirement(db, '吕品', { title: 'x', requester: 'y' } as never);
-    const blankType = await createRequirement(db, '吕品', {
+    const noType = await createRequirement(db, '吕品', { ...BRIEF, title: 'x', requester: 'y' } as never);
+    const blankType = await createRequirement(db, '吕品', { ...BRIEF,
       title: 'y', type: '   ', requester: 'y',
     });
     const rows = await db.execute<{ title: string; type: string | null }>(
@@ -93,7 +94,7 @@ describe('createRequirement', () => {
     expect(blankType.id).toBeTruthy();
 
     // 认不出的值仍然报错（单选不该被静默丢掉），而且整条建不出来。
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: 'z', type: 'other', requester: 'y',
     } as never))).toMatchObject({
       code: 'invalid', message: '类型只能是 commercial / feature（或留空 = 未指定）',
@@ -102,31 +103,31 @@ describe('createRequirement', () => {
   });
 
   it('标题缺失或只有空白都拒绝', async () => {
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       type: 'feature', requester: 'y',
     } as never))).toMatchObject({ code: 'invalid', message: '标题不能为空' });
 
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: '   ', type: 'feature', requester: 'y',
     }))).toMatchObject({ code: 'invalid', message: '标题不能为空' });
   });
 
   it('提出人缺失或只有空白都拒绝', async () => {
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: 'x', type: 'feature',
     } as never))).toMatchObject({ code: 'invalid', message: '提出人不能为空' });
 
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: 'x', type: 'feature', requester: ' ',
     }))).toMatchObject({ code: 'invalid', message: '提出人不能为空' });
   });
 
   it('负责人 ID 不是 uuid 就给中文消息', async () => {
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: 'x', type: 'feature', requester: 'y', ownerMemberId: 'abc',
     }))).toMatchObject({ code: 'invalid', message: '负责人 ID 格式不正确' });
 
-    expect(await caught(createRequirement(db, '吕品', {
+    expect(await caught(createRequirement(db, '吕品', { ...BRIEF,
       title: 'x', type: 'feature', requester: 'y', ownerMemberId: 123,
     }))).toMatchObject({ code: 'invalid', message: '负责人 ID 格式不正确' });
   });
@@ -143,13 +144,13 @@ describe('createRequirement', () => {
    * 而 max+1 会把空洞填上——这正是它并发不安全的来源（两个事务读同一个 max）。
    */
   it('编号由序列分配，删掉的号不复用', async () => {
-    const a = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
-    const b = await createRequirement(db, '吕品', { title: 'b', type: 'commercial', requester: 'c' });
+    const a = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
+    const b = await createRequirement(db, '吕品', { ...BRIEF, title: 'b', type: 'commercial', requester: 'c' });
     expect([a.number, b.number]).toEqual([1, 2]);
 
     // 删掉中间那条：3 号已经是历史，不回填。
     await db.execute(sql`delete from requirements where id = ${b.id}`);
-    const c = await createRequirement(db, '吕品', { title: 'c', type: 'feature', requester: 'd' });
+    const c = await createRequirement(db, '吕品', { ...BRIEF, title: 'c', type: 'feature', requester: 'd' });
     expect(c.number).toBe(3);
 
     const rows = await db.execute<{ number: number }>(sql`select number from requirements order by number`);
@@ -170,7 +171,7 @@ describe('createRequirement', () => {
     try {
       let thrown: unknown;
       try {
-        await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+        await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
       } catch (e) {
         thrown = e;
       }
@@ -212,7 +213,7 @@ async function eventCountOf(id: string): Promise<number> {
 
 describe('evaluate', () => {
   it('评估后从 inbox 进 design，并刷新 state_entered_at', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await backdate(r.id);
 
     const out = await evaluate(db, '吕品', { requirementId: r.id });
@@ -226,7 +227,7 @@ describe('evaluate', () => {
   });
 
   it('评估写一条事件，payload 带 from / to', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
 
     const rows = await db.execute<{ type: string; actor: string; payload: string }>(
@@ -238,7 +239,7 @@ describe('evaluate', () => {
   });
 
   it('已经评估过的需求再评估，报 illegal_transition', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
 
     expect(await caught(evaluate(db, '吕品', { requirementId: r.id }))).toMatchObject({
@@ -278,7 +279,7 @@ describe('evaluate', () => {
     // 软删 = 从每一条读路径上消失。状态动作是**写**路径上最要紧的那条读：不挡住它，
     // 一条已经不在板上的需求照样能被立项 / 排期 / 打回，每一步都写一条事件。
     // 判据在 `lockRequirement`（每个状态动作都从那里过），所以这里用哪一步都一样。
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     const before = await eventCountOf(r.id); // createRequirement 写的那一条
     await db.execute(sql`update requirements set deleted_at = now() where id = ${r.id}`);
 
@@ -306,7 +307,7 @@ describe('submitReview', () => {
   const SKIP_REASON = '跳过评估，直接提交 PRD';
 
   it('PRD 链接为空就直接拒绝，不动状态也不写事件', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     const before = await eventCountOf(r.id);
 
@@ -329,7 +330,7 @@ describe('submitReview', () => {
   });
 
   it('设计完成后提交：design → review，落 prd_url 且不写 skip_reason', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     await backdate(r.id);
 
@@ -351,7 +352,7 @@ describe('submitReview', () => {
   });
 
   it('跳过评估直提：inbox → review，写死 skip_reason 并回报 skippedEvaluation', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await backdate(r.id);
 
     const out = await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x/prd' });
@@ -371,7 +372,7 @@ describe('submitReview', () => {
   });
 
   it('已在待评审再提交，报 illegal_transition', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x/prd' });
 
@@ -382,7 +383,7 @@ describe('submitReview', () => {
   });
 
   it('并发双提交只有一次成功，另一次被行锁挡住', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
 
     const results = await Promise.allSettled([
@@ -439,7 +440,7 @@ async function assignmentsOf(id: string) {
 describe('评审派单、通过与打回', () => {
   /** 建 → 评估 → 提交 PRD，返回停在 review 的需求。 */
   async function inReview(type: 'feature' | 'commercial' = 'feature', prdUrl = 'https://x') {
-    const r = await createRequirement(db, '吕品', { title: 'a', type, requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type, requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     await submitReview(db, '吕品', { requirementId: r.id, prdUrl });
     return r;
@@ -459,7 +460,7 @@ describe('评审派单、通过与打回', () => {
     const commercialByFeature = await inReview('commercial');
     expect(await reviewerOf(commercialByFeature.id)).toBe('吕正豪');
 
-    const featureByBusiness = await createRequirement(db, '王妍', {
+    const featureByBusiness = await createRequirement(db, '王妍', { ...BRIEF,
       title: 'b', type: 'feature', requester: 'b',
     });
     await evaluate(db, '王妍', { requirementId: featureByBusiness.id });
@@ -604,7 +605,7 @@ describe('评审派单、通过与打回', () => {
   });
 
   it('不在待评审状态时通过 / 打回都报 illegal_transition', async () => {
-    const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const fresh = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(reviewPass(db, '吕正豪', { requirementId: fresh.id }))).toMatchObject({
       code: 'illegal_transition', message: '不能从「收集」直接到「待排期」',
     });
@@ -648,7 +649,7 @@ describe('评审派单、通过与打回', () => {
 
   it('负责人所在条线没有负责人时报 no_reviewer，整笔事务回滚', async () => {
     await db.execute(sql`update members set role = 'pm' where name = '吕正豪'`);
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     const before = await eventCountOf(r.id);
 
@@ -836,7 +837,7 @@ describe('排期（三个日期）', () => {
     const rel = await makeRelease('2026.12', '2026-12-01', '2026-12-04');
 
     // inbox 直接排期
-    const fresh = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const fresh = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     expect(await caught(schedule(db, '吕品', {
       requirementId: fresh.id, releaseId: rel, commitTestAt: '2026-12-01', commitDueAt: '2026-12-04',
     }))).toMatchObject({ code: 'illegal_transition', message: '不能从「收集」直接到「待开发」' });
@@ -1145,7 +1146,7 @@ describe('打回（测试中 → 开发中，必须重填完成日）', () => {
   });
 
   it.each(['dev', 'design', 'inbox'] as const)('从「%s」打回报 illegal_transition，行不动', async (from) => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await db.execute(sql`update requirements set state = ${from} where id = ${r.id}`);
     const before = await eventCountOf(r.id);
 
@@ -1275,7 +1276,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
 
   /** 建 → 评估 → 提交 PRD：停在 review，带一条 handed 派单。 */
   async function inReview() {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
     await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
     return r;
@@ -1290,7 +1291,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   }
 
   it('只有 inbox 能拒绝', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await evaluate(db, '吕品', { requirementId: r.id });
 
     expect(await caught(rejectRequirement(db, '吕品', { requirementId: r.id, reason: '不做' })))
@@ -1301,7 +1302,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   });
 
   it('从 inbox 拒绝：进 rejected，刷新进入时间，事件带 from / to / reason', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await backdate(r.id);
 
     // reason 去首尾空白后再落库：库里和事件里都只留用户写的内容。
@@ -1322,7 +1323,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
 
   it.each(['design', 'review', 'queue', 'ready', 'dev', 'test', 'live', 'shelved', 'rejected'])(
     '从「%s」拒绝都是 illegal_transition，行不动、不写事件', async (from) => {
-      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
       await forceState(r.id, from);
       const before = await eventCountOf(r.id);
 
@@ -1337,7 +1338,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   );
 
   it.each(['', '   ', undefined, null, 42])('拒绝必须写原因：%j', async (reason) => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     const before = await eventCountOf(r.id);
 
     expect(await caught(rejectRequirement(db, '吕品', {
@@ -1355,7 +1356,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   });
 
   it('从 inbox 搁置：进 shelved，刷新进入时间，事件带 from / to / reason', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await backdate(r.id);
 
     const out = await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
@@ -1379,7 +1380,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
    */
   it.each(['design', 'review', 'queue', 'ready', 'dev', 'test', 'live'])(
     '从「%s」搁置都合法', async (from) => {
-      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
       await forceState(r.id, from);
 
       const out = await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
@@ -1418,7 +1419,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   });
 
   it('搁置后恢复回 inbox', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await shelveRequirement(db, '吕品', { requirementId: r.id, reason: '本期不做' });
 
     const out = await restoreRequirement(db, '吕品', { requirementId: r.id });
@@ -1434,7 +1435,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
     // skip_reason 描述的是**这一轮**提交流程：恢复等于重新走一遍，旧标记必须清掉，
     // 否则报表会把一条正常评估过的需求算成「跳过评估」。当初跳过的事实不会丢——
     // requirement.review_requested 的 payload 里有 skippedEvaluation。
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await submitReview(db, '吕品', { requirementId: r.id, prdUrl: 'https://x' });
     expect((await rowOf(r.id)).skip_reason).not.toBeNull();
 
@@ -1449,7 +1450,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   });
 
   it.each(['', '   ', undefined, null])('搁置必须写原因：%j', async (reason) => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     const before = await eventCountOf(r.id);
 
     expect(await caught(shelveRequirement(db, '吕品', {
@@ -1461,7 +1462,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   });
 
   it.each(['shelved', 'rejected'])('从终态「%s」不能再搁置', async (from) => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await forceState(r.id, from);
     const before = await eventCountOf(r.id);
 
@@ -1475,7 +1476,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
 
   it.each(['inbox', 'design', 'queue', 'dev', 'live', 'rejected'] as const)(
     '从「%s」恢复都是 illegal_transition，行不动', async (from) => {
-      const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+      const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
       await forceState(r.id, from);
       const before = await eventCountOf(r.id);
 
@@ -1490,7 +1491,7 @@ describe('拒绝 / 搁置 / 恢复', () => {
   );
 
   it('被拒绝的需求不再接受任何终态 / 恢复动作', async () => {
-    const r = await createRequirement(db, '吕品', { title: 'a', type: 'feature', requester: 'b' });
+    const r = await createRequirement(db, '吕品', { ...BRIEF, title: 'a', type: 'feature', requester: 'b' });
     await rejectRequirement(db, '吕品', { requirementId: r.id, reason: '不做' });
     const before = await eventCountOf(r.id);
 

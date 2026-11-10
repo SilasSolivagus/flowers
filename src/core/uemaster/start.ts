@@ -14,7 +14,8 @@ import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import type { AttemptPhase, AttemptView } from './trace.js';
 import { composeEvaluation } from './compose.js';
-import { evaluateLock, evaluateStageLock } from './gate.js';
+import { evaluateLock } from '../requirements/brief.js';
+import { evaluateStageLock } from './gate.js';
 import {
   HEARTBEAT_INTERVAL_MS, healStaleJobs, stallReasonOf,
 } from './liveness.js';
@@ -266,9 +267,15 @@ export async function startGeneration(
     }
 
     /**
-     * 六问没填，不许生成（2026-11-10 owner 的裁定）。判据在 `gate.ts`，**这一处是
-     * 唯一的真相**：界面把同一句话提前画在按钮旁边（按钮禁用），而一个绕过界面的
-     * POST 仍然撞在这里。
+     * 六问没填，不许生成（2026-11-10 owner 的裁定）。判据在
+     * `requirements/brief.ts`，**这一处不是判据的首发地**——真正的门挂在状态变迁上
+     * （`state-machine.ts` 的 `guard: 'brief'`，`inbox → design`）。生成前再问一次，
+     * 是因为这件事本来就是「材料能不能出」：
+     *
+     * - 迁那道门只在**立项那一刻**生效，而生成发生在那之前。放行到 worker 里，等于
+     *   先烧一次模型调用、跑完 2–5 分钟，再由 attach 的迁移失败把材料回滚——用户等
+     *   五分钟只拿到一句拒绝，而这句话在点下去的那一秒就已经成立；
+     * - 界面把**同一个字符串**提前画在按钮旁边（按钮禁用），读模型与服务不会各说一句。
      *
      * 位置三条理由：
      * - 放在防重之后：那个阶段已经在跑时，「正在生成中」才是这次点击的直接结果；

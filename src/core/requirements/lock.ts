@@ -12,10 +12,15 @@ export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
  * - prd_url：prd guard 的判定依据；
  * - type：**不再是 guard 的依据**（Ruling 1 摘掉了 `guard: 'type'`），留着是因为
  *   `evaluateInTx` 的调用方拿同一行当返回值、而 `Locked` 是那几处的公共形状；
- *   它现在只是一条内容属性，读它不会改变任何判断。
+ *   它现在只是一条内容属性，读它不会改变任何判断；
+ * - context / problem / outcome：核心三问（2026-11-10 的 `brief` 门判据，见
+ *   `brief.ts`）。`inbox → design` 那道门要**逐条点名缺哪几格**，而它只能读这一行上
+ *   真实的值——从调用方的口头断言里读，等于允许「我说填了」。既然已经 `for update`
+ *   锁了这一行，顺手取回来比再查一次便宜，也不会读到半旧的行（attach 那条路就是
+ *   这样把同一个 `Locked` 传给 `evaluateInTx` 的）。
  *
  * 不提供 selectExtra 之类的参数：列名是拼接进 SQL 的字符串字面量，谁传谁就绕过了
- * 参数化；而目前没有任何调用方需要第四个列。
+ * 参数化；而目前没有任何调用方需要这七列以外的列。
  */
 export type Locked = {
   state: State;
@@ -37,6 +42,13 @@ export type Locked = {
    * 后者只有超管能动，两件事必须分开判断（见 roles.ts）。
    */
   owner_line: string | null;
+  /**
+   * 核心三问的三格（`null` = 没写；空白串在写入端已归一成 null）。判据在 `brief.ts`，
+   * 与读模型、生成前那道门共用同一份——这里只是把库里的值取回来给它。
+   */
+  context: string | null;
+  problem: string | null;
+  outcome: string | null;
 };
 
 /**
@@ -64,7 +76,8 @@ export async function lockRequirement(tx: Tx, requirementId: string): Promise<Lo
   // `for update` 在 PG 里会撞上「FOR UPDATE cannot be applied to the nullable side
   // of an outer join」——而这里锁的本来也只是需求那一行。
   const cur = await tx.execute<Locked>(sql`
-    select r.state, r.type, r.prd_url, r.owner_member_id, m.line as owner_line
+    select r.state, r.type, r.prd_url, r.owner_member_id, m.line as owner_line,
+           r.context, r.problem, r.outcome
       from requirements r
       left join members m on m.id = r.owner_member_id
      where r.id = ${requirementId}

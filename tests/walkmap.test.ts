@@ -15,6 +15,7 @@ import {
   type NodeInput, type PageInput, type Walkmap,
 } from '../src/core/uemaster/walkmap.js';
 import { resetDb, seedPeople } from './helpers/db.js';
+import { BRIEF } from './helpers/brief.js';
 import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
@@ -408,7 +409,7 @@ function fakeProvider(replies: string[]): { deps: Partial<ComposeDeps>; prompts:
 }
 
 async function inbox() {
-  return createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
+  return createRequirement(db, '吕品', { ...BRIEF, title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
 }
 
 async function caught(p: Promise<unknown>): Promise<AppError> {
