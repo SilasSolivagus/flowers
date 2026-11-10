@@ -424,7 +424,8 @@ const WIDE = [
 const PAGES_JSON = JSON.stringify({
   nodes: [
     { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE,
-      anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']] },
+      anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']],
+      open: { req: [['失败怎么办', '提交失败时停在哪一屏']], dev: [['状态', '这一屏有几种状态']] }, },
     { id: 'B', kind: 'decision', title: '是否登录？',
       steps: [
         { from: '页面', to: '服务端', what: '提交当前登录状态' },
@@ -524,27 +525,62 @@ afterAll(async () => {
 });
 
 describe('composeEvaluation 把现有页面接进提示词', () => {
-  it('两次调用都带清单：图那一次说「现有页面」，片段那一次保留标注', async () => {
-    const prompts: string[] = [];
+  /**
+   * v1（2026-11-10）：评估**默认不读代码索引**（`FEATURE_EVALUATE_READS_CODE` 默认关）。
+   * 这一组的三条因此分两种走法：
+   * - 关着（v1 的样子）→ 即使读口交了清单，提示词里一个字都没有，而且读口**没被调用**；
+   * - 打开（v1.1 的路，能力没删）→ 两次调用都带清单，与原来逐字一致。
+   */
+  const ENV = 'FEATURE_EVALUATE_READS_CODE';
+
+  async function compose(prompts: string[], surfaces: () => Promise<KnownSurfaces>) {
     const r = await createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
     await composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' },
-      fakeDeps(prompts, async () => SURFACES));
+      fakeDeps(prompts, surfaces));
+    return r;
+  }
 
+  it('v1 默认：评估不读代码——读口一次都不调，提示词里没有「现有页面」', async () => {
+    const prompts: string[] = [];
+    let calls = 0;
+    await compose(prompts, async () => { calls += 1; return SURFACES; });
+
+    expect(calls).toBe(0);
     expect(prompts).toHaveLength(2);
-    expect(prompts[0]).toContain('/pages/share/index');
-    expect(prompts[1]).toContain('/pages/share/index');
+    for (const p of prompts) {
+      expect(p).not.toContain('现有页面');
+      expect(p).not.toContain('代码索引');
+    }
     expect(await artifactCount()).toBe(1);
   });
 
-  it('没有清单（读索引失败 / 没配镜像）时提示词一个字都不提', async () => {
-    const prompts: string[] = [];
-    const r = await createRequirement(db, '吕品', { title: 'S3 协议支持', type: 'feature', requester: '孙建宏' });
-    await composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' },
-      fakeDeps(prompts, async () => { throw new Error('镜像连不上'); }));
+  it('打开开关：两次调用都带清单（图那一次说「现有页面」，片段那一次保留标注）', async () => {
+    process.env[ENV] = '1';
+    try {
+      const prompts: string[] = [];
+      await compose(prompts, async () => SURFACES);
 
-    expect(prompts).toHaveLength(2);
-    for (const p of prompts) expect(p).not.toContain('现有页面');
-    // 读索引失败不该让材料失败——它是上下文，不是结论
-    expect(await artifactCount()).toBe(1);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[0]).toContain('/pages/share/index');
+      expect(prompts[1]).toContain('/pages/share/index');
+      expect(await artifactCount()).toBe(1);
+    } finally {
+      delete process.env[ENV];
+    }
+  });
+
+  it('没有清单（读索引失败 / 没配镜像）时提示词一个字都不提', async () => {
+    process.env[ENV] = '1';
+    try {
+      const prompts: string[] = [];
+      await compose(prompts, async () => { throw new Error('镜像连不上'); });
+
+      expect(prompts).toHaveLength(2);
+      for (const p of prompts) expect(p).not.toContain('现有页面');
+      // 读索引失败不该让材料失败——它是上下文，不是结论
+      expect(await artifactCount()).toBe(1);
+    } finally {
+      delete process.env[ENV];
+    }
   });
 });

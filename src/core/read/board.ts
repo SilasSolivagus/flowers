@@ -78,6 +78,19 @@ export type BoardCard = {
    * 只能有一个答案，抽屉里那个「认领」按钮与卡片上这个必须同时出现、同时消失。
    */
   claimable: boolean;
+  /**
+   * 这条需求是不是**不在 v1 承诺里**（= 状态不是 `inbox`），卡片上因此要标一行
+   * 「v1 暂未开放」（`features.ts` 的 `V1_CLOSED_MARK`）。
+   *
+   * 为什么是读模型算、而不是卡片拿 `state !== 'inbox'` 自己判：判据只有一条，但读的人
+   * 有卡片、抽屉、以后的 MCP 三处。写在读模型里，三处说的是同一件事；写在组件里，
+   * 下一个人加第四个读侧时就得再抄一遍那个比较，抄漏一处就是「卡片说没开放、抽屉说
+   * 能用」。
+   *
+   * 为什么不是「藏起来」：owner 的裁决（`2026-11-10-v1-scope.md` §三）是全部照常显示、
+   * 每条标一行——藏起来会让人以为数据丢了。
+   */
+  v1Closed: boolean;
 };
 
 export type BoardColumn = { state: State; label: string; cards: BoardCard[] };
@@ -540,6 +553,9 @@ export async function readBoard(
       // 认领：无主 + 收集 + 我确实有 claim 权限。**不在这里推权限**——直接问 `can()`，
       // 与抽屉里那个「认领」按钮问的是同一个函数（两个入口不可能一个有一个没有）。
       claimable: row.owner === null && row.state === 'inbox' && canClaim,
+      // v1 只承诺「收集」那一条链（评估）。别的状态照常显示、照常可点开，
+      // 只是多一行字说明这一版没开放——见 `BoardCard.v1Closed` 与 `features.ts`。
+      v1Closed: row.state !== 'inbox',
     });
   }
 

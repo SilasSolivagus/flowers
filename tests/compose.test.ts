@@ -165,7 +165,8 @@ const WIDE = [
 const PAGES_JSON = JSON.stringify({
   nodes: [
     { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE,
-      anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']] },
+      anno: [['内容', '按距离列出可寄养门店'], ['操作', '点提交进入确认']],
+      open: { req: [['失败怎么办', '提交失败时停在哪一屏']], dev: [['状态', '这一屏有几种状态']] }, },
     { id: 'B', kind: 'decision', title: '是否登录？',
       steps: [
         { from: '页面', to: '服务端', what: '提交当前登录状态' },

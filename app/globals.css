@@ -201,6 +201,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
    不折断的长词会把整列撑出一条横向滚动条。 */
 .card .w{font:400 11px/16px var(--f-sans);color:var(--c-text-2);white-space:normal;overflow-wrap:anywhere}
 .card .w.neg{color:var(--c-negative)}
+/* v1 只有「收集」那条链（进收集 → 点评估 → 出材料），其余状态一行标记说明这一版没开放。
+   用最轻的一档灰（`--c-text-4` + caption 字号）：它不是告警，也不是错误，只是一句
+   「先别找这个功能」。卡片已经有三行文字，这一行必须比「等谁」更轻。 */
+.card .v1{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4)}
 
 .card.mine{border-color:var(--c-accent);box-shadow:inset 2px 0 0 var(--c-accent);
            background:color-mix(in srgb, var(--c-accent) 4%, var(--c-surface))}
@@ -220,6 +224,9 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .chip.dev{background:var(--c-accent-weak);color:var(--c-accent)}
 .chip.tst{background:var(--c-positive-weak);color:var(--c-positive)}
 .chip.wait{background:var(--c-warning-weak);color:var(--c-warning)}
+/* 抽屉抬头的「v1 暂未开放」：与状态 chip 同一行、更淡一档。
+   不用警告色——这不是异常状态，是这一版的范围说明。 */
+.chip.v1{background:var(--c-surface-2);color:var(--c-text-4)}
 .dbody{overflow:auto}
 .dsec{padding:16px 24px;border-bottom:1px solid var(--c-line)}
 .dsec h3{margin:0 0 12px;font:600 var(--t-caption) var(--f-sans);letter-spacing:.06em;color:var(--c-text-3)}

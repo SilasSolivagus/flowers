@@ -97,12 +97,19 @@ describe('提示词：正文与坐标分开写', () => {
     expect(verify).toContain(PRODUCT_BODY_EXAMPLE);
   });
 
-  it('图的提示词也提一句（节点文案是产品语言，坐标进脚注）', () => {
-    const p = flowPrompt(req, 'evaluate');
-    expect(p).toContain('产品语言');
-    expect(p).toContain(REFERENCE_TITLE);
+  it('图的提示词也提一句（节点文案是产品语言）；评估那一路不承诺「研发参考」', () => {
+    const evaluate = flowPrompt(req, 'evaluate');
+    expect(evaluate).toContain('产品语言');
+    /**
+     * v1（2026-11-10）：评估**不读代码**，它的材料里没有「研发参考」这一节
+     * （`composeEvaluation` 只剥坐标、不搬进脚注）。提示词里留着那句承诺，模型就会
+     * 写出没处安放的坐标，读者还会去找一个不存在的脚注。评审 / 走查读代码，照旧。
+     */
+    expect(evaluate).not.toContain(REFERENCE_TITLE);
+    expect(evaluate).not.toContain('代码索引');
+    expect(flowPrompt(req, 'review')).toContain(REFERENCE_TITLE);
     // 图里只有 12 个字的节点文案，塞不下正例：那条提示词只要一句禁令。
-    expect(p).not.toContain(PRODUCT_BODY_ANTI_EXAMPLE);
+    expect(evaluate).not.toContain(PRODUCT_BODY_ANTI_EXAMPLE);
   });
 });
 

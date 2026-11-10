@@ -12,6 +12,10 @@ import { makeTrace, type Trace } from './attempts.js';
 import { typeLabel } from '../requirements/type.js';
 import { renderFlowchart, type FlowCheck } from './flow.js';
 import { isStage, type Stage } from './packs.js';
+import { evaluateReadsCode } from './features.js';
+import {
+  openCount, openRows, readOpen, sanitizeOpen, type OpenQuestions,
+} from './annotations.js';
 import { EMPTY_SURFACES, PRODUCT_BODY_RULE } from '../locate/copy.js';
 import type { KnownSurface, KnownSurfaces } from '../locate/copy.js';
 import {
@@ -103,6 +107,24 @@ const MIN_EDGES = 2;
 /** 阶段 → 材料名。与 `packs.ts` 的 `noun` 同口径，但这里是给模型看的。 */
 const NOUN: Record<Stage, string> = { evaluate: '评估材料', review: '评审材料', inspect: '走查材料' };
 
+/**
+ * 评估（v1）用的正文规矩：把「研发参考」「代码坐标」「代码没读到」那几句摘掉。
+ *
+ * 为什么必须摘：那几句是给**读过代码**的材料写的（评审 / 走查），它们承诺「坐标由系统
+ * 放进材料末尾的研发参考」、并允许「代码没读到 / 没找到」这类说法。评估这条路既不搬
+ * 坐标、也没有「研发参考」小节（见 `composeEvaluation` 里 `relocateHtmlBody` 的注释），
+ * 留着它们等于告诉模型「你可以谈代码」——而 v1 的材料里任何一句「代码里如何」都是编的。
+ *
+ * 为什么用过滤而不是另抄一份：抄一份就有两份正文规矩，改一处忘一处时两边开始漂，
+ * 而这类漂移在材料里看不出来（只是某一句规矩某天不见了）。过滤的代价是**成对的行**
+ * 要一起摘：「代码坐标是证据」那句下面跟着「你不要在正文里写，写了会被机器删掉」，
+ * 只摘前一句会留下一个没有主语的半句。所以第三条判据是那半句的开头。
+ */
+const EVALUATE_BODY_RULE: readonly string[] = PRODUCT_BODY_RULE.filter((line) => !(
+  /研发参考|代码坐标|代码没读到/.test(line)
+  || line.trimStart().startsWith('你不要在正文里写')
+));
+
 /** 阶段 → 这份材料要回答的问题。写进提示词，模型才知道该往哪儿使劲。 */
 const FOCUS: Record<Stage, string> = {
   evaluate: '讨论可行性——「这一步到底有没有页面、这么走通不通」',
@@ -156,6 +178,25 @@ export async function loadKnown(deps: ComposeDeps): Promise<KnownSurfaces> {
   } catch {
     return EMPTY_SURFACES;
   }
+}
+
+/**
+ * 评估这一版要不要拿「现有页面清单」。
+ *
+ * 单独一格是为了**可测**：`composeEvaluation` 要走真库 + 真模型，而「v1 不读代码」这条
+ * 承诺的判据就是「`loadSurfaces` 这一次到底有没有被调用」。把判据放在这里，一条用例
+ * 就能钉住它（把 `readsCode` 的短路删掉，用例变红），不必跑一整次生成。
+ *
+ * 默认值是**开还是关由 flag 决定**（`FEATURE_EVALUATE_READS_CODE`，默认关）；
+ * 关的时候连读口都不碰——不是「读了但不用」：读口背后是一次镜像 ssh + 索引装配，
+ * 而 v1 的材料里不会出现它读到的任何一个字。
+ */
+export async function knownForEvaluate(
+  deps: ComposeDeps,
+  readsCode: boolean = evaluateReadsCode(),
+): Promise<KnownSurfaces> {
+  if (!readsCode) return EMPTY_SURFACES;
+  return loadKnown(deps);
 }
 
 // ─── 入参与出参 ──────────────────────────────────────────────────────────────
@@ -437,8 +478,15 @@ export function flowPrompt(
     ' 5. 节点文案用中文，一行不超过 12 个汉字；要换行就用 <br>。',
     ' 6. 禁止：subgraph、style、classDef、click、%% 注释、emoji、括号里套引号、',
     '    任何解释性文字（不要「以下是流程图」这类开场白）。',
-    ' 6b. 节点文案是**产品语言**：写用户在做什么（「选择要分享的文件」），不要写文件路径、',
-    '    函数名或行号——读者是 PM，代码坐标由系统放进材料末尾的「研发参考」，不写进图里。',
+    // 6b 两版：评估**不读代码**（v1），所以不许承诺「坐标由系统放进研发参考」——
+    // 那份材料里根本没有那一节，写出来的坐标也没有一处是核对过的。评审 / 走查读代码，
+    // 那句话照旧（它们的材料末尾真有「研发参考」小节）。
+    stage === 'evaluate'
+      ? ' 6b. 节点文案是**产品语言**：写用户在做什么（「选择要分享的文件」），不要写文件路径、'
+        + '函数名或行号——读者是 PM，这些坐标对判断没有任何帮助（评估不读代码，图里写出来的'
+        + '坐标没有一处是核对过的）。'
+      : ' 6b. 节点文案是**产品语言**：写用户在做什么（「选择要分享的文件」），不要写文件路径、'
+        + '函数名或行号——读者是 PM，代码坐标由系统放进材料末尾的「研发参考」，不写进图里。',
     ' 7. 不要 ``` 代码围栏。第一行就是 flowchart TD，最后一行是最后一条连线——唯一例外是',
     '    下面那条「已删去：…」（它写在最后，只写一行）。',
     '',
@@ -563,6 +611,15 @@ export type PageFragment = {
    * `kind=page` 的节点即使给了 steps 也会被忽略（它有页面，页面就是它的原型）。
    */
   steps?: SeqStep[];
+  /**
+   * 右栏的两栏标注（2026-11-10，v1 的承诺里那两栏）。
+   *
+   * 与 `anno` 分开而不是塞进 `anno` 的第三格：`anno` 的第三格已经被缺口等级
+   * （`p0/p1/p2`）占了，而两组问题**不是**一种标注——它们各有责任人与各自该问的东西
+   * （见 `annotations.ts` 文件头）。拼装时由 `openRows` 铺回 `anno`，所以契约里
+   * 看不到这个字段。
+   */
+  open?: OpenQuestions;
 };
 
 export type FragmentDoc = { nodes: PageFragment[] };
@@ -611,7 +668,7 @@ export function fragmentsPrompt(
     '流程图已经定稿，节点清单（id / 形态 / 文案）：',
     list,
     ...fragmentsSurfacesBlock(known),
-    ...PRODUCT_BODY_RULE,
+    ...(stage === 'evaluate' ? EVALUATE_BODY_RULE : PRODUCT_BODY_RULE),
     ...SEQUENCE_RULE,
     '',
     '页面节点（kind=page）请交一份页面片段，规则如下（来自 flow-walkthrough 的 page-guide，逐条会被机器校验）：',
@@ -641,7 +698,10 @@ export function fragmentsPrompt(
       + '<span class=\\"wt-sb-icons\\"></span></div><div class=\\"wt-nav\\">'
       + '<span class=\\"wt-nav-title\\">寄养</span></div><div class=\\"wt-body\\">'
       + '<div class=\\"wt-card\\">…</div></div></div>",',
-    '      "anno": [["内容", "按距离列出可寄养门店"], ["操作", "点「立即预约」后判断是否首次预约"]] },',
+    '      "anno": [["内容", "按距离列出可寄养门店"], ["操作", "点「立即预约」后判断是否首次预约"]],',
+    '      "open": {',
+    '        "req": [["失败怎么办", "门店列表加载失败时停在这一屏还是退回上一屏，是否保留已选门店"]],',
+    '        "dev": [["状态", "这一屏有加载中、空列表、失败三种态，各显示什么"]] } },',
     '    { "id": "B", "kind": "system", "title": "门店接单后台",',
     '      "steps": [',
     '        { "from": "服务端", "to": "运营后台", "what": "把订单推给门店" },',
@@ -662,9 +722,17 @@ export function fragmentsPrompt(
     ' 1. id 必须与清单一一对应，一个不多一个不少；kind 与清单里的形态一致。',
     ' 2. kind=page 必须给 frame 与 html（html 是完整可渲染的一屏，不是描述），不要给 steps；',
     `    kind=system / decision **不要**给 html，必须给 steps（1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）。`,
-    ' 3. anno 是右栏标注：每项 ["小标题", "正文"]，小标题 2–6 个字，正文一句话；',
+    ' 3. anno 是右栏的**事实标注**：每项 ["小标题", "正文"]，小标题 2–6 个字，正文一句话；',
     '    要指页面位置时写成「[A] 顶部状态卡片」，编号只写在标注里、不画进页面。',
-    '    每页 1–3 条，只写设计约束、判定依据、边界与风险，不要重复页面里已有的文案。',
+    '    每页 1–3 条，只写这一屏有什么、判定依据是什么，不要重复页面里已有的文案。',
+    ' 3b. open 是右栏的**两组待确认问题**，一格都不能合并（责任人不同）：',
+    '    · "req"（待需求方确认）= PRD / 六问没写清的产品问题：失败怎么办、这次不做什么、',
+    '      验收口径、边界条件；这一类只有提需求的人能回答。',
+    '    · "dev"（待研发确认）= 实现层面要研发回答的问题：这一页有哪些状态、跳去哪里、',
+    '      失败怎么提示；这一类只有做的人能回答。',
+    '    两条铁律：**只问不答**（你不知道答案，就别写成结论）；**每个节点至少一条**',
+    '    （放在哪一组都行；某一组确实没有问题就给空数组 []，不要为凑数编一条）。',
+    '    每项同样 ["小标题", "正文"]，正文一句话，写清「问的是什么、答了会影响什么」。',
     ' 4. title 用清单里的节点文案，不要改写。全部中文。',
     ' 5. 只输出 JSON 本身：第一个字符是 {，最后一个字符是 }。',
   ].join('\n');
@@ -699,11 +767,12 @@ export function fragmentsRepairPrompt(
     '节点清单（id / 形态 / 文案，一个都不能少）：',
     nodes.map((node) => `  ${node.id}  [${KIND_NOUN[kindOf(node)]}]  ${node.label}`).join('\n'),
     ...fragmentsSurfacesBlock(known),
-    ...PRODUCT_BODY_RULE,
+    ...(stage === 'evaluate' ? EVALUATE_BODY_RULE : PRODUCT_BODY_RULE),
     ...SEQUENCE_RULE,
     '',
     '重发**完整**的 JSON，形状不变：',
-    '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]],"steps":[{"from","to","what"}]}]}',
+    '{"nodes":[{"id","kind","frame","title","html","anno":[["小标题","正文"]],'
+      + '"open":{"req":[["小标题","正文"]],"dev":[]},"steps":[{"from","to","what"}]}]}',
     'kind=page 给 frame 与 html；kind=system / decision 不给 html，给 steps（谁 → 谁 · 做什么，'
       + `1–${MAX_STEPS} 步，每步 ≤${MAX_WHAT_CHARS} 字）。`,
     'html 只用 wt-* 组件类、只写 body 内片段、不用 emoji；一个状态一份片段；',
@@ -729,6 +798,13 @@ const FragmentSchema = z.object({
    * 模型会拿到 `steps.0.from：Required` 这种它读不懂的话。
    */
   steps: z.unknown().optional(),
+  /**
+   * 右栏的两组待确认问题（2026-11-10）。与 `steps` 同一个理由不定形状：
+   * `annotations.readOpen` 收得下两种组名别名、对象写法和单条字符串，而它的兜底是
+   * 「交空」而不是报错——一条 `open.req: Expected array, received object` 对模型
+   * 没有任何指向性，白烧一次 420 秒的调用。
+   */
+  open: z.unknown().optional(),
 });
 
 export const FragmentsSchema = z.object({ nodes: z.array(FragmentSchema).min(1) });
@@ -755,6 +831,15 @@ function toAnno(pairs: string[][]): Anno[] {
 export function readFragments(
   text: string,
   ids: string[],
+  /**
+   * 要不要强制「右栏两组待确认」至少有一条（2026-11-10）。
+   *
+   * 只有**评估**这一路要：v1 承诺的是「三栏材料」，右栏那两栏就是承诺本身。
+   * 评审 / 走查不走这一条——它们的右栏是问题清单 / 差异清单（`review.ts` / `inspect.ts`
+   * 会把模型交的标注整片换掉），在这里要求两组待确认等于让它们交一份会被丢掉的东西。
+   * 默认 `false`：这个函数有多个调用方，默认值必须是最不改变别人行为的那一个。
+   */
+  opts: { requireOpen?: boolean } = {},
 ): { ok: true; doc: FragmentDoc } | { ok: false; why: string } {
   // 截断要在解析之前认：截断的 JSON 会让 extractJson 退到内层对象，报成「缺字段」。
   if (answerTruncated(text)) return { ok: false, why: noJsonReason(text) };
@@ -809,6 +894,7 @@ export function readFragments(
       frame: node.frame,
       html: node.kind === 'page' ? html : '',
       anno: toAnno(node.anno),
+      open: readOpen(node.open),
       ...(steps.length > 0 ? { steps } : {}),
     });
   }
@@ -817,6 +903,30 @@ export function readFragments(
   if (missing.length > 0) return { ok: false, why: `这些节点没有页面片段：${missing.join('、')}` };
   const extra = [...seen].filter((id) => !ids.includes(id));
   if (extra.length > 0) return { ok: false, why: `多出了图里不存在的节点：${extra.join('、')}` };
+
+  /**
+   * 右栏两栏标注（2026-11-10）：**整份至少要有一条**，否则这条 v1 承诺就没兑现。
+   *
+   * 为什么判「整份」而不是「每个节点」：这一层手里有节点清单，能说清是哪个节点缺；
+   * 但一份材料里十几个节点，任何一屏都可能真的一个问题都没有（比如那一屏只是展示
+   * 一句话）。判到每个节点，一次漏写就整份退回、重烧两分钟，而读者看到的东西一个
+   * 字不会变好。判整份是一个更硬的界：一份材料连一条待确认都没有，它就不是
+   * 「三栏材料」，只是一张图。
+   *
+   * 这句话必须说清「补什么」而不是「格式不对」：`open` 是这版新增的字段，模型第一次
+   * 很容易整个漏掉。
+   */
+  const asked = nodes.reduce((sum, node) => sum + openCount(node.open), 0);
+  if (opts.requireOpen === true && asked === 0) {
+    return {
+      ok: false,
+      why: '右栏的两组待确认一条都没有 —— 每个节点至少要在 open 里给一条：'
+        + 'req（待需求方确认：失败怎么办、这次不做什么、验收口径、边界条件）或 '
+        + 'dev（待研发确认：这一页有哪些状态、跳去哪里、失败怎么提示）；'
+        + '某一组确实没有问题就给空数组 []',
+    };
+  }
+
 
   return { ok: true, doc: { nodes } };
 }
@@ -898,12 +1008,25 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
     const result = sanitizeAnno(fragment.anno);
     const anno = result.rows.map((row): Anno =>
       (row.length >= 3 ? [row[0]!, row[1]!, row[2]!] : [row[0]!, row[1]!]));
-    return { fragment, anno, result };
+    /**
+     * 两组待确认也过同一道网（2026-11-10）。它们**不是** `anno` 的一部分，但在右栏里
+     * 是同一列文字，读者分不出哪一句归哪条规矩——所以规矩只能有一条：技术词照拦。
+     * 清洗之后再 `openRows` 铺行：组标题是我们写的固定文案，不参与清洗（见 `sanitizeOpen`）。
+     */
+    const open = sanitizeOpen(fragment.open);
+    return { fragment, anno, open: open.rows, result, openResult: open };
   });
   const moved = cleaned.flatMap((item) => item.result.moved);
-  const annoRaw = cleaned.reduce((sum, item) => sum + item.result.raw, 0);
-  const annoLeft = cleaned.reduce((sum, item) => sum + item.result.left, 0);
-  const nodes0: PageFragment[] = cleaned.map((item) => ({ ...item.fragment, anno: item.anno }));
+  const annoRaw = cleaned.reduce((sum, item) => sum + item.result.raw + item.openResult.raw, 0);
+  const annoLeft = cleaned.reduce((sum, item) => sum + item.result.left + item.openResult.left, 0);
+  /**
+   * 右栏最终的行序：先这一屏的事实标注（它说什么），再两组待确认（还差什么决定）。
+   * 顺序不能反过来：问题挂在「这一屏有什么」之后才读得懂问的是哪一屏的哪件事。
+   */
+  const nodes0: PageFragment[] = cleaned.map((item) => ({
+    ...item.fragment,
+    anno: [...item.anno, ...openRows(item.open)],
+  }));
 
   const pageOf = new Map<string, string>();
   const pages: PageInput[] = [];
@@ -1294,7 +1417,7 @@ export async function buildPages(
     }
     spent = addUsage(spent, reply.usage);
 
-    const read = readFragments(reply.text, ids);
+    const read = readFragments(reply.text, ids, { requireOpen: stage === 'evaluate' });
     let passed: { assembly: Assembly; warnings: string[] } | null = null;
     if (!read.ok) {
       why = read.why;
@@ -1380,8 +1503,15 @@ export async function composeEvaluation(
   /**
    * 现有页面清单（任务 4）：只在这里读一次，图与页面片段两段共用同一份。
    * 读失败 → 空数组 → 提示词里整段不写（见 `loadKnown` 与 `surfacesBlock`）。
+   *
+   * v1（2026-11-10）：**评估默认不读代码索引**（`FEATURE_EVALUATE_READS_CODE` 默认关）。
+   * 理由不是性能，是诚实：那份清单说的是「代码里现在有哪些页面、每页有什么组件」，
+   * 而 v1 的评估材料只承诺「按需求描述推出来的流程」。把清单掺进来，材料里就会出现
+   * 「现有页面：/pages/share/index」这种**没人核对过的断言**——索引可能旧了一周，
+   * 而读者会把它当现状。清单为空时 `surfacesBlock` 整段不写，于是提示词里
+   * 一个字都不提「代码里现在怎么做的」，v1 的承诺因此成立。
    */
-  const known = await loadKnown(full);
+  const known = await knownForEvaluate(full);
 
   const flow = await buildFlow(cfg, req, stage, full, usage, trace, known);
   usage = flow.usage;

@@ -8,6 +8,7 @@ import { formatMonthDay } from '../../src/core/read/board';
 import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
+import { V1_CLOSED_MARK, refsForV1, reviewMaterialsEnabled } from '../../src/core/uemaster/features';
 import { GenerateButton } from './GenerateButton';
 import { AttachForm } from './AttachForm';
 import { ClaimButton } from './ClaimButton';
@@ -131,6 +132,65 @@ export function RefRow({
   );
 }
 
+/**
+ * 抬头第一行的状态 chip + 「v1 暂未开放」那一格。
+ *
+ * 为什么单独一格：整张抽屉带 `next/link` + server action，脱离 App Router 渲染不出来，
+ * 而「哪些状态标了这一行」是 v1 必须被钉住的一件事（标错一行，读者就会以为收集里的
+ * 那条也不能用）。判据在这一格里，用例渲染这一格就能证明。
+ *
+ * `inbox` 之外的状态都标：v1 只承诺「进收集 → 点评估 → 出三栏材料」这一条链，
+ * 排期 / 开发 / 测试 / 上线 / 时钟推进都保留着，但不是 v1 承诺——所以标一行让人先看见
+ * 「这一版没开放」，而不是去查为什么点不动（owner 裁决：全部照常显示，每条标一行）。
+ */
+export function StateChips({ state, stateLabel }: { state: string; stateLabel: string }) {
+  return (
+    <>
+      <span className="chip">{stateLabel}</span>
+      {state !== 'inbox' && <span className="chip v1">{V1_CLOSED_MARK}</span>}
+    </>
+  );
+}
+
+/**
+ * 参考段的行清单。
+ *
+ * 为什么单独一格：v1（2026-11-10）把评审 / 走查的入口关了（`FEATURE_REVIEW_MATERIALS`
+ * 默认关），判据在 `features.refsForV1`。整张抽屉带着 `next/link`，在用例进程里渲染不出来，
+ * 而「关掉之后那两行还在不在」是这一版必须被钉住的一件事（死按钮 / 400/500 都从这里漏）。
+ * 所以判据那一层单独导出，用例渲染这一格就能证明屏幕上真的没有了。
+ *
+ * 关掉时**整行不渲染**（不是置灰）：置灰的按钮仍然在说「这里有个能做的事」，还得再配一句
+ * 悬停说明；而「v1 暂未开放」这句话已经给了非收集状态的需求，同一句话在两处各说一遍，
+ * 读者会当成两件事。历史产物（`uemaster_artifacts` 里的行、磁盘上的 HTML）一个都不删——
+ * 它们只是暂时没有入口，直接访问 `/uemaster/PAN-N/review.html` 仍然打得开。
+ */
+export function RefList({
+  refs, id, number, generator, canEdit, reviewMaterials = reviewMaterialsEnabled(),
+}: {
+  refs: DetailRef[];
+  id: string;
+  number: number;
+  generator: GeneratorView;
+  canEdit: boolean;
+  reviewMaterials?: boolean;
+}) {
+  return (
+    <>
+      {refsForV1(refs, reviewMaterials).map((item) => (
+        <RefRow
+          key={item.stage}
+          item={item}
+          id={id}
+          number={number}
+          generator={generator}
+          canEdit={canEdit}
+        />
+      ))}
+    </>
+  );
+}
+
 function ReviewRow({ review }: { review: DetailReview }) {
   return (
     <div className="row3">
@@ -185,7 +245,7 @@ export function Drawer({
           </div>
           <h2>{detail.title}</h2>
           <div className="row">
-            <span className="chip">{detail.stateLabel}</span>
+            <StateChips state={detail.state} stateLabel={detail.stateLabel} />
             {info.owner !== null && <span className="chip">{info.owner}</span>}
             {commit.release !== null && <span className="chip">{commit.release.name}</span>}
             <span className="chip">停了 {detail.days} 天</span>
@@ -311,19 +371,20 @@ export function Drawer({
           {/* ③ 参考：三行固定槽位，三行都渲染（P2 Task 4 起）。
               有产物那一行是链接 + 日期，没有产物那一行是「生成」——P2.6 起材料由
               服务端自己跑生成器产出，所以「还没生成」是一个入口，不是空槽位。
-              三行形状相同，读的人不用记哪一行特殊。 */}
+              三行形状相同，读的人不用记哪一行特殊。
+
+              v1（2026-11-10）起这一段的**行数由 flag 决定**：评审 / 走查两行整行不渲染
+              （理由见 `RefList`），所以 v1 的抽屉里这一段只有「评估材料」一行——从收集
+              卡片点进来，一次点击就是那个「生成」。 */}
           <section className="dsec">
             <h3>参考</h3>
-            {refs.map((item) => (
-              <RefRow
-                key={item.stage}
-                item={item}
-                id={detail.id}
-                number={detail.number}
-                generator={generator}
-                canEdit={detail.permissions.edit}
-              />
-            ))}
+            <RefList
+              refs={refs}
+              id={detail.id}
+              number={detail.number}
+              generator={generator}
+              canEdit={detail.permissions.edit}
+            />
           </section>
 
           {/* ④ 评审：还没派单（评审前）就没有这一段 */}

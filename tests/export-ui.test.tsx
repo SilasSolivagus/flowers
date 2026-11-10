@@ -59,6 +59,9 @@ function card(number: number): BoardCard {
     missingDates: [],
     mine: false,
     claimable: false,
+    // v1（2026-11-10）：非「收集」的卡要标「v1 暂未开放」。这一组用例看的是列头，
+    // 卡片上那一行不参与判断；给 `true` 是因为这里造的是「待排期」那一列的卡。
+    v1Closed: true,
   };
 }
 

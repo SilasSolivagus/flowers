@@ -528,18 +528,42 @@ export function sequenceSvg(steps: readonly SeqStep[]): string {
 }
 
 /**
+ * 时序图是**推**出来的——这句话必须印在每一张没页面的图上（2026-11-10，v1 硬约束 1）。
+ *
+ * 为什么非要印：v1 的评估**不读代码**。这张图的参与方与步骤全部来自需求描述（六问 +
+ * PRD）的推断，而它长得和真时序图一模一样。不标的时候，读的人会把它当成「代码里就是
+ * 这么走的」——那就是拿一张推出来的图去评审。标了之后，它仍然有用（讨论可行性时
+ * 「这几步谁做什么」正是要问的），但没有人会把它当现状。
+ */
+export const SEQ_INFERENCE_LABEL = '逻辑时序（推演）';
+
+/**
+ * 标签下面那句话：一句话说清「谁推的、谁该回答」。
+ *
+ * 措辞不合并进标签（`逻辑时序（推演）`），因为两者说的是两件事：标签说的是**这张图的
+ * 性质**（推的），这句话说的是**它的边界**（推得对不对得研发答）。
+ */
+export const SEQ_INFERENCE_NOTE = '参与者与步骤按需求描述推的；代码里怎么实现，需要研发确认';
+
+/**
  * 步骤 → 一段可以直接塞进 `pages[]` 的 HTML 片段（时序图 + 一行说明）。
  *
  * 这一行说明不是装饰：
  * 1. 它把参与方**用文字**列一遍——图被省略号截断时，读者至少知道谁在场；
  * 2. 它是这份材料的可引用句（评审记录里抄的就是这一行）；
  * 3. 图的第一行标题在 `.stage` 里被裁掉时，它还在。
+ *
+ * 2026-11-10 起多两行：`逻辑时序（推演）` 的标签与那句边界说明（见上面两个常量）。
+ * 复用 `.seq-cap` 这个已有的类，不新造样式：vendored 模板不归我们改版式，而
+ * `build.py` 只把片段原样塞进中栏——一个没有样式的 `div` 会在深色模式下变成黑底黑字。
  */
 export function renderSequencePage(steps: readonly SeqStep[], title: string): string {
   const layout = layoutSequence(steps);
   const caption = `${title} · 后端流程 ${steps.length} 步：${layout.actors.join('、')}`;
-  return `<figure class="seq-figure" data-seq-steps="${steps.length}">`
+  return `<figure class="seq-figure" data-seq-steps="${steps.length}" data-seq-inferred="1">`
+    + `<div class="seq-cap seq-inferred">${esc(SEQ_INFERENCE_LABEL)}</div>`
     + `<figcaption class="seq-cap">${esc(caption)}</figcaption>`
     + sequenceSvg(steps)
+    + `<div class="seq-cap seq-inferred-note">${esc(SEQ_INFERENCE_NOTE)}</div>`
     + '</figure>';
 }

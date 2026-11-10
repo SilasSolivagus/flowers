@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { BoardCard } from '../../src/core/read/board';
+import { V1_CLOSED_MARK } from '../../src/core/uemaster/features';
 import { ClaimButton } from './ClaimButton';
 
 /**
@@ -44,6 +45,10 @@ export function Card({ card, query = '' }: { card: BoardCard; query?: string }) 
     <Link className={card.mine ? 'card mine' : 'card'} href={href} data-id={card.id}>
       <span className="t">{card.title}</span>
       <div className={card.late ? 'w neg' : 'w'}>{card.waiting}</div>
+      {/* v1 只承诺「收集」那一条链（进收集 → 点评估 → 出三栏材料）。别的状态照常显示、
+          照常能点开，但必须让人先看见「这一版没开放」，否则他会以为功能坏了去查。
+          文案只在 `features.ts` 一处（`V1_CLOSED_MARK`），抽屉里写的是同一句。 */}
+      {card.v1Closed && <div className="v1">{V1_CLOSED_MARK}</div>}
       <div className="m">
         <span className="k">{requirementKey(card.number)}</span>
         {card.claimable

@@ -426,7 +426,9 @@ describe('composeEvaluation → build.py 的产物', () => {
     const fake = fakeProvider([SMALL_FLOW, JSON.stringify({
       nodes: [
         { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A,
-          anno: [['内容', '按距离列出可寄养门店']] },
+          anno: [['内容', '按距离列出可寄养门店']],
+          // v1（2026-11-10）：评估材料必须给右栏两组待确认，否则整份退回（requireOpen）。
+          open: { req: [['验收口径', '这一步算做完的标准是什么']], dev: [['状态', '这一屏有几种状态']] } },
         { id: 'B', kind: 'decision', title: '是否签约？',
         steps: [
           { from: '页面', to: '服务端', what: '提交当前签约状态' },
@@ -522,7 +524,8 @@ describe('composeEvaluation → build.py 的产物', () => {
   it('片段里没有 wt- 类 → 带这句中文重问一次，第二次合规就过', async () => {
     const bad = JSON.stringify({
       nodes: [
-        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: '<div class="card">门店列表</div>', anno: [] },
+        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: '<div class="card">门店列表</div>', anno: [],
+          open: { req: [['边界', '最多几条']] } },
         { id: 'B', kind: 'decision', title: '是否签约？',
         steps: [
           { from: '页面', to: '服务端', what: '提交当前签约状态' },
@@ -534,7 +537,8 @@ describe('composeEvaluation → build.py 的产物', () => {
     });
     const good = JSON.stringify({
       nodes: [
-        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [] },
+        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [],
+          open: { req: [['边界', '最多几条']] } },
         { id: 'B', kind: 'decision', title: '是否签约？',
         steps: [
           { from: '页面', to: '服务端', what: '提交当前签约状态' },
@@ -558,7 +562,8 @@ describe('composeEvaluation → build.py 的产物', () => {
   it('落库与推进照旧：evaluate 材料 → 需求进待设计，且只 attach 一次', async () => {
     const fake = fakeProvider([SMALL_FLOW, JSON.stringify({
       nodes: [
-        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [] },
+        { id: 'A', kind: 'page', frame: 'phone', title: '进入寄养频道', html: PHONE_A, anno: [],
+          open: { req: [['边界', '最多几条']] } },
         { id: 'B', kind: 'decision', title: '是否签约？',
         steps: [
           { from: '页面', to: '服务端', what: '提交当前签约状态' },
