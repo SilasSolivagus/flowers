@@ -714,3 +714,225 @@ update requirements r set state = 'design', state_entered_at = now()
    （它只是取包）；会不会有人绕过界面对别人的需求跑一次生成，这一版不回答。
 4. **版本号不是事务里算的**：它读库 + 读盘，然后写文件。唯一挡住并发的是「同一需求同一
    阶段只有一条 running 作业」这条库约束；若将来支持并行生成，这一处要挪进事务。
+
+---
+
+# 十七、owner 点出来的五件事（2026-11-10 第五遍：一个 bug、一条统一、一处文案、两处缺失）
+
+> 起点 `0b8bd25`（`v1.0.0`）。五条都是 owner 自己点出来的：一条是**同一个部署里同一把
+> key 两条路两个答案**，一条是他要的统一口径，一条是叫法不一致，另外两条是**普通人根本
+> 没有入口**。五次提交按风险排序，先修坏掉的那个。
+>
+> 五条都在 `main` 上，五个 commit：
+> `3fdecf1`（凭据）· `8b0d774`（初始密码）· `9a6547a`（口令→密码）· `1ec9a60`（企微绑定）
+> · `6b8eb76`（深色流程图）。
+
+## 一、生成器报「凭证缺失」：harness 改用库里那把 key
+
+**坏在哪。** 设置 · 成员 顶部「生成器」一行按「测试」回来的是
+
+```
+失败：dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official";
+store DEEPSEEK_API_KEY through the credentials service (the web Models page writes it),
+or export DEEPSEEK_API_KEY in the launching environment
+```
+
+而同一个部署的 `app_settings` 里存着 `provider.apiKey` / `provider.baseUrl` /
+`provider.model`（`https://api.deepseek.com/v1` · `deepseek-flash`），评估流水线一直在用它。
+**同一台机器、同一把 key，一条路说可用、另一条路说缺凭据**——那是我们的接线漏了，不是
+owner 的配置漏了。`candidates.ts` 里那句「失败照登原文」是对的（那句话本身有价值），错的是
+我们从来没把 key 交给 CLI。
+
+**走的是哪条凭据路（这一节要回答的那个问题）。** 选的是 **`DEEPSEEK_API_KEY` 环境变量**
+——dsh 文档写明的两个合法来源之一（「export `DEEPSEEK_API_KEY` in the launching
+environment」），而我们 `spawn` 它的那个进程**就是**它的 launching environment：`runRaw` 的
+`spawn(..., { env: childEnv(credential) })`。所以从 `app_settings` 读出的 key 按候选表
+约定的变量名（`CREDENTIAL_ENV`，目前只有 `dsh → DEEPSEEK_API_KEY` 这一条是查过文档 + 实测的）
+塞进子进程环境，用户不必在 shell 里 `export` 任何东西。
+
+两条**没选**的路，各自有理由：
+
+| 没选的方案 | 为什么不行 |
+|---|---|
+| 写 dsh 的凭据存储（`~/.dsh/llm-deepseek/*.json`、`dsh` 的 credentials service） | 那是另一个应用的私有状态（文件格式未公开、由它自己的 HMR/写入路径管）。我们去写它 = 把一个 bug 修成两个应用共享一个不归我们管的格式 |
+| 干脆走直连模型路（= 忽略 CLI 那条路） | ① `resolveStrategy` 在有 provider 三格时**已经**走直连，所以「生成」本来就不缺凭据，缺的只是设置页那一格「这条 CLI 能不能用」；② 换掉它等于让「生成器」这个下拉变成摆设（owner 明说了要 harness 这条路能用） |
+
+**边界三条**（不补的地方比补的地方更重要）：
+
+1. 不认的命令不补（`claude` / `codex` / `ollama` / 自建）：它们不吃这个变量（本机实测 claude
+   与 codex 都是「装了、登录了、仍然 401」），塞进去只会让人以为配好了。
+2. 没有 key 时不补、也**不覆盖**父进程环境：shell 里本来有 `DEEPSEEK_API_KEY` 就照旧用它。
+3. **不转发 `provider.baseUrl`**：dsh 的 `DEEPSEEK_BASE_URL` 要 Messages 兼容根
+   （`https://api.deepseek.com/anthropic`），而我们那三格是 OpenAI 兼容根（`/v1`）——
+   转发等于把能用的默认地址改成一个不兼容的地址。
+
+`app/actions.ts` 的「测试 / 测试并使用」用 `credentialForTest()`（`resolveProviderConfig(actor)`，
+与真生成同一个解析函数）；worker 的 CLI 那条路也接上同一条凭据——这样「撤掉三格之后生成
+突然开始要 shell 环境」这种同一把 key 两种答案的坑不会再出现。
+
+**现场证据（真 dsh + 真库里那把 key，各跑一次）：**
+
+```
+不补凭据 -> {"ok":false,"error":"dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route \"deepseek-official\"; ..."}
+补凭据   -> 通过 202B 9206ms file
+```
+
+**用例**：`tests/generator-credential.test.ts` 7 条。核心那条用一个**只认
+`DEEPSEEK_API_KEY`** 的假 `dsh`（真 `spawn` + `shell` + `env`）：带凭据它交 HTML、不带它说
+`MISSING_CREDENTIAL`。把 `spawn` 的 `env:` 摘掉，「通过」那条立刻红（mutation 真跑过）。
+
+## 二、初始密码统一为团队约定的那一条（迁移 0037）
+
+**坏在哪。** 初始密码是**每人一条随机串**、由种子在终端打印一次：超管要把 `kXm3fQ…` 念给
+新人，念错一个字符就进不去，而谁都拿不回明文（库里只有 scrypt 串）。
+
+**改了什么。** 三处口径**同一个常量**（`src/core/auth/password.ts` 的
+`DEFAULT_MEMBER_PASSWORD`），没有第二份字面量：
+
+| 位置 | 做什么 |
+|---|---|
+| `createMember` | 不传密码时的默认值；仍然走 `assertPassword` 同一道长度校验（默认值不是绕过校验的后门） |
+| 迁移 `0037_member_initial_password.sql` | 存量成员一次性落到这条上。scrypt 不在 SQL 里，所以哈希是写迁移时**预先算好**写进去的（参数+盐+派生键都在串里）。`session_epoch` 一起往前推——改密码 = 旧票作废 |
+| `scripts/seed.ts` | 重灌之后的七个人也用同一条；**明文不再打印**（它已经是团队共识的那条，再往终端写一遍只是多留一份在 shell 历史里） |
+
+**多少人被改**：`members` 7 行全部落到同一个哈希（`password_updated_at` 全部落章），
+跑前跑后 `requirements` 活行 **814 → 814**（没有 reseed）。
+
+**为什么所有行共用一个盐是可接受的**：盐防的是「一次预计算打穿所有人」，而这批账号共用的
+是一条**已知的**初始密码——预计算对它毫无意义；真正的防线是「登录之后自己改」，所以界面
+在**建之前**就写清「新成员会拿到哪一条」，建完之后再回显一次，两处都带「我的 → 密码」这个
+改法。**重置密码仍然随机**：重置是给忘了密码的人换一条新的，不该换回人人皆知的那条。
+
+**明文不进日志**：迁移文件里只有派生键，种子不再打印，这份报告里也只有「团队约定的那一条」
+这个说法。
+
+**用例**：`tests/member-password-default.test.ts` 9 条（默认值能登进去、显式值覆盖默认值、
+太短的仍被拒、重置仍然随机、迁移文件里的哈希验得过明文且**不含明文**、七个人都能用那一条
+登进来、种子读同一个常量）。两条 mutation 真跑过：把迁移里的哈希改坏一个字符 → 红；把默认
+值改回 `generatePassword()` → 红。
+
+## 三、「口令」→「密码」
+
+**坏在哪。** 设置页写着「改密码」，成员行却写着「重置口令」——读的人会以为那是两件事
+（界面上曾经真的是两套动作）。
+
+**改了什么。** `app/` 与 `src/` **整目录**，一处都不剩：**69 处 / 15 个文件**（`口令` →
+`密码`，`重置口令` → `重置密码`），测试里镜像 UI 的 **22 处**一起改。守卫是
+`tests/password-copy.test.ts`：遍历这两个目录，抓到这两个字就红——文案是「漏一个就够刺眼」
+的东西，判据就该是「一个都不剩」，而不是几条断言。
+
+两处**刻意不动**：
+
+- `src/db/seeds/prd-url-backfill.json`：那是**需求内容**（一条 PRD 标题里就写着「走生成口令
+  的逻辑」），不是界面文案；改它等于改材料内容。
+- 标识符与列名（`oldPassword` / `newPassword` / `passwordHash` / `PasswordRow` /
+  `resetPassword` / `password_hash`）：改名要动数据库列、会话票据与所有调用方。用例里专门有
+  一条钉住「它们没跟着改」。
+
+`tests/brief-backfill.test.ts` 里那句「0028 那条裁定的口令」是**比喻**（不是 password），
+保持原样。
+
+## 四、成员怎么绑自己的企微 ID / 机器人：补一条带引导的路
+
+**原来有什么（照实写）。**
+
+- `members.wecom_userid` 与 `wecom_lookup_at` 两列，`resolveUserid` 的「名字 → userid」解析
+  （缓存优先、成功与失败都落时刻）；
+- 设置 · 我的 里一行「还没对上企微账号」+ 一个「查一下」按钮（`lookupWecomAccount`）；
+- 企微推送的一整条链（`wecom-cli message aibot send`、`notify_deliveries` 的三态与唯一索引、
+  每人每轮 5 条上限、绑定自检）；
+- **没有**的：本人自己绑的入口（「企微账号」是一个**算出来的值**，只有超管能推动它）、
+  「用自己的机器人」这件事本身（连列都没有）。
+
+**加了什么。**
+
+1. **绑定企微**（状态 pill：已绑定 / 未绑定 / 验证失败）
+   - 两句**用途**说明（私聊通知；没绑定也能用，只是收不到推送）+ 怎么拿到自己的 userid
+     （企业微信 → 我 → 资料页，工号那一栏；或让管理员在企微后台「通讯录」里查）；
+   - 输入框 +「验证」：验证是**真去通讯录查一次**（`lookupUseridExact`，同一个 `wecom-cli`、
+     同一套 `searchArgv` / `parseResponse` / 失败码，**逐字相等**才算命中——不猜）；
+   - 失败文案是服务层原文：「企微通讯录里没有 userid 为「x」的人。核对工号/英文名（企业微信
+     → 我 → 资料页），或让管理员在企微后台「通讯录」里确认这个账号」；
+   - 「按名字查」= 复用**已有的那条路**（`lookupWecomAccount` / 那个「查一下」），只是把结果
+     填进输入框等人确认——不是第二套匹配逻辑；
+   - 失败**不落 userid，只落 `wecom_lookup_at`**：界面因此显示「验证失败」而不是「未绑定」，
+     两者的下一步不一样（一个去改账号，一个去绑）。空串 = 解绑，两列一起清。
+2. **用自己的机器人**（可选）：webhook 输入框 +「测试」（真的发一条、**不带任何需求内容**）
+   +「保存」/「清除」；判据窄（https + 主机 `qyapi.weixin.qq.com` + 路径
+   `/cgi-bin/webhook/send` + key 非空——这一列会被服务器 `POST` 出去，允许任意 URL 等于给成员
+   开一个内网探测的口子）；**只回显末 4 位**（`maskWebhook`，与模型 key 的 `keyTail` 同一条
+   规矩）；设了之后 `dispatch` 直接 POST 到他这条、**不再解析 userid**（两路都发 = 同一件事
+   响两次），自检也不再把他报成「没绑账号」（没有 userid 不影响他收到东西），但仍查「最近几条
+   发不出去」。
+3. **数据**：迁移 `0038` 加 `members.wecom_webhook`（幂等）。绑定状态**不存**，由
+   `bindingStateOf(wecom_userid, wecom_lookup_at)` 算出来——同一件事不要两个来源。
+
+**用例**：30 条（`tests/wecom-binding.test.ts` 21 条服务层 + `tests/wecom-binding-ui.test.tsx`
+9 条界面渲染）。三条 mutation 逐条真跑过：跳过真实验证 → 失败那条红；掩码改成回整串 → 两条红；
+dispatch 不看 webhook → POST 那条红。
+
+## 五、深色模式下流程图看不见
+
+**坏在哪。** 两个原因叠在一起：
+
+1. SVG 的 `stroke` / `fill` 是**写死的浅色 hex**（`_theme/default.style.json` 在排版时插进去
+   的：`#CCD3DB`、`#F8F9FA`…），而画布底色跟着主题翻成 `#141416`；
+2. 模板切主题的 JS **无条件**把 `#flow-svg-light` 藏起来、显示 `#flow-svg-dark`——而这一版
+   walkmap 没有深色 SVG（没有 `svg_dark`）：浅色那份被藏起来、深色那份不存在 = **一片空白**。
+
+**现在颜色怎么接。** 一份 SVG，颜色全部写成 `var(--fw-<键>)`：
+
+- 生成时（`src/core/uemaster/flow.ts`）：读 `_theme/default.style.json`，把每个**颜色值**换成
+  `var(--fw-<键>)`（`stroke_process` → `--fw-stroke-process`，下划线换连字符，与 `render_svg`
+  里的 `st[...]` 一眼对得上），再作为 `--style` 传给排版器；非颜色键（`font_family` / `fs_*`）
+  原样保留（`--style` 会整个替换默认主题，只传颜色会让字体悄悄退回引擎内置那个）。读不到主题
+  文件就不传 `--style`，并在 `warnings` 里留一句——降级不静默。
+- 模板（`vendor/uemaster/flow-walkthrough/templates/walkthrough.html`）：`--fw-*` 两套值。
+  浅色逐条等于 `default.style.json`（**修 bug 不顺手改浅色样子**），深色逐条来自
+  `_theme/dark.style.json`。覆盖：节点框（process）、判断菱形、后端节点、边（含箭头 marker）、
+  边标签、选中环、缺口/评审标记。
+- 切主题 JS：本地改动一律**只加不改**（这个模板要与上游逐字节一致，`tests/walkmap.test.ts`
+  会剥掉本地补丁再比一次），所以用一段**追加的覆盖**包一层：只有真存在深色那份时才切显隐，
+  否则永远显示那一张（它自己会跟着变量换色）。
+- `build.py` 的图例：原来按 hex 认标记色（`#c0392b` 那几个），而成品 SVG 从来不是那几个 hex
+  （是主题里的 `#B4232B`）——**图例其实一直没出来过**。现在按**变量名**认
+  （`--fw-stroke-p0` …），小方块也用 `var(...)` 画、跟着主题换色；hex 留作老产物的兜底。
+
+**验证方式**（不开浏览器，owner 自己点）：`tests/dark-flow-svg.test.ts` 7 条。真排一张带菱形 /
+后端节点 / 边标签 / 缺口标记的图，断言 `fill`、`stroke` 里**一个 hex 都没有**；断言每个被用到的
+`--fw-*` 在 `:root` 与 `[data-theme="dark"]` 里**都有值且两值不同**（这条直接对应「切过去看不见」
+这个症状）；再真跑一份 walkmap → `build.py` → 单文件 HTML，断言产物内联了两套变量、图例出现且
+方块走变量。三条 mutation 真跑过（颜色不转变量 → 5 条红；两套主题写成同色 → 2 条红；覆盖块里
+删掉「只有一份时保持可见」→ 1 条红）。
+
+**存量产物不动**：它们是当时评审依据过的字节。重新生成一次即得到走变量的那张。
+
+## 六、计数与状态
+
+- `npx vitest run`：**101 个文件全绿，1925 条（1922 passed + 3 skipped）**。本轮新增
+  **56 条 / 6 个文件**：凭据 7、初始密码 9、文案守卫 3、企微绑定 21、企微绑定界面 9、
+  深色流程图 7。
+- `npx tsc --noEmit` 干净；`npm run build` 通过（7 条路由，与前几轮一致）。
+- `requirements` 活行 **814 → 814**（没有 reseed；只跑了迁移 0037 / 0038）。
+- `members` **7 行**全部落到统一初始密码；`wecom_webhook` 列空（没有人设过）。
+- 五条都**没有**动 v1 的范围、状态门、三栏结构与材料内容规则：改的是凭据接线、数据默认值、
+  用户可见的叫法、两处缺失的入口、以及 SVG 的取色方式。
+
+## 七、这一轮留下的坑（照实写）
+
+1. **只有 dsh 这一条 CLI 认我们的 key**。`claude` / `codex` 走的是它们自己的登录态，provider
+   的 key 帮不上——所以「配了 key 就能让任何 CLI 通过测试」这件事仍然不成立。`CREDENTIAL_ENV`
+   是那张表唯一的位置，将来要加一条就在那里加（别在调用处再写一遍变量名）。
+2. **不转发 `baseUrl` 是有代价的**：如果哪天 owner 把 `provider.baseUrl` 换成一个
+   Messages 兼容的网关，dsh 那条路仍然会打官方地址。那时要补的是「按协议判一次再决定转发」，
+   而不是无条件转发。
+3. **统一初始密码降低了单人强度**：它是内网 + 小团队的取舍，靠「登录后可自己改」兜底。界面上
+   写了改的入口，但**没有任何东西强制改**（第一次登录不弹「请改密码」）。这是刻意的：加那道
+   门会挡住在演示里点来点去的人，而 owner 要的正是「进去看」。
+4. **webhook 的 key 是明文存的**（`members.wecom_webhook`）。它是「能往群里发消息」的凭证，
+   与 `provider.apiKey` 一样只有服务端读、只回显末 4 位；但库被拿走就等于群被打开——这一版
+   没有做加密存储（那要引入密钥管理，超出这一轮）。
+5. **存量材料仍然是 hex 取色的那张图**：深色下的修复只对**新生成**的产物成立。已生成的那 26
+   行要做一次重新生成才会变好看，而「重新生成」会新增一版产物——所以没替 owner 做。
+6. **企微绑定的验证依赖 `wecom-cli`**：没装 / 没授权的机器上，「验证」给出的是一句
+   `wecom-cli` 的话（原样），而不是「你先把 CLI 装上」的引导。那条引导现在只在推送自检的事件里。
