@@ -74,28 +74,19 @@ import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import { recordEvent } from '../src/core/events.js';
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
+import { PLATFORM_MAP, STATE_MAP, legacyDiff, type LegacyWanted } from '../src/core/migrate/flower-legacy.js';
 import {
   normalizePlatforms, platformLabel, PLATFORM_UNSET, type PlatformKey,
 } from '../src/core/requirements/platforms.js';
 import { normalizePriority, priorityLabel } from '../src/core/requirements/priority.js';
 
 // ─── 映射表（口径本身） ─────────────────────────────────────────────────────
+// 2026-11-10：映射表与 `legacyDiff` 搬到 `src/core/migrate/flower-legacy.ts`。
+// 原因很实际——它们要能被用例 import，而这个文件是**脚本**：顶层就跑 ssh 取数、
+// 连库、打印报告。用例 import 它 = 每次跑测试都连一次生产 Flower。搬走之后
+// 这里只剩「解析 → 打印 → 写库」，口径本身在一个可以安静 import 的模块里。
+export { PLATFORM_MAP, STATE_MAP } from '../src/core/migrate/flower-legacy.js';
 
-export const STATE_MAP: Readonly<Record<string, State>> = {
-  collect: 'inbox',
-  // owner 裁决：待评估都是收集。
-  to_evaluate: 'inbox',
-  to_design: 'design',
-  designing: 'design',
-  // owner 裁决：已评估都改为待设计。
-  evaluated: 'design',
-  to_develop: 'ready',
-  developing: 'dev',
-  testing: 'test',
-  launched: 'live',
-  rejected: 'rejected',
-  shelved: 'shelved',
-};
 
 /**
  * Flower 平台**标签** → 我们的键。
@@ -107,27 +98,6 @@ export const STATE_MAP: Readonly<Record<string, State>> = {
  * `管理端` / `企业管理后台` = 管理后台；`manager` 与 `Manager后台` 同一个端；
  * `支付宝` 是一个投放渠道，端是移动端。`站内信` 是通知渠道不是端，不映射。
  */
-export const PLATFORM_MAP: Readonly<Record<string, PlatformKey>> = {
-  'Web端': 'web',
-  '移动端': 'mobile',
-  'PC客户端': 'pc',
-  '小程序': 'mini',
-  '后端': 'backend',
-  '管理后台': 'admin',
-  'Manager后台': 'manager',
-  '前端': 'frontend',
-  'H5': 'h5',
-  '开放平台': 'open',
-  '鸿蒙': 'harmony',
-  'TV端': 'tv',
-  'H5-分享页': 'h5',
-  'h5端': 'h5',
-  'pc端': 'pc',
-  '管理端': 'admin',
-  '企业管理后台': 'admin',
-  manager: 'manager',
-  '支付宝': 'mobile',
-};
 
 /** `line` → 我们的 `type`。没有 line 时按 feature 落（NOT NULL 列，没有「未定」）。 */
 const TYPE_MAP: Readonly<Record<string, 'feature' | 'commercial'>> = {
@@ -722,10 +692,92 @@ async function apply(rows: FlowerRow[]): Promise<void> {
   process.stdout.write(`\n写入 ${inserted} 条，跳过（已搬过）${skipped} 条。\n`);
 }
 
+// ─── 增量刷新（切换日前的「最后一次对齐」） ─────────────────────────────────
+
+
+type RefreshRow = {
+  id: string; legacy_ref: string; title: string; state: string;
+  priority: string | null; platforms: string[];
+};
+
+/**
+ * 把「搬过、但 Flower 那边后来又改过」的行对齐过来。
+ *
+ * 切换日真正会咬人的不是新需求（`--apply` 的 legacy_ref 幂等已经覆盖），而是
+ * **在 Flower 只读之前被改过的那些**：标题改了、状态推了一步、优先级换了。它们
+ * 已经在库里，`--apply` 会跳过，于是切换后看板上显示的是几小时前的状态。
+ *
+ * 只碰 `legacy_ref is not null` 的行：原生需求（在 flowers 里建的）没有 Flower 那一侧，
+ * 一行都不该被这个脚本改。默认只打印差异，`--apply` 才写；写的时候状态变了要连
+ * `state_entered_at` 一起对齐（否则看板上「停了多少天」从切换那一刻重新算）。
+ */
+async function refresh(rows: FlowerRow[], write: boolean): Promise<void> {
+  const people = await membersByName();
+  const current = await db.execute<RefreshRow>(sql`
+    select id, legacy_ref, title, state, priority, platforms
+      from requirements
+     where legacy_ref is not null`);
+  const byRef = new Map(current.rows.map((row) => [row.legacy_ref, row]));
+
+  let changedRows = 0;
+  const counts: Record<string, number> = { title: 0, state: 0, priority: 0, platforms: 0 };
+  const lines: string[] = [];
+
+  for (const row of rows) {
+    const found = byRef.get(row.id);
+    if (!found) continue; // 还没搬过的行归 --apply 管，这里不重复
+    const plan = planRow(row);
+    if (plan.state === null) continue;
+
+    const wanted: LegacyWanted = {
+      title: row.title, state: plan.state, priority: plan.priority, platforms: plan.platforms,
+    };
+    const diff = legacyDiff(found, wanted);
+    if (diff.length === 0) continue;
+
+    changedRows += 1;
+    for (const field of diff) counts[field] = (counts[field] ?? 0) + 1;
+    lines.push(`Flower #${row.number} ${row.title}：${diff.join(' / ')}`);
+
+    if (!write) continue;
+    const ownerId = row.owner_name === null ? null : people.get(row.owner_name) ?? null;
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        update requirements
+           set title = ${wanted.title},
+               state = ${wanted.state},
+               priority = ${wanted.priority},
+               platforms = ${sql.param(normalizePlatforms(wanted.platforms))}::text[],
+               owner_member_id = ${ownerId},
+               state_entered_at = case when state = ${wanted.state} then state_entered_at
+                                       else ${row.state_changed_at}::timestamptz end
+         where id = ${found.id}`);
+      await recordEvent(tx, {
+        requirementId: found.id,
+        actor: 'migrate-flower',
+        type: 'requirement.migrated',
+        payload: { mode: 'refresh', sourceId: row.id, sourceState: row.state_key, changed: diff },
+      });
+    });
+  }
+
+  process.stdout.write(
+    `\n${write ? '刷新' : '待刷新（dry-run）'}：${changedRows} 条`
+    + `（标题 ${counts.title ?? 0} / 状态 ${counts.state ?? 0} / 优先级 ${counts.priority ?? 0} / 平台 ${counts.platforms ?? 0}）\n`,
+  );
+  for (const line of lines.slice(0, 50)) process.stdout.write(`  ${line}\n`);
+  if (lines.length > 50) process.stdout.write(`  …… 还有 ${lines.length - 50} 条\n`);
+  if (!write && changedRows > 0) {
+    process.stdout.write('  要写回去：加 --apply（与 --refresh 一起用）。\n');
+  }
+}
+
 // ─── 入口 ────────────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2);
 const applyFlag = argv.includes('--apply');
+/** 增量刷新：把「搬过但 Flower 后来又改过」的行对齐（切换日前的最后一次对账）。 */
+const refreshFlag = argv.includes('--refresh');
 const baselineIndex = argv.indexOf('--baseline');
 const verifyIndex = argv.indexOf('--verify');
 const baselinePath = baselineIndex >= 0 ? argv[baselineIndex + 1] : undefined;
@@ -753,7 +805,10 @@ if (verifyIndex >= 0) {
 
   if (applyFlag) {
     await apply(rows);
-  } else {
+  }
+  if (refreshFlag) {
+    await refresh(rows, applyFlag);
+  } else if (!applyFlag) {
     process.stdout.write('\n--dry-run：只打印映射，没有写库。要真写请加 --apply。\n');
   }
 

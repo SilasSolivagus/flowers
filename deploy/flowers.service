@@ -1,0 +1,46 @@
+# flowers · 需求门禁（生产）
+#
+# 装在 47.115.229.192（ssh 别名 dogyun，Ubuntu 24.04）：
+#   sudo cp deploy/flowers.service /etc/systemd/system/flowers.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now flowers
+#
+# 为什么是宿主机进程，不是容器：
+# 1. `wecom-cli` 的授权是**交互扫码**得来的，凭据在 /root/.config/wecom（root 私有）。
+#    放进容器要多挂一个目录 + 每次换授权都要重建镜像，而这个部署只有一台机。
+# 2. 生成器调的是宿主机上的 agent CLI（claude / codex…），它自己的凭据也在宿主机上。
+# 3. edge-nginx 只需要一个能连到的上游地址，容器化换不来什么。
+#
+# 端口 3010：Flower 老栈仍占着 127.0.0.1:3000 直到下线，两个不相干。
+[Unit]
+Description=flowers · 需求门禁
+Documentation=file:///opt/flowers/docs/deploy/cutover.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/flowers
+EnvironmentFile=/opt/flowers/.env.production
+# next start 直接跑，不经过 npm：npm 会多一层进程，systemd 停服务时信号要转两手。
+ExecStart=/usr/bin/node /opt/flowers/node_modules/next/dist/bin/next start -p 3010 -H 0.0.0.0
+Restart=always
+RestartSec=3
+# 生成材料是 detached 子进程（scripts/gen-worker.ts），给它留出收尾时间。
+KillSignal=SIGTERM
+TimeoutStopSec=25
+# 日志走 journald：journalctl -u flowers -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flowers
+
+# 只需要写数据目录与 /tmp（生成器用 mkdtemp）。
+ReadWritePaths=/var/lib/flowers /tmp
+ProtectSystem=full
+ProtectHome=false
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
