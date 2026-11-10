@@ -68,8 +68,17 @@ const GIVE_UP_MS = 11 * 60 * 1000;
 
 export function GenerateButton({
   requirementId, stage, state, generation, generator, present, fresh, versions, needsDescription,
+  missing = [],
 }: {
   requirementId: string;
+  /**
+   * 立项要用的那三问里缺哪几条（2026-11-11）。
+   *
+   * 非空 = 这一格画的不是「生成」而是「先去补」：按钮照样叫「生成」，点下去进编辑表单，
+   * 表单里那三格标着必填。owner 的原话是「不要直接写字，点按钮缺东西就弹编辑页」——
+   * 所以理由只剩 `title`（悬停可读），屏幕上不再有一块红字。
+   */
+  missing?: readonly string[];
   stage: string;
   /**
    * 这条需求现在在哪个状态（2026-11-10 的 v1 阶段门要它）。
@@ -404,15 +413,32 @@ export function GenerateButton({
    * `?edit=1` 后面）。
    * 为什么不禁用之后什么都不说：一个灰掉的按钮等于「这里有个能做的事，但我不告诉你为什么」。
    */
+  /**
+   * 缺的只是「六问」且还停在收集：**按钮可点，点进编辑表单**（2026-11-11）。
+   *
+   * 两个条件缺一不可：
+   * - `missing` 非空——说明拦的是六问门，补完就能生成；
+   * - `state === 'inbox'`——六问能在原地补的只有这一格（阶段门那条不是缺东西，
+   *   补完也生成不了，所以它照旧走下面「禁用 + 理由」那一支）。
+   */
+  if (needsDescription !== null && missing.length > 0 && state === 'inbox') {
+    return (
+      <span className="gen-off">
+        <Link
+          className="btn gen"
+          href={`/?open=${requirementId}&edit=1`}
+          title={needsDescription}
+        >
+          {outcome !== null ? '重试' : '生成'}
+        </Link>
+      </span>
+    );
+  }
+
   if (needsDescription !== null) {
     return (
       <span className="gen-off">
         <span className="gerr" title={needsDescription}>{needsDescription}</span>
-        {/* 「去补」只在收集阶段出现（见 `state` 的注释）：那才是六问能原地补的那个阶段。
-            阶段门的唯一出路（在收集里新建一条）写在理由那句话里，这一行不再重复。 */}
-        {state === 'inbox' && (
-          <Link className="gen-link" href={`/?open=${requirementId}&edit=1`}>去补</Link>
-        )}
         <button className="btn gen" type="button" disabled title={needsDescription}>
           {outcome !== null ? '重试' : '生成'}
         </button>

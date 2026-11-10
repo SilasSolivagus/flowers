@@ -367,6 +367,11 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .sheet .f{display:flex;gap:8px;padding:12px 20px;border-top:1px solid var(--c-line);justify-content:flex-end}
 .fld{margin-bottom:12px}
 .fld label{display:block;font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);margin-bottom:4px}
+/* 「必填」标记（2026-11-11）：只挂在立项要用的那三问上，且只在编辑表单里出现。
+   与标签同一行、比标签更弱一档的底色，不抢标题的注意力；文字用负向色是因为
+   「没填就过不去」这件事属于阻塞类，不是提示类。 */
+.fld label .reqmark{margin-left:8px;padding:0 4px;border-radius:var(--r-xs);
+  background:var(--c-negative-weak);color:var(--c-negative);font:400 var(--t-caption) var(--f-sans)}
 .fld input,.fld select{width:100%;height:var(--h-control);border:1px solid var(--c-line-strong);border-radius:var(--r-xs);padding:0 12px;font:400 var(--t-body-s) var(--f-sans);background:var(--c-surface);color:var(--c-text-1)}
 .fld .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 

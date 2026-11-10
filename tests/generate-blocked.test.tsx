@@ -81,28 +81,30 @@ describe('在跑那一格：停止', () => {
   });
 });
 
-describe('六问没填那一格：禁用 + 理由 + 出路', () => {
-  it('按钮禁用、理由是那句原话、旁边有进编辑的链接', () => {
-    const html = render({ needsDescription: LOCK });
-    expect(html).toContain(LOCK);
-    expect(html).toContain('去补');
-    // 禁用是**真的**禁用（属性在按钮上），不是只靠 CSS 变灰。
-    expect(html).toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
+describe('六问没填那一格：按钮可点，点进编辑表单（2026-11-11 改）', () => {
+  const MISSING = ['context', 'problem', 'outcome'] as const;
+
+  it('不再摆红字：理由只在 title 里，屏幕上只有一个「生成」入口', () => {
+    const html = render({ needsDescription: LOCK, missing: MISSING });
+    // 「不要直接写字」：那句锁因不再作为可见文本出现。
+    expect(html).not.toContain(`>${LOCK}<`);
+    // 但它没有消失——悬停在按钮上仍然读得到为什么。
     expect(html).toContain('title="' + LOCK.replace(/"/g, '&quot;') + '"');
   });
 
-  it('不拦着「交回材料」那条路：这一格只画自己（按钮禁用不等于整行消失）', () => {
-    const html = render({ needsDescription: LOCK });
-    // 阶段名 / 产物链接那些由旁边那一格负责；这里只该有理由 + 按钮，没有一句废话。
-    expect(html).not.toContain('生成失败');
-    expect(html).toContain('gen-off');
+  it('按钮是**链接**不是禁用的按钮：点下去就是编辑表单（?edit=1）', () => {
+    const html = render({ needsDescription: LOCK, missing: MISSING });
+    expect(html).toContain('href="/?open=11111111-1111-4111-8111-111111111111&amp;edit=1"');
+    expect(html).not.toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
+    expect(html).toContain('生成');
   });
 
-  it('三问齐（null）→ 照旧一个能按的「生成」，没有任何提示', () => {
-    const html = render({ needsDescription: null });
+  it('三问齐（missing 为空）→ 照旧一个能按的「生成」，没有提示', () => {
+    const html = render({ needsDescription: null, missing: [] });
     expect(html).not.toContain('还差');
     expect(html).toContain('生成');
-    expect(html).not.toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
+    // 这一支是 `<button>`（真提交），不是链接。
+    expect(html).toMatch(/<button[^>]*class="btn gen"/);
   });
 });
 
@@ -116,18 +118,21 @@ describe('六问没填那一格：禁用 + 理由 + 出路', () => {
 const STAGE_LOCK = 'v1 只在收集阶段生成评估材料。这条需求现在在「待设计」'
   + '——想用这个能力，请把描述补在收集里新建一条，或先把它退回收集。';
 
-describe('阶段门那一格：禁用 + 理由 + 不给「去补」', () => {
+describe('阶段门那一格：禁用 + 理由（补完也生成不了，所以不给编辑入口）', () => {
   it('按钮禁用、理由是那句原话、**没有**进编辑的链接', () => {
-    const html = render({ state: 'design', needsDescription: STAGE_LOCK });
+    const html = render({ state: 'design', needsDescription: STAGE_LOCK, missing: [] });
     expect(html).toContain(STAGE_LOCK);
     expect(html).toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
     expect(html).not.toContain('去补');
     expect(html).not.toContain('edit=1');
   });
 
-  it('收集里的六问门照旧给「去补」（两道门共用一个格子，出路各自对）', () => {
-    const html = render({ state: 'inbox', needsDescription: LOCK });
-    expect(html).toContain('去补');
+  it('阶段门优先：即使六问也缺，待设计里点「生成」仍然是被拦住的（不骗人去补）', () => {
+    const html = render({
+      state: 'design', needsDescription: STAGE_LOCK, missing: ['context', 'problem', 'outcome'],
+    });
+    expect(html).toContain(STAGE_LOCK);
+    expect(html).not.toContain('edit=1');
   });
 
   it('在跑的行优先：阶段变了也不会把「停止」换成一句理由', () => {

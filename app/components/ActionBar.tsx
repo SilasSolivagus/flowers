@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useActionState, useEffect, useState } from 'react';
 import type { DetailAction } from '../../src/core/read/detail';
 import { runAction } from '../actions';
@@ -98,8 +99,19 @@ function readForm(form: HTMLFormElement | null): Record<string, string> {
 }
 
 export function ActionBar({
-  id, actions, releases,
-}: { id: string; actions: DetailAction[]; releases: ReleaseOption[] }) {
+  id, actions, releases, missing = [],
+}: {
+  id: string;
+  actions: DetailAction[];
+  releases: ReleaseOption[];
+  /**
+   * 立项要用的那三问缺哪几条（2026-11-11）。
+   *
+   * 非空时「立项」不再是一个提交按钮，而是一个**进编辑表单的入口**——表单里那三格
+   * 标着必填。owner 的原话：「不要直接写字，点按钮缺东西就弹编辑页并显示必填」。
+   */
+  missing?: readonly string[];
+}) {
   const [state, formAction, pending] = useActionState(submit, IDLE);
   const [open, setOpen] = useState<DetailAction | null>(null);
   /** 最近一次提交的是哪个动作，以及它提交出去的字段值。 */
@@ -132,7 +144,17 @@ export function ActionBar({
         {message !== null && <div className="dfail" role="alert">{message}</div>}
         <div className="db">
           {actions.map((action) => (
-            FIELDS[action].length === 0 ? (
+            // 立项缺三问：按钮留着、名字不变，但点下去是「去补」而不是一次注定被拒的提交。
+            action === 'approve' && missing.length > 0 ? (
+              <Link
+                className="btn"
+                key={action}
+                href={`/?open=${id}&edit=1`}
+                title={`还差三条没填：${missing.length} 条。补完才能立项`}
+              >
+                {LABEL[action]}
+              </Link>
+            ) : FIELDS[action].length === 0 ? (
               // 无字段的动作：点下去就是一次表单提交（不是按钮上挂事件）
               <form
                 className="act"

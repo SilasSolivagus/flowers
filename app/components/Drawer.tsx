@@ -7,6 +7,8 @@ import type { State } from '../../src/core/state-machine';
 import type { Member } from '../../src/core/read/member';
 import { formatMonthDay } from '../../src/core/read/board';
 import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
+import { ScrollTop } from './ScrollTop';
+import { missingRequired } from '../../src/core/requirements/brief';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
 import { V1_CLOSED_MARK, refsForV1, reviewMaterialsEnabled } from '../../src/core/uemaster/features';
@@ -64,7 +66,7 @@ export const LOST_HISTORY_NOTE = '更早的版本内容已被覆盖，无法恢�
  * 起不来。判据在这一格里，用例就渲染这一格。
  */
 export function RefRow({
-  item, id, number, state, generator, canEdit,
+  item, id, number, state, generator, canEdit, missing = [],
 }: {
   item: DetailRef;
   id: string;
@@ -81,6 +83,8 @@ export function RefRow({
    * 这两个按钮都不出现——不是禁用：一个灰掉的按钮仍然在说「这里有个能做的事」。
    */
   canEdit: boolean;
+  /** 立项要用的三问缺哪几条（2026-11-11）：缺了就把「生成」画成进编辑表单的入口。 */
+  missing?: readonly string[];
 }) {
   // 有产物：链接 + 那天的日期。没有产物：阶段名 + 「生成」。
   // 两条分支都不带一句解释——行上的东西就是全部说明（见文件头的第 3 条口径）。
@@ -170,6 +174,7 @@ export function RefRow({
               fresh={item.freshness === 'fresh'}
               versions={item.versions}
               needsDescription={item.needsDescription}
+              missing={missing}
             />
             <AttachForm id={id} number={number} stage={item.stage} />
           </>
@@ -213,7 +218,7 @@ export function StateChips({ state, stateLabel }: { state: string; stateLabel: s
  * 它们只是暂时没有入口，直接访问 `/uemaster/PAN-N/review.html` 仍然打得开。
  */
 export function RefList({
-  refs, id, number, state, generator, canEdit, reviewMaterials = reviewMaterialsEnabled(),
+  refs, id, number, state, generator, canEdit, missing = [], reviewMaterials = reviewMaterialsEnabled(),
 }: {
   refs: DetailRef[];
   id: string;
@@ -222,6 +227,8 @@ export function RefList({
   state: State;
   generator: GeneratorView;
   canEdit: boolean;
+  /** 立项要用的三问缺哪几条（2026-11-11）：缺了就把「生成」画成去编辑的入口。 */
+  missing?: readonly string[];
   reviewMaterials?: boolean;
 }) {
   return (
@@ -235,6 +242,7 @@ export function RefList({
           state={state}
           generator={generator}
           canEdit={canEdit}
+          missing={missing}
         />
       ))}
     </>
@@ -274,6 +282,15 @@ export function Drawer({
   closeHref?: string;
 }) {
   const { info, commit, review, description } = detail;
+  /**
+   * 立项/生成要用的那三问缺哪几条（2026-11-11）。
+   *
+   * 判据来自 `brief.ts` 的 `missingRequired`——与状态机 `guard: 'brief'`、与
+   * `startGeneration` 的拒绝理由是**同一个函数**。这里只拿它决定「按钮是提交还是先去编辑」，
+   * 不再自己拼一句「还差什么」摆在那儿：那句话原本是屏幕上一块红字，用户的话是
+   * 「不要直接写字，点按钮缺东西就弹编辑页」。
+   */
+  const missing = missingRequired(description);
   // 三行固定槽位，全部渲染（顺序由读模型给：评估 / 评审 / 走查）。
   const refs = detail.refs;
   const scheduled = commit.release !== null || commit.testAt !== null || commit.dueAt !== null;
@@ -304,6 +321,8 @@ export function Drawer({
         </div>
 
         <div className="dbody">
+          {/* 打开就把内容滚回第一行：六问的第一格不该因为上一张抽屉的滚动位置被藏起来。 */}
+          <ScrollTop />
           {/* ① 信息 */}
           <section className="dsec">
             <h3>信息</h3>
@@ -443,6 +462,7 @@ export function Drawer({
               state={detail.state}
               generator={generator}
               canEdit={detail.permissions.edit}
+              missing={missing}
             />
           </section>
 
@@ -475,7 +495,12 @@ export function Drawer({
 
         {/* ⑥ 动作：只显示当前状态合法的那些；已拒绝这种终态没有动作，就不渲染动作条 */}
         {detail.actions.length > 0 && (
-          <ActionBar id={detail.id} actions={detail.actions} releases={releases} />
+          <ActionBar
+            id={detail.id}
+            actions={detail.actions}
+            releases={releases}
+            missing={missing}
+          />
         )}
       </aside>
     </>

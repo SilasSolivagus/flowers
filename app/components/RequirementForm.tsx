@@ -4,6 +4,7 @@ import { useActionState, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Member } from '../../src/core/read/member';
 import { DESCRIPTIVE_FIELDS, hintFor } from '../../src/core/requirements/fields';
+import { REQUIRED_BEFORE_EVALUATE } from '../../src/core/requirements/brief';
 import {
   createRequirementAction, deleteRequirementAction, splitDescriptionAction,
   updateRequirementAction,
@@ -187,6 +188,33 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
 
   const message = state.ok ? null : state.message;
 
+  /**
+   * 提交前的那道本地检查（2026-11-11）：**只在编辑表单里**。
+   *
+   * 为什么不是全局必填：新建时六问本来就允许空着（真实需求常常先建一条再补），
+   * 把新建也拦住等于逼人填「无」。但编辑表单是另一个场景——它多半是被「立项 / 生成」
+   * 那一格送过来的（那两处缺三问时会直接跳到这里），所以在这里点名三格必填、并在
+   * 提交时拦一下，才是用户要的「点按钮缺东西就弹编辑页并显示必填」。
+   *
+   * 拦的是**本地的一次无效提交**，不是第二条业务规则：判据仍然只有一处
+   * （`missingRequired`），服务端的 `guard: 'brief'` 一个字没动；这里只是让人不必
+   * 先吃一次服务端拒绝。
+   */
+  const [blocked, setBlocked] = useState<string | null>(null);
+
+  function guardSubmit(event: React.FormEvent<HTMLFormElement>): void {
+    if (mode !== 'edit') return;
+    const absent = REQUIRED_BEFORE_EVALUATE.filter((key) => (values[key] ?? '').trim() === '');
+    if (absent.length === 0) {
+      setBlocked(null);
+      return;
+    }
+    event.preventDefault();
+    const labels = absent.map((key) => DESCRIPTIVE_FIELDS.find((f) => f.key === key)!.label);
+    setBlocked(`这三条要先填：${labels.join('、')}`);
+    document.getElementById(`req-${absent[0]}`)?.focus();
+  }
+
   const close = () => router.push(closeHref);
 
   const remove = async () => {
@@ -243,7 +271,7 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
         if (event.target === event.currentTarget) close();
       }}
     >
-      <form className="box wide" action={formAction}>
+      <form className="box wide" action={formAction} onSubmit={guardSubmit}>
         {/* 编辑时服务端要知道改的是哪一条。表单里没有「可见的 id」，但**必须有**这一个
             隐藏字段：服务层的 `parseRequirementId` 读的就是 `id`，缺了它每次保存都会
             报「需求 ID 格式不正确」——一个看起来像 bug 的校验错误。 */}
@@ -256,6 +284,7 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
         </div>
 
         <div className="b">
+          {blocked !== null && <div className="dfail" role="alert">{blocked}</div>}
           <div className="fld">
             <label htmlFor="req-title">标题</label>
             <input
@@ -440,7 +469,13 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
             const hint = touched[field.key] ? hintFor(field, value, type) : null;
             return (
               <div className="fld" key={field.key}>
-                <label htmlFor={`req-${field.key}`}>{field.label}</label>
+                <label htmlFor={`req-${field.key}`}>
+                  {field.label}
+                  {/* 只在这三格上出现，且只在编辑表单里——它们是立项的门（brief.ts）。 */}
+                  {mode === 'edit' && REQUIRED_BEFORE_EVALUATE.includes(field.key as never) && (
+                    <span className="reqmark">必填</span>
+                  )}
+                </label>
                 <textarea
                   id={`req-${field.key}`}
                   name={field.key}
