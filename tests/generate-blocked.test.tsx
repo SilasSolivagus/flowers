@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { GeneratorView } from '../src/core/uemaster/candidates';
+import type { DetailRef } from '../src/core/read/detail';
 import { GenerateButton } from '../app/components/GenerateButton';
+import { RefList } from '../app/components/Drawer';
 
 /**
  * 抽屉那一格的两个新形状（2026-11-10）：
@@ -41,6 +43,7 @@ function render(overrides: Partial<Parameters<typeof GenerateButton>[0]> = {}): 
     <GenerateButton
       requirementId="11111111-1111-4111-8111-111111111111"
       stage="evaluate"
+      state="inbox"
       generation={null}
       generator={GENERATOR}
       present={false}
@@ -101,4 +104,66 @@ describe('六问没填那一格：禁用 + 理由 + 出路', () => {
     expect(html).toContain('生成');
     expect(html).not.toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
   });
+});
+
+/**
+ * v1 阶段门那一格（2026-11-10，与六问门共用同一格 `needsDescription`）。
+ *
+ * 形状一样、理由不一样，**出路**也不一样：六问能在收集里原地补（`?edit=1`），阶段不对
+ * 不能——那句话给的出路是「在收集里新建一条，或先把它退回收集」，再挂一个编辑表单的
+ * 链接就是指向一条做不成事的路。所以这一组盯的是「同一个禁用格 + 不同的出路」。
+ */
+const STAGE_LOCK = 'v1 只在收集阶段生成评估材料。这条需求现在在「待设计」'
+  + '——想用这个能力，请把描述补在收集里新建一条，或先把它退回收集。';
+
+describe('阶段门那一格：禁用 + 理由 + 不给「去补」', () => {
+  it('按钮禁用、理由是那句原话、**没有**进编辑的链接', () => {
+    const html = render({ state: 'design', needsDescription: STAGE_LOCK });
+    expect(html).toContain(STAGE_LOCK);
+    expect(html).toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
+    expect(html).not.toContain('去补');
+    expect(html).not.toContain('edit=1');
+  });
+
+  it('收集里的六问门照旧给「去补」（两道门共用一个格子，出路各自对）', () => {
+    const html = render({ state: 'inbox', needsDescription: LOCK });
+    expect(html).toContain('去补');
+  });
+
+  it('在跑的行优先：阶段变了也不会把「停止」换成一句理由', () => {
+    const html = render({
+      state: 'design',
+      needsDescription: STAGE_LOCK,
+      generation: {
+        id: 'job-1', startedAt: new Date(Date.now() - 5000).toISOString(), phase: 'pages', attempt: 1,
+      },
+    });
+    expect(html).toContain('停止');
+    expect(html).not.toContain('v1 只在收集阶段');
+  });
+});
+
+/**
+ * 整条链：读模型那一句 → 抽屉那一行 → 按钮禁用。
+ *
+ * 单独渲染 `GenerateButton` 只能证明「给了理由会禁用」；这一条证明**理由真的从读模型
+ * 走到了按钮上**（`RefList` 把 `state` 一路交给 `RefRow` → `GenerateButton`）。少了
+ * 这一格，一张待设计的需求会在抽屉里画出一个能按的「生成」，按下去才撞服务那句拒绝
+ * ——而「按钮还能点、点了才被拒」正是这一整段注释在防的观感。
+ */
+it('读模型的理由到位：RefList 在待设计上禁用「生成」，且不给「去补」', () => {
+  const parked: DetailRef = {
+    stage: 'evaluate', label: '评估材料', url: null, at: null, atLabel: null,
+    present: false, filePresent: false, freshness: 'unknown', versions: 0,
+    generation: null, needsDescription: STAGE_LOCK,
+  };
+  const html = renderToStaticMarkup(
+    <RefList
+      refs={[parked]} id="11111111-1111-4111-8111-111111111111" number={7}
+      state="design" generator={GENERATOR} canEdit reviewMaterials={false}
+    />,
+  );
+  expect(html).toContain(STAGE_LOCK);
+  expect(html).toMatch(/<button[^>]*class="btn gen"[^>]*disabled/);
+  expect(html).not.toContain('去补');
 });

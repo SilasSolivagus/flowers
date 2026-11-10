@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { DetailRef } from '../../src/core/read/detail';
+import type { State } from '../../src/core/state-machine';
 import { attemptLine, classifyFailure, type AttemptView, type Failure } from '../../src/core/uemaster/trace';
 import {
   generateAction, generationStatusAction, retryGenerationAction, stopGenerationAction,
@@ -66,10 +67,20 @@ const POLL_MS = 2000;
 const GIVE_UP_MS = 11 * 60 * 1000;
 
 export function GenerateButton({
-  requirementId, stage, generation, generator, present, fresh, versions, needsDescription,
+  requirementId, stage, state, generation, generator, present, fresh, versions, needsDescription,
 }: {
   requirementId: string;
   stage: string;
+  /**
+   * 这条需求现在在哪个状态（2026-11-10 的 v1 阶段门要它）。
+   *
+   * 只用来决定「去补」那个链接画不画，**不用来判断能不能生成**：能不能生成由
+   * `needsDescription` 一句话回答（服务端两道门合成的），这里再判一次就会有两份判据。
+   * 理由：六问没填是能在原地补的（同一个页面的 `?edit=1`），而阶段门不是——那条需求
+   * 已经过了收集，补描述要新建一条或先把它退回，给它一个编辑表单的链接就是指向一条
+   * 做不成事的路（那句话本身已经把两条出路说清了）。
+   */
+  state: State;
   /**
    * 这个阶段**正在跑**的那次作业（服务端读模型给的，`null` = 没有）。
    *
@@ -99,7 +110,8 @@ export function GenerateButton({
    */
   versions: number;
   /**
-   * 这一行现在**不能**生成的理由（六问裁定，2026-11-10）；`null` = 可以。
+   * 这一行现在**不能**生成的理由；`null` = 可以。两道门共用这一句（2026-11-10）：
+   * v1 阶段门（不在「收集」就不生成评估材料）与六问门（三问没填完）。
    *
    * 由读模型给（`DetailRef.needsDescription`），与 `startGeneration` 抛出的错误原文
    * 是同一个字符串——界面不自己拼一句「还差什么」，否则它会与服务的判断分叉。
@@ -392,7 +404,11 @@ export function GenerateButton({
     return (
       <span className="gen-off">
         <span className="gerr" title={needsDescription}>{needsDescription}</span>
-        <Link className="gen-link" href={`/?open=${requirementId}&edit=1`}>去补</Link>
+        {/* 「去补」只在收集阶段出现（见 `state` 的注释）：那才是六问能原地补的那个阶段；
+            阶段门的出路（新建一条 / 退回收集）已经写在理由那句话里了。 */}
+        {state === 'inbox' && (
+          <Link className="gen-link" href={`/?open=${requirementId}&edit=1`}>去补</Link>
+        )}
         <button className="btn gen" type="button" disabled title={needsDescription}>
           {outcome !== null ? '重试' : '生成'}
         </button>

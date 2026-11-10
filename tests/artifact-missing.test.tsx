@@ -72,7 +72,9 @@ const GENERATOR: GeneratorView = {
 
 function html(item: DetailRef, canEdit = true): string {
   return renderToStaticMarkup(
-    <RefRow item={item} id="id-1" number={7} generator={GENERATOR} canEdit={canEdit} />,
+    <RefRow
+      item={item} id="id-1" number={7} state="inbox" generator={GENERATOR} canEdit={canEdit}
+    />,
   );
 }
 

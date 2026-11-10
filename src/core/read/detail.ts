@@ -6,7 +6,7 @@ import {
   can, lineLabelOf, type Ability, type Member, type RequirementFacts,
 } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
-import { evaluateLock } from '../uemaster/gate.js';
+import { evaluateLock, evaluateStageLock } from '../uemaster/gate.js';
 import { healStaleJobs } from '../uemaster/liveness.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
@@ -145,14 +145,21 @@ export type DetailRef = {
     attempt: number;
   } | null;
   /**
-   * 这一行现在**不能**生成的理由（2026-11-10，六问裁定）；`null` = 可以生成。
+   * 这一行现在**不能**生成的理由；`null` = 可以生成。**两道门共用这一格**
+   * （2026-11-10）：v1 的阶段门（不在「收集」就不生成评估材料）与六问门（三问没填完）。
    *
    * 只有「评估材料」这一行可能非空：评审的输入是 PRD 本身，走查的输入是 PRD + 代码
-   * 镜像，两条都不以六问为前提。
+   * 镜像，两条都不以六问为前提，也没有 v1 的阶段限制（它们由 `FEATURE_REVIEW_MATERIALS`
+   * 关着，那是入口开关，不是这一格的事）。
+   *
+   * 为什么两道门只给一格、而不是各加一个字段：界面要做的事只有一件——**把按钮禁用并
+   * 写出理由**。两个字段会让界面按「哪一个非空」分叉，读者也会看到两种形状的理由；
+   * 而服务层同样只会抛一句话（一句话只能说一个问题）。判据都在 `uemaster/gate.ts` 一处，
+   * 谁先生效也在那里定（阶段门在前）。
    *
    * 为什么这一句话要从服务端来、而不是让抽屉自己数空格：它同时是 `startGeneration`
-   * 抛出的错误原文（判据在 `uemaster/gate.ts` 一处）。客户端自己拼一句，迟早会变成
-   * 「按钮还能点、点了才被拒」。所以读模型把**同一句话**发下来，界面只负责画。
+   * 抛出的错误原文。客户端自己拼一句，迟早会变成「按钮还能点、点了才被拒」。所以读模型
+   * 把**同一句话**发下来，界面只负责画。
    */
   needsDescription: string | null;
 };
@@ -568,8 +575,9 @@ async function artifactRef(
   running: RunningJob | null,
   currentHash: string,
   /**
-   * 这一行的「不能生成」理由（六问裁定，2026-11-10）。**由调用方按 stage 决定给不给**：
-   * 只有评估材料以六问为前提，评审 / 走查两行永远是 null（它们的输入不是六问）。
+   * 这一行的「不能生成」理由（2026-11-10：v1 阶段门 + 六问门，同一个形状）。
+   * **由调用方按 stage 决定给不给**：只有评估材料有这两道门，评审 / 走查两行永远是
+   * null（它们的输入不是六问，也没有评估那条阶段限制）。
    * 由调用方算一次再传下来，而不是这里再算一遍：三行共用的判断不该有三份。
    */
   needsDescription: string | null,
@@ -790,6 +798,20 @@ export async function getRequirementDetail(
     attempt: Number(job.attempt),
   }]));
 
+  /**
+   * 评估那一行为什么不能生成（2026-11-10，两道门共用一格）。
+   *
+   * 顺序就是优先级，与 `startGeneration` 里那两段的顺序**必须一致**：
+   * 1. v1 阶段门：不在「收集」就不生成（一条已经过了评估的需求，材料该是过门之前
+   *    就有的东西，见 `gate.ts` 里 `evaluateStageLock` 的理由）；
+   * 2. 六问门：三问没填完，材料只能靠编。
+   *
+   * 一句话只说一个问题：阶段不对时，先补六问没有用（补完还是不能生成），所以阶段门
+   * 在前。用 `??` 而不是 `||`：两道判据的返回值只有两种——`null`（放行）或一句非空
+   * 中文，`??` 正好只认「上一道放行」，不必给一个不存在的「空串」留后路。
+   */
+  const evaluateReason = evaluateStageLock(row.state) ?? evaluateLock(row);
+
   return {
     id: row.id,
     number: Number(row.number),
@@ -848,11 +870,11 @@ export async function getRequirementDetail(
     },
     // 三行并发 stat：一次请求只多三个 `stat(2)`，而串行写会让抽屉多等两个来回。
     //
-    // 2026-11-10「六问没填，不许生成」：理由算在**这里**、只算一次，交给评估那一行。
+    // 2026-11-10：评估那一行的理由算在**这里**、只算一次（两道门，见 `evaluateReason`）。
     // 评审 / 走查拿到的是 null——它们的输入不是六问，把同一句话挂在它们身上是错的。
     refs: await Promise.all([
       artifactRef('evaluate', '评估材料', artifacts.get('evaluate'),
-        running.get('evaluate') ?? null, currentHash, evaluateLock(row)),
+        running.get('evaluate') ?? null, currentHash, evaluateReason),
       artifactRef('review', '评审材料', artifacts.get('review'),
         running.get('review') ?? null, currentHash, null),
       artifactRef('inspect', '走查材料', artifacts.get('inspect'),

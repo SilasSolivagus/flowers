@@ -107,6 +107,7 @@ describe('抽屉那一格：跑的时候画那一行，停下来画回生成按�
       <GenerateButton
         requirementId="11111111-1111-4111-8111-111111111111"
         stage="evaluate"
+        state="inbox"
         generation={{
           id: 'job-1',
           startedAt: new Date().toISOString(),
@@ -132,6 +133,7 @@ describe('抽屉那一格：跑的时候画那一行，停下来画回生成按�
       <GenerateButton
         requirementId="11111111-1111-4111-8111-111111111111"
         stage="evaluate"
+        state="inbox"
         generation={null}
         generator={GENERATOR}
         present={false}

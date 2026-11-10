@@ -64,7 +64,10 @@ const REFS = [
 describe('参考段：评审 / 走查入口关着', () => {
   it('关着（v1 默认）：那两行整行不渲染，只剩评估材料', () => {
     const html = renderToStaticMarkup(
-      <RefList refs={REFS} id="id-1" number={7} generator={GENERATOR} canEdit reviewMaterials={false} />,
+      <RefList
+        refs={REFS} id="id-1" number={7} state="inbox" generator={GENERATOR} canEdit
+        reviewMaterials={false}
+      />,
     );
     expect(html).toContain('评估材料');
     expect(html).not.toContain('评审材料');
@@ -73,7 +76,7 @@ describe('参考段：评审 / 走查入口关着', () => {
 
   it('打开时三行都在（代码与历史产物没被删）', () => {
     const html = renderToStaticMarkup(
-      <RefList refs={REFS} id="id-1" number={7} generator={GENERATOR} canEdit reviewMaterials />,
+      <RefList refs={REFS} id="id-1" number={7} state="inbox" generator={GENERATOR} canEdit reviewMaterials />,
     );
     expect(html).toContain('评估材料');
     expect(html).toContain('评审材料');

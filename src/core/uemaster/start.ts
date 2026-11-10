@@ -7,13 +7,14 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
+import type { State } from '../state-machine.js';
 import { resolveMirrorConfig } from '../codemirror/mirror.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import type { AttemptPhase, AttemptView } from './trace.js';
 import { composeEvaluation } from './compose.js';
-import { evaluateLock } from './gate.js';
+import { evaluateLock, evaluateStageLock } from './gate.js';
 import {
   HEARTBEAT_INTERVAL_MS, healStaleJobs, stallReasonOf,
 } from './liveness.js';
@@ -197,9 +198,9 @@ export async function startGeneration(
 
   const jobId = await db.transaction(async (tx) => {
     const found = await tx.execute<{
-      id: string; prd_url: string | null;
+      id: string; prd_url: string | null; state: State;
       context: string | null; problem: string | null; outcome: string | null;
-    }>(sql`select id, prd_url, context, problem, outcome from requirements
+    }>(sql`select id, prd_url, state, context, problem, outcome from requirements
            where id = ${requirementId} and deleted_at is null for update`);
     if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
 
@@ -242,6 +243,26 @@ export async function startGeneration(
         update uemaster_jobs
            set status = 'failed', error = ${reason}, finished_at = now()
          where id = ${current.id} and status = 'running'`);
+    }
+
+    /**
+     * v1 阶段门：**评估材料只在「收集」阶段生成**（2026-11-10 owner 裁决 A）。
+     * 判据在 `gate.ts` 的 `evaluateStageLock`，这一处是**唯一的真相**：界面把同一句话
+     * 提前画在按钮旁边（按钮禁用），而一个绕过界面的 POST、以及「重试」那条路
+     * （`control.ts` 的 `retryJob` 也走这个函数）仍然撞在这里。
+     *
+     * 位置三条理由，与六问门同一套：
+     * - 放在防重之后：那个阶段已经在跑时，「正在生成中」才是这次点击的直接结果；
+     * - 放在六问门**之前**：一句话只说一个理由。一条「待设计」的需求即使六问也空着，
+     *   它现在的问题也是「阶段不对」——补完六问它还是不能生成，先说这句才有用；
+     * - 放在落作业之前：一次被拒的点击不留作业行、不甩 worker、不烧一次模型调用。
+     *
+     * 只作用于 `evaluate`：评审的输入是 PRD、走查的输入是 PRD + 代码镜像，两条的
+     * 阶段归属与评估不同（v1 里它们本来也由 `FEATURE_REVIEW_MATERIALS` 关着）。
+     */
+    if (stage === 'evaluate') {
+      const closed = evaluateStageLock(found.rows[0].state);
+      if (closed !== null) throw new AppError('stage_not_inbox', closed);
     }
 
     /**

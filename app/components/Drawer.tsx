@@ -3,6 +3,7 @@ import { SOURCE_OTHER } from '../../src/core/requirements/source';
 import Link from 'next/link';
 import type { GeneratorView } from '../../src/core/uemaster/candidates';
 import type { Detail, DetailRef, DetailReview } from '../../src/core/read/detail';
+import type { State } from '../../src/core/state-machine';
 import type { Member } from '../../src/core/read/member';
 import { formatMonthDay } from '../../src/core/read/board';
 import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
@@ -51,11 +52,16 @@ const PILL: Record<string, string> = {
  * 起不来。判据在这一格里，用例就渲染这一格。
  */
 export function RefRow({
-  item, id, number, generator, canEdit,
+  item, id, number, state, generator, canEdit,
 }: {
   item: DetailRef;
   id: string;
   number: number;
+  /**
+   * 这条需求现在在哪个状态。**只为按钮那一格的「去补」链接**（2026-11-10 的 v1 阶段门：
+   * 六问能在收集里原地补，阶段不对不能），能不能生成由 `item.needsDescription` 回答。
+   */
+  state: State;
   generator: GeneratorView;
   /**
    * 这个人能不能在这条需求上写（P4-05）。生成与交回材料都是**写**：生成会落产物与
@@ -118,6 +124,7 @@ export function RefRow({
             <GenerateButton
               requirementId={id}
               stage={item.stage}
+              state={state}
               generation={item.generation}
               generator={generator}
               present={item.present}
@@ -167,11 +174,13 @@ export function StateChips({ state, stateLabel }: { state: string; stateLabel: s
  * 它们只是暂时没有入口，直接访问 `/uemaster/PAN-N/review.html` 仍然打得开。
  */
 export function RefList({
-  refs, id, number, generator, canEdit, reviewMaterials = reviewMaterialsEnabled(),
+  refs, id, number, state, generator, canEdit, reviewMaterials = reviewMaterialsEnabled(),
 }: {
   refs: DetailRef[];
   id: string;
   number: number;
+  /** 这条需求现在在哪个状态（v1 阶段门：只有它决定「去补」画不画，见 `RefRow`）。 */
+  state: State;
   generator: GeneratorView;
   canEdit: boolean;
   reviewMaterials?: boolean;
@@ -184,6 +193,7 @@ export function RefList({
           item={item}
           id={id}
           number={number}
+          state={state}
           generator={generator}
           canEdit={canEdit}
         />
@@ -383,6 +393,7 @@ export function Drawer({
               refs={refs}
               id={detail.id}
               number={detail.number}
+              state={detail.state}
               generator={generator}
               canEdit={detail.permissions.edit}
             />

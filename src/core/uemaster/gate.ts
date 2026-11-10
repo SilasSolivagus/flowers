@@ -1,7 +1,21 @@
 import { DESCRIPTIVE_FIELDS } from '../requirements/fields.js';
+import { STATE_LABEL, type State } from '../state-machine.js';
 
 /**
- * 「六问没填，不许生成」（2026-11-10 owner 的裁定）。
+ * 评估材料**生成前的两道门**（2026-11-10 owner 的两次裁定）。
+ *
+ * 1. **v1 阶段门**（`evaluateStageLock`，本文件末尾）：评估材料只在「收集」阶段生成。
+ *    v1 承诺的那条链是「需求进收集 → 点评估 → 出三栏材料」，所以材料只能产在这条链的
+ *    起点上；一条已经过了评估的需求，它的材料应该是在过门之前就有的东西。
+ * 2. **六问门**（`evaluateLock`，本文件主体）：三问（场景 / 现状 / 成功口径）没填完，
+ *    材料只能靠编。
+ *
+ * 两道门共用一个出口形状：**一句话（不能生成的理由）或 `null`（可以生成）**。服务层
+ * （`startGeneration`）把它抛给按钮那一行，读模型（`read/detail.ts`）把它交给抽屉——
+ * 同一个字符串，界面与服务不会各说一句。谁先生效：阶段门在前（见 `detail.ts` 的
+ * `evaluateReason` 与 `start.ts` 里那一段的注释）。
+ *
+ * ── 六问门：挡的是什么
  *
  * ── 这一条挡的是什么
  *
@@ -98,4 +112,50 @@ export function lockMessage(missing: readonly RequiredKey[]): string {
 export function evaluateLock(answer: SixAnswers): string | null {
   const missing = missingRequired(answer);
   return missing.length === 0 ? null : lockMessage(missing);
+}
+
+/**
+ * v1 承诺的那个起点：**收集**。评估材料只在这个阶段生成。
+ *
+ * 写成常量而不是在判据里写 `state === 'inbox'`：这句话要能被读模型、服务层、用例
+ * 同时引用，而三处各写一个字面量，某一天就会有一处留在旧值上。
+ */
+export const EVALUATE_STAGE: State = 'inbox';
+
+/**
+ * v1 阶段门（2026-11-10，owner 裁决 A）：**不在「收集」阶段，评估材料不许生成**。
+ *
+ * ── 为什么有这道门
+ *
+ * `docs/superpowers/plans/2026-11-10-v1-scope.md` 说的 v1 只有一条链：
+ * 「需求进收集 → 点评估 → 出三栏材料」。这条链之前的所有条件（六问拆解、页面清单、
+ * 时序图、三栏装配、禁词自检）都已经具备，所以**材料是这个阶段该做的事**：一个人
+ * 在收集里写完描述、点一次评估，拿到的就是那份材料。
+ *
+ * 反过来说，一条已经过了门的需求（待设计 / 待评审 / 已上线…）不该再产出一份**新的**
+ * 评估材料：
+ * - 它的评估**已经发生过**（状态就是从收集走到后面的过程里推进的），再生成一次等于
+ *   用今天的描述重画一张当初没人看过的图，而这张图会被当成「当时评审依据的那一份」；
+ * - v1 的评估不读代码、也不读评审意见，对一条已经在排期 / 开发里的需求，它能给出的
+ *   仍然只是需求描述的三栏推演——读者会以为它是针对现状的（v1 的硬约束一：推演的
+ *   时序图必须标「推演」；这条门是同一个担心的上游版本）。
+ *
+ * 所以：**存量材料照常显示**（老的链接仍然打得开，那是历史），**只有「生成」被关**。
+ * 同一个理由也写在读模型里（`DetailRef.needsDescription`），抽屉在点之前就禁用按钮。
+ *
+ * ── 措辞三件事
+ *
+ * owner 定的原话，一字不改：**说清规则**（v1 只在收集阶段生成评估材料）、**点名现在
+ * 在哪**（用 `STATE_LABEL` 的中文，绝不出现 `design` 这种键）、**给出两条出路**
+ * （在收集里新建一条；或先把它退回收集）。
+ *
+ * ── 不顺手扩大
+ *
+ * 只作用于评估。评审 / 走查两行由 `FEATURE_REVIEW_MATERIALS` 关着（v1 不承诺），
+ * 这条裁定说的是评估材料的阶段，不改那两行、也不给它们加第二道门。
+ */
+export function evaluateStageLock(state: State): string | null {
+  if (state === EVALUATE_STAGE) return null;
+  return `v1 只在收集阶段生成评估材料。这条需求现在在「${STATE_LABEL[state]}」`
+    + '——想用这个能力，请把描述补在收集里新建一条，或先把它退回收集。';
 }
