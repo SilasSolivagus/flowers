@@ -34,6 +34,53 @@
 }
 :root {
 }
+/* 本地补丁（2026-11-10，非上游）：流程图的配色走 CSS 变量（`--fw-*`）。
+   ── 修的是什么
+   owner 点「深色」之后左栏那张流程图**整块看不见**。两个原因叠在一起：
+   1. SVG 里的 `stroke` / `fill` 是**写死的浅色主题 hex**（`#CCD3DB`、`#F8F9FA`…，
+      由 `_theme/default.style.json` 在排版时插进去），而画布底色跟着主题翻成了黑；
+   2. 这个模板的切主题 JS 会把 `#flow-svg-light` 藏起来、显示 `#flow-svg-dark`
+      —— 而 flows 这一版**没有**深色 SVG（walkmap 里没有 `svg_dark`），于是浅色那份
+      被藏起来、深色那份不存在 = 一片空白。
+   ── 改法
+   一份 SVG，颜色全部写成 `var(--fw-*)`（排版时由 `src/core/uemaster/flow.ts` 按
+   `default.style.json` 的键生成，值替换成变量名）。这样切主题时**同一张图**换色，
+   不需要第二份 SVG；切主题的 JS 也改成「只有真有两份时才切显隐」。
+   变量名 = 键名把 `_` 换成 `-`（`stroke_process` → `--fw-stroke-process`），一眼能对上
+   `render_svg` 里的 `st[...]`。
+   ── 为什么浅色值就是 default.style.json 里那几行
+   浅色必须与改动前**逐字一致**（否则这一条修 bug 会顺带改掉浅色主题的样子）。 */
+:root {
+  --fw-bg: var(--wt-white);
+  --fw-stroke-process: #CCD3DB; --fw-fill-process: #FFFFFF; --fw-text-process: #161A21;
+  --fw-stroke-external: #8A92A0; --fw-fill-external: #F8F9FA; --fw-text-external: #5E6776;
+  --fw-stroke-backend: #CCD3DB; --fw-fill-backend: #ECEFF2; --fw-text-backend: #3A4250;
+  --fw-stroke-decision: #CCD3DB; --fw-fill-decision: #F8F9FA; --fw-text-decision: #161A21;
+  --fw-edge-color: #5E6776; --fw-label-color: #8A92A0;
+  --fw-sel-ring-stroke: #2448D0; --fw-sel-ring-fill: #2448D01A;
+  --fw-fill-p0: #FCECEC; --fw-stroke-p0: #B4232B;
+  --fw-fill-p1: #FBF1DC; --fw-stroke-p1: #8F5B00;
+  --fw-fill-p2: #F8F9FA; --fw-stroke-p2: #8A92A0;
+  --fw-fill-added: #EAEFFC; --fw-stroke-added: #2448D0;
+  --fw-fill-disputed: #FBF1DC; --fw-stroke-disputed: #8F5B00;
+}
+/* 深色值逐条来自 `_theme/dark.style.json`（flow-canvas 的深色主题，同一套键）。
+   两件事在这里被固定：节点框与判断菱形不再是白底（#F8F9FA 在 #000 上是一块刺眼的白），
+   边与标签从 `#5E6776` 提亮到 `#8B8B95`——原来的灰在黑底上等于没有。 */
+[data-theme="dark"] {
+  --fw-stroke-process: #3A3A41; --fw-fill-process: #141416; --fw-text-process: #F2F2F4;
+  --fw-stroke-external: #6E6E78; --fw-fill-external: #1F1F23; --fw-text-external: #8B8B95;
+  --fw-stroke-backend: #3A3A41; --fw-fill-backend: #2A2A2F; --fw-text-backend: #A1A1AA;
+  --fw-stroke-decision: #3A3A41; --fw-fill-decision: #1F1F23; --fw-text-decision: #F2F2F4;
+  --fw-edge-color: #8B8B95; --fw-label-color: #6E6E78;
+  --fw-sel-ring-stroke: #F5A524; --fw-sel-ring-fill: #F5A5241A;
+  --fw-fill-p0: #1F1F23; --fw-stroke-p0: #FF6369;
+  --fw-fill-p1: #1F1F23; --fw-stroke-p1: #F5A524;
+  --fw-fill-p2: #1F1F23; --fw-stroke-p2: #6E6E78;
+  --fw-fill-added: rgba(245,165,36,.14); --fw-stroke-added: #F5A524;
+  --fw-fill-disputed: #1F1F23; --fw-stroke-disputed: #F5A524;
+}
+/* 本地补丁结束（2026-11-10） */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { min-height: 100%; background: var(--wt-bg); color: var(--wt-text);
   font-family: var(--ux-sans); }
@@ -397,6 +444,35 @@ function toggleTheme() {
   if (l) l.style.display = toDark ? "none" : "block";
   if (d) d.style.display = toDark ? "block" : "none";
 }
+
+/* 本地补丁（2026-11-10，非上游）：切主题时**别把唯一那张流程图藏起来**。
+   ── 修的是什么
+   owner 点「深色」之后左栏那张图整块看不见：上面那个 toggleTheme 无条件把
+   `#flow-svg-light` 藏起来、显示 `#flow-svg-dark`，而这一版 walkmap **没有**深色 SVG
+   （`svg_dark` 不存在）——浅色那份被藏起来、深色那份不存在 = 一片空白。
+   ── 为什么是「追加一个覆盖」而不是「改上面那几行」
+   这个模板与上游逐字节一致（`tests/walkmap.test.ts` 会剥掉本地补丁再比一次），所以
+   本地改动一律**只加不改**：函数声明是可重新赋值的绑定，这段在后面包一层，`onclick`
+   调用时取到的就是新实现。剥掉这一整块，行为回到上游。
+   ── 配色
+   颜色已经走 CSS 变量（见上面 `--fw-*` 那段），所以**一份** SVG 就能两种主题换色：
+   只有真存在深色那一份时才切显隐，否则永远显示浅色那份。 */
+toggleTheme = function () {
+  var root = document.documentElement;
+  var toDark = root.getAttribute("data-theme") !== "dark";
+  root.setAttribute("data-theme", toDark ? "dark" : "light");
+  var btn = document.getElementById("theme-btn");
+  if (btn) btn.textContent = toDark ? "浅色" : "深色";
+  var l = document.getElementById("flow-svg-light"), d = document.getElementById("flow-svg-dark");
+  if (d) {
+    if (l) l.style.display = toDark ? "none" : "block";
+    d.style.display = toDark ? "block" : "none";
+  } else if (l) {
+    /* 只有一份：它自己会跟着 `--fw-*` 换色，藏起来才是不对的。 */
+    l.style.display = "block";
+  }
+};
+/* 本地补丁结束（2026-11-10） */
 
 document.querySelectorAll('.flow-svg g[data-node]').forEach(function (g) {
   g.addEventListener("click", function () { setViewByNode(g.getAttribute("data-node")); });

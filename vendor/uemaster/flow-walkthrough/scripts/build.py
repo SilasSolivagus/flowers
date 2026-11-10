@@ -75,12 +75,20 @@ def find_emoji(text):
     return [ch for ch in text if any(a <= ord(ch) <= b for a, b in EMOJI_RANGES)]
 
 
+# 本地补丁（2026-11-10，非上游）：图例跟着**变量的名字**认，而不是跟着 hex 认。
+#
+# 为什么：流程图的 SVG 现在把颜色写成 `var(--fw-stroke-p0)`（见模板里那段
+# `--fw-*` 说明），而变量在两套主题里是两个不同的 hex。按 hex 认的话——不管认浅色
+# 那个还是深色那个——总有一套主题下图例消失。按**变量名**认就没有这个问题，顺带
+# 让图例的小方块也跟着主题换色（它们原来是写死的浅色 hex，深色下偏亮）。
+#
+# `hex` 保留为兜底：老产物（改动之前生成的 SVG）里仍然是 hex，按它认还能出图例。
 LEGEND_COLORS = [
-    ("#c0392b", "P0 缺口"),
-    ("#d98324", "P1 缺口"),
-    ("#8a8a8a", "P2 缺口"),
-    ("#2f6fed", "评审新增"),
-    ("#7b4fa8", "评审存疑"),
+    ("--fw-stroke-p0", "#c0392b", "P0 缺口"),
+    ("--fw-stroke-p1", "#d98324", "P1 缺口"),
+    ("--fw-stroke-p2", "#8a8a8a", "P2 缺口"),
+    ("--fw-stroke-added", "#2f6fed", "评审新增"),
+    ("--fw-stroke-disputed", "#7b4fa8", "评审存疑"),
 ]
 
 
@@ -88,9 +96,13 @@ def legend_html(svg):
     """按 SVG 里实际出现的标记色生成图例；没有标记就不占位。"""
     low = svg.lower()
     items = []
-    for color, label in LEGEND_COLORS:
-        if color in low:
-            items.append('<span class="lg"><i style="border-color:%s"></i>%s</span>' % (color, label))
+    for var, hex_color, label in LEGEND_COLORS:
+        if var in low:
+            items.append('<span class="lg"><i style="border-color:var(%s)"></i>%s</span>'
+                         % (var, label))
+        elif hex_color in low:
+            items.append('<span class="lg"><i style="border-color:%s"></i>%s</span>'
+                         % (hex_color, label))
     if not items:
         return ""
     return '<div class="fp-legend">%s</div>' % "".join(items)

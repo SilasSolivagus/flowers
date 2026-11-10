@@ -33,6 +33,52 @@ export const FLOW_PYTHON = 'python3';
  */
 export const FLOW_TIMEOUT_MS = 20_000;
 
+/**
+ * 引擎的浅色主题文件（`--style` 不传时它自己会读这一个，见 `flowcommon.load_style`）。
+ *
+ * 我们**不**直接用它，而是读它、把每个颜色值换成 CSS 变量名，再把结果作为 `--style`
+ * 传回去：这样排版出来的 SVG 里 `fill` / `stroke` 是 `var(--fw-…)`，切主题时同一张图
+ * 换色。为什么必须连字体与字号一起带过去：`--style` 会**整个替换**默认主题
+ * （`layout()` 是 `DEFAULT_STYLE` 打底 + `style` 覆盖），只传颜色会让字体悄悄退回
+ * 引擎内置的 `-apple-system`。
+ */
+export const FLOW_THEME_FILE = path.join(
+  REPO_ROOT, 'vendor/uemaster/_theme/default.style.json',
+);
+
+/** 颜色值的形状：hex（3/4/6/8 位）或 `rgba(...)`——主题文件里只有这两种。 */
+const COLOR_VALUE = /^(?:#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))$/;
+
+/**
+ * 一个主题键 → 它在模板里那个 CSS 变量。
+ *
+ * 命名只有一条规则：`stroke_process` → `--fw-stroke-process`（下划线换连字符）。
+ * 于是排版器里 `st["stroke_process"]` 与模板里 `--fw-stroke-process` 一眼对得上，
+ * 不需要第二张对照表——而对照表正是最容易与真实用到的键脱节的东西。
+ */
+export function fwVar(key: string): string {
+  return `--fw-${key.replace(/_/gu, '-')}`;
+}
+
+/**
+ * 主题文件 → 「所有颜色都换成变量名」的那一份样式覆盖。
+ *
+ * 为什么由这一层做转换，而不是在模板里写死一遍颜色、再用 CSS 覆盖：SVG 的
+ * `fill="…"` 是**属性**，属性值的优先级低于任何 CSS 规则，但**没有**任何 CSS 能选中
+ * 「第 3 个节点的矩形」。要让颜色可切，只能在生成时把它写成变量——这是唯一不依赖
+ * 「给每个节点配一条 CSS 规则」的做法。
+ *
+ * 非颜色键（`font_family` / `fs_*`）原样保留：它们不随主题变，而丢了它们就改了版式。
+ */
+export function styleVarsFromTheme(theme: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(theme)) {
+    if (typeof value !== 'string') continue;
+    out[key] = COLOR_VALUE.test(value.trim()) ? `var(${fwVar(key)})` : value;
+  }
+  return out;
+}
+
 /** 报告里必须为 0 的三个计数。名字与引擎 JSON 的键逐字一致。 */
 const COUNTERS = ['crossings', 'overlaps', 'textOverflow'] as const;
 
@@ -60,6 +106,8 @@ export type FlowOptions = {
   timeoutMs?: number;
   scriptPath?: string;
   python?: string;
+  /** 浅色主题文件（`--style` 的来源）。用例用它指到一份夹具上。 */
+  themeFile?: string;
 };
 
 /** 一次子进程执行的结果，**永远 resolve**：失败是一种数据，不是异常。 */
@@ -185,6 +233,7 @@ export async function renderFlowchart(mermaid: string, options: FlowOptions = {}
   const timeoutMs = options.timeoutMs ?? FLOW_TIMEOUT_MS;
   const script = options.scriptPath ?? FLOW_SCRIPT;
   const python = options.python ?? FLOW_PYTHON;
+  const themeFile = options.themeFile ?? FLOW_THEME_FILE;
 
   const empty: FlowCheck = { ok: false, crossings: 0, overlaps: 0, textOverflow: 0, warnings: [], report: null };
 
@@ -195,7 +244,26 @@ export async function renderFlowchart(mermaid: string, options: FlowOptions = {}
     const svgPath = path.join(dir, 'out.svg');
     await writeFile(mmd, mermaid, 'utf8');
 
-    const run1 = await run([python, script, mmd, '-o', svgPath], dir, timeoutMs);
+    /**
+     * 把「颜色走变量」的样式覆盖写进临时目录，再交给引擎（`--style`）。
+     *
+     * 读不到主题文件就**不传** `--style`：那时引擎用自己的默认样式（颜色是 hex），
+     * 产物仍然正确、只是深色下不好看——比「因为读不到一个主题文件就生成失败」好。
+     * 这条降级不静默：`warnings` 里留一句，报告与用例都看得见。
+     */
+    const extraWarnings: string[] = [];
+    const stylePath = path.join(dir, 'style.vars.json');
+    try {
+      const theme = JSON.parse(await readFile(themeFile, 'utf8')) as Record<string, unknown>;
+      await writeFile(stylePath, JSON.stringify(styleVarsFromTheme(theme)), 'utf8');
+    } catch (error) {
+      extraWarnings.push(
+        `主题文件读不出来，流程图颜色退回引擎默认（深色下可能看不清）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const styleArgs = extraWarnings.length === 0 ? ['--style', stylePath] : [];
+
+    const run1 = await run([python, script, mmd, '-o', svgPath, ...styleArgs], dir, timeoutMs);
 
     if (run1.spawnError) {
       return { ...empty, error: `排版器起不来（${run1.spawnError}）` };
@@ -209,7 +277,7 @@ export async function renderFlowchart(mermaid: string, options: FlowOptions = {}
       // 而报告里才有 `crossing_points` / `overlap_points` / `textOverflow_points`——
       // 那正是「改哪里」的全部信息。所以失败时补跑一次 `--check` 把报告捞回来：
       // 它退出码非 0 但会先打印报告。拿不到报告（形态超限、Python 报错）就退回原文。
-      const diagnosis = await diagnose([python, script, mmd, '--check'], dir, timeoutMs);
+      const diagnosis = await diagnose([python, script, mmd, '--check', ...styleArgs], dir, timeoutMs);
       return diagnosis === null ? { ...empty, error: why } : { ...diagnosis, ok: false, error: why };
     }
 
@@ -221,7 +289,8 @@ export async function renderFlowchart(mermaid: string, options: FlowOptions = {}
     const crossings = counter(report, COUNTERS[0]);
     const overlaps = counter(report, COUNTERS[1]);
     const textOverflow = counter(report, COUNTERS[2]);
-    const warnings = warningsOf(report);
+    // 主题那一层的降级（读不到主题文件）与引擎的提醒**同一个信封**：调用方读一处就够。
+    const warnings = [...extraWarnings, ...warningsOf(report)];
     const clean = crossings === 0 && overlaps === 0 && textOverflow === 0;
 
     if (!clean) {
