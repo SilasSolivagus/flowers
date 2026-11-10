@@ -16,3 +16,4 @@ data/uemaster/
 docs/superpowers/wecom-auth-qr.png
 # P4-04：会话签名密钥（开发机生成，不能进库——那是「所有人的会话」）
 data/.flowers-session-secret
+.tmpwork/
