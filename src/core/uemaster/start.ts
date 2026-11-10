@@ -22,7 +22,7 @@ import {
 import { loadKnownSurfaces } from './surfaces.js';
 import { REVIEW_NEEDS_PRD, reviewRequirement } from './review.js';
 import { inspect as inspectMaterial } from './inspect.js';
-import { artifactUrlIn, resolveGenerator, runGenerator } from './generator.js';
+import { artifactUrlIn, credentialFor, resolveGenerator, runGenerator } from './generator.js';
 import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
@@ -627,6 +627,10 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       command: resolution.command,
       file,
       before,
+      // 同一个人的那把 key，交给 harness 的启动环境（见 `credentialFor`）。CLI 这条路上
+      // 它通常已经是 null——配了三格就轮不到 CLI——但**不补**的代价是「有人撤掉三格之后
+      // 生成突然开始要 shell 环境」，而那正是这次要修的那类「同一把 key 两条路两种答案」。
+      credential: credentialFor(resolution.command, (await resolveProviderConfig(actor))?.apiKey ?? null),
     });
 
     if (!result.ok) {

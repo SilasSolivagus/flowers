@@ -18,7 +18,7 @@ import {
 } from '../src/core/requirements/terminal';
 import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
 import { cancelJob, retryJob } from '../src/core/uemaster/control';
-import { testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
+import { credentialFor, testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
 import { generatorCommand, saveGeneratorCommand, writeTest } from '../src/core/uemaster/settings';
 import { testLabel, type GeneratorTest } from '../src/core/uemaster/candidates';
 import {
@@ -343,6 +343,21 @@ export async function saveGeneratorAction(formData: FormData): Promise<ActionRes
 export type GeneratorTestResult = { ok: boolean; message: string };
 
 /**
+ * 这一次小测要补的凭据：**库里那把 key**（`provider.*` 三格，按当前成员的解析顺序）。
+ *
+ * 为什么在这里解析而不是让 `testGenerator` 自己读库：`generator.ts` 是一层不碰库的
+ * 纯执行层（它与 MCP、worker 共用），凭据的来源属于「谁在用这条命令」。这一句就是
+ * 那个「谁」——与真生成走的是同一个解析函数（`resolveProviderConfig(actor)`），
+ * 所以设置页那一格的「通过」说的就是真生成会用的那把 key。
+ *
+ * 不把 key 带出这个函数：`credentialFor` 的返回值只交给 `testGenerator` 的 spawn。
+ */
+async function credentialForTest(command: string): Promise<ReturnType<typeof credentialFor>> {
+  const config = await resolveProviderConfig(await currentMember());
+  return credentialFor(command, config?.apiKey ?? null);
+}
+
+/**
  * 跑一次小测、把结果落库、返回那一行的字。
  *
  * 落库而不只是返回给这一次点击：刷新之后那一行仍要显示「未通过测试」，否则一次刷新
@@ -351,7 +366,10 @@ export type GeneratorTestResult = { ok: boolean; message: string };
  * `MISSING_CREDENTIAL: … DEEPSEEK_API_KEY` 这两句本身就是给 owner 的下一步。
  */
 async function recordTest(command: string): Promise<GeneratorTestResult> {
-  const result = await testGenerator(command, { timeoutMs: TEST_TIMEOUT_MS });
+  const result = await testGenerator(command, {
+    timeoutMs: TEST_TIMEOUT_MS,
+    credential: await credentialForTest(command),
+  });
   const test: GeneratorTest = {
     ok: result.ok,
     command,
@@ -393,7 +411,10 @@ export async function applyGeneratorAction(formData: FormData): Promise<Generato
   const command = field(formData, 'command').trim();
   if (command === '') return { ok: false, message: '先填一条命令' };
 
-  const result = await testGenerator(command, { timeoutMs: TEST_TIMEOUT_MS });
+  const result = await testGenerator(command, {
+    timeoutMs: TEST_TIMEOUT_MS,
+    credential: await credentialForTest(command),
+  });
   if (!result.ok) return { ok: false, message: `失败：${result.error}` };
 
   try {

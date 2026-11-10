@@ -295,6 +295,43 @@ export type GeneratorTest = {
   error: string | null;
 };
 
+// ─── 2026-11-10：harness 那条路的凭据变量 ────────────────────────────────────
+
+/**
+ * 候选 → 它认的**模型凭据环境变量名**。只有我们真的查过文档 / 实测过的那几条写进来。
+ *
+ * 为什么需要这张表：owner 在设置页按「测试」拿到的是
+ * `dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route
+ * "deepseek-official"` —— 而同一台机器上**已经存着一把能用的 key**
+ * （`app_settings` 的 `provider.apiKey`，评估流水线一直在用它）。同一个人、同一台机器、
+ * 同一把 key，一条路说「可用」、另一条路说「缺凭据」，那是我们的接线漏了，不是用户的
+ * 配置漏了。dsh 的文档写得很明确：`store DEEPSEEK_API_KEY through the credentials
+ * service (the web Models page writes it), or **export DEEPSEEK_API_KEY in the launching
+ * environment**` —— 而我们 `spawn` 它的那个进程，就是它的「launching environment」。
+ *
+ * 为什么只写 `dsh`：`claude` / `codex` 认的是自己登录态里的 OAuth（本机的实测结论就是
+ * 「装了、登录了、仍然 401」），把 provider 的 key 塞给它们是**帮倒忙**（它们不吃这个
+ * 变量，塞进去只会让人以为配好了）。`ollama` 不需要 key。表里没有的候选就是「不补」。
+ *
+ * 这个名字也是**唯一**一份：`generator.ts` 按它补环境变量，用例按它断言，没有第二处
+ * 硬编码 `DEEPSEEK_API_KEY`。
+ */
+export const CREDENTIAL_ENV: Partial<Record<CandidateId, string>> = {
+  dsh: 'DEEPSEEK_API_KEY',
+};
+
+/**
+ * 这条命令该补哪个变量：按**第一个词**认二进制名（`dsh headless {prompt}` → `dsh`），
+ * 与 `idForCommand` 同一条判据；不认识的命令返回 null（自建命令由用户自己负责它的凭据）。
+ */
+export function credentialEnvFor(command: string): string | null {
+  const first = command.trim().split(/\s+/)[0] ?? '';
+  if (first === '') return null;
+  const candidate = CANDIDATES.find((item) => item.binary === first);
+  if (candidate === undefined) return null;
+  return CREDENTIAL_ENV[candidate.id] ?? null;
+}
+
 /**
  * 测试结果那一行的字：`通过 · 74B · 0.9s` / `失败：<stderr>`。
  *

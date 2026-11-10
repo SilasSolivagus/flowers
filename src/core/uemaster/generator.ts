@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { AppError } from '../errors.js';
 import {
-  commandReady, placeholderIn, type Candidate,
+  commandReady, credentialEnvFor, placeholderIn, type Candidate,
 } from './candidates.js';
 import { detect } from './detect.js';
 import { adoptLegacyArtifact } from './store.js';
@@ -58,7 +58,66 @@ export type GenOptions = {
   file?: string;
   /** 跑之前的 mtime（null = 之前不存在）。用来判断文件是不是这一次写的。 */
   before?: number | null;
+  /** 这一次要给子进程补的模型凭据（见 `credentialFor`）；null / 不传 = 不补。 */
+  credential?: Credential | null;
 };
+
+// ─── 凭据：把库里那把 key 交给 harness ──────────────────────────────────────
+
+/**
+ * 一次跑要补的一个环境变量。
+ *
+ * **只存变量名与值，不进日志、不进界面、不进返回值。** 它唯一的作用域是 `runRaw` 的
+ * `spawn(env)`——用完即弃。
+ */
+export type Credential = { env: string; value: string };
+
+/**
+ * 库里那把 key → 这一次该补的变量（`{env:'DEEPSEEK_API_KEY', value:'sk-…'}`）。
+ *
+ * 2026-11-10 的接线修正，起因是 owner 在设置页看到的那一行：
+ *
+ * ```
+ * 失败：dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route
+ * "deepseek-official"; store DEEPSEEK_API_KEY through the credentials service,
+ * or export DEEPSEEK_API_KEY in the launching environment
+ * ```
+ *
+ * 同一台机器上 `provider.apiKey` 存着一把能用的 key（评估流水线一直在用）。所以这里
+ * 做一件事：**按候选表约定的变量名，把 key 交给子进程的环境**。dsh 的文档把「启动环境」
+ * 列为合法的凭据来源之一，而我们的 `spawn` 就是它的启动环境——不需要用户去 shell 里
+ * `export`，也不需要我们写别人的凭据存储。
+ *
+ * 三条边界：
+ * - 命令不是需要凭据的候选（`credentialEnvFor` 返回 null）→ 不补。自建命令的凭据由
+ *   用户自己负责：替他猜一个变量名比不猜更糟。
+ * - 没有 key（空串 / null）→ 不补，也**不覆盖**父进程的环境。这时若 shell 里本来有
+ *   `DEEPSEEK_API_KEY`，CLI 照旧能用它——那是用户的兜底，不该被我们抹掉。
+ * - **不转发 `provider.baseUrl`**：dsh 的 `DEEPSEEK_BASE_URL` 要的是 Messages 兼容根
+ *   （`https://api.deepseek.com/anthropic`），而我们的三格是 OpenAI 兼容根
+ *   （`https://api.deepseek.com/v1`）。把后者塞过去会把它**从一个能用的默认地址改成
+ *   一个不兼容的地址**——那是拿一次修 bug 换一个新 bug。
+ */
+export function credentialFor(
+  command: string,
+  apiKey: string | null | undefined,
+): Credential | null {
+  const value = apiKey?.trim() ?? '';
+  if (value === '') return null;
+  const env = credentialEnvFor(command);
+  return env === null ? null : { env, value };
+}
+
+/**
+ * 子进程的环境：父进程那一份打底，补上这一条。
+ *
+ * 为什么必须继承：PATH、HOME 这些是 CLI 找自己配置（`~/.dsh`、`~/.codex`）的依据，
+ * 只给一条 `DEEPSEEK_API_KEY` 会让它变成一个「装了也找不到自己」的进程。
+ */
+function childEnv(credential: Credential | null | undefined): NodeJS.ProcessEnv {
+  if (credential === null || credential === undefined) return process.env;
+  return { ...process.env, [credential.env]: credential.value };
+}
 
 /**
  * 任务包里那行站内路径。三份包各写一次，形状固定。
@@ -238,6 +297,8 @@ type RawRun = {
  */
 function runRaw(line: string, opts: {
   cwd: string; timeoutMs: number; stdin: string | null;
+  /** 这一次要补的凭据（见 `credentialFor`）；null / 不传 = 用父进程的环境。 */
+  credential?: Credential | null;
 }): Promise<RawRun> {
   return new Promise<RawRun>((resolve) => {
     const started = Date.now();
@@ -257,6 +318,8 @@ function runRaw(line: string, opts: {
     try {
       child = spawn(line, {
         cwd: opts.cwd,
+        // 环境是「dsh 的启动环境」：库里那把 key 从这一条进去，用户不必在 shell 里 export。
+        env: childEnv(opts.credential),
         shell: true,
         // 自己一个进程组：超时的时候能把 shell 连同它拉起的 agent 一起杀掉，
         // 而不是留下一个还在写文件的孤儿。
@@ -409,6 +472,7 @@ export async function runGenerator(pack: string, opts: GenOptions): Promise<GenR
     cwd: opts.cwd,
     timeoutMs: opts.timeoutMs,
     stdin: stdin ? pack : null,
+    credential: opts.credential ?? null,
   });
 
   if (raw.timedOut) {
@@ -523,7 +587,7 @@ async function firstHtml(dir: string, depth = 2): Promise<string | null> {
  */
 export async function testGenerator(
   command: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; credential?: Credential | null } = {},
 ): Promise<TestResult> {
   const timeoutMs = opts.timeoutMs ?? TEST_TIMEOUT_MS;
 
@@ -545,7 +609,9 @@ export async function testGenerator(
   const { line, stdin } = commandFor(command, TEST_PACK);
   try {
     // 永远跑在临时目录里：小测不该在仓库里留下文件，也不该被仓库里的旧产物骗成「通过」。
-    const raw = await runRaw(line, { cwd: dir, timeoutMs, stdin: stdin ? TEST_PACK : null });
+    const raw = await runRaw(line, {
+      cwd: dir, timeoutMs, stdin: stdin ? TEST_PACK : null, credential: opts.credential ?? null,
+    });
     if (raw.timedOut) {
       return { ok: false, error: `超时（${Math.round(timeoutMs / 1000)} 秒）没有结束`, ms: raw.ms };
     }
