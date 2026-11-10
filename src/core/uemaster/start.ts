@@ -27,6 +27,7 @@ import { isStage, packFor, type Stage } from './packs.js';
 import { resolveProviderConfig, type ProviderConfig } from './provider.js';
 import { generatorCommand } from './settings.js';
 import { adoptLegacyArtifact, artifactFile } from './store.js';
+import { nextArtifactVersion } from './versions.js';
 
 /**
  * 生成作业的**起点**（服务层）与**执行体**（worker 里跑的那一段）。
@@ -269,13 +270,18 @@ export async function startGeneration(
     /**
      * 六问没填，不许生成（2026-11-10 owner 的裁定）。判据在
      * `requirements/brief.ts`，**这一处不是判据的首发地**——真正的门挂在状态变迁上
-     * （`state-machine.ts` 的 `guard: 'brief'`，`inbox → design`）。生成前再问一次，
-     * 是因为这件事本来就是「材料能不能出」：
+     * （`state-machine.ts` 的 `guard: 'brief'`，`inbox → design`，trigger `approve`）。
+     * 生成前再问一次，是因为这件事本来就是「材料能不能出」：
      *
-     * - 迁那道门只在**立项那一刻**生效，而生成发生在那之前。放行到 worker 里，等于
-     *   先烧一次模型调用、跑完 2–5 分钟，再由 attach 的迁移失败把材料回滚——用户等
-     *   五分钟只拿到一句拒绝，而这句话在点下去的那一秒就已经成立；
+     * - 那三问是材料唯一的依据：没有角色与入口，图就是一张无主的框子；没有现状，
+     *   问题清单只能凭空造。放行到 worker 里，等于先烧一次模型调用、跑完 2–5 分钟，
+     *   再交回一份编出来的材料——而这句话在点下去的那一秒就已经成立；
      * - 界面把**同一个字符串**提前画在按钮旁边（按钮禁用），读模型与服务不会各说一句。
+     *
+     * 2026-11-10 的第二次纠正之后，这道门前后的世界变了：**生成不再改状态**，所以它
+     * 不再是「立项的前置检查」，它就是**生成**这件事自己的门槛（立项那道门在
+     * `brief.ts` 的 `guard: 'brief'` 上，同一份判据、同一句话）。两处各问一次不是
+     * 重复：一处拦「材料能不能出」，一处拦「这件事能不能立项」。
      *
      * 位置三条理由：
      * - 放在防重之后：那个阶段已经在跑时，「正在生成中」才是这次点击的直接结果；
@@ -573,6 +579,17 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       return;
     }
 
+    /**
+     * 这一版是第几版（2026-11-10 owner 的第一次纠正）：CLI 那条路的**文件路径写在包里**，
+     * 所以版本号必须在拼包之前算出来。以前包里写死 `evaluate.html`，agent 照做就是覆盖
+     * 上一份材料，而库里照样多一行——库说「两版」、盘上只剩一份。
+     *
+     * 算在这里、不在请求里：worker 是另一个进程，包要在真正跑的那一刻才拼（用户可能在
+     * 按下按钮之后又点了一次「重新生成」）。
+     */
+    const version = await nextArtifactVersion(
+      db, job.requirement_id, Number(job.number), job.stage,
+    );
     const pack = packFor(job.stage, {
       id: job.requirement_id,
       number: Number(job.number),
@@ -580,6 +597,7 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       type: job.type,
       requester: job.requester,
       prdUrl: job.prd_url,
+      version,
     });
 
     // 命令按同一条解析顺序再取一次（worker 是另一个进程，不能信请求那一刻的结论）。
@@ -627,8 +645,9 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
       return;
     }
 
-    // attachArtifact 会自己 stat 站内链接（没有文件就是 artifact_missing），
-    // 写库、记事件、必要时把 inbox 推到待设计——这里不重复第二套写入路径。
+    // attachArtifact 会自己 stat 站内链接（没有文件就是 artifact_missing），写库、
+    // 记事件——**不改需求状态**（2026-11-10 起：材料是产物，立项是另一个动作）。
+    // 这里不重复第二套写入路径。
     const artifact = await attachArtifact(db, actor, {
       requirementId: job.requirement_id,
       stage: job.stage,

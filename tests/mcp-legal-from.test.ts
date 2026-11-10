@@ -147,16 +147,18 @@ describe('actionsFor 对齐（漂移探测器）', () => {
     }
   });
 
-  it('`evaluate`（立项）只在收集状态给出，MCP 也有对应工具', async () => {
+  // 动作名 2026-11-10 从 `evaluate` 改成 `approve`：它做的是**立项**（inbox → design），
+  // 与「生成评估材料」不再是同一件事（材料不改状态）。
+  it('`approve`（立项）只在收集状态给出，MCP 也有对应工具', async () => {
     const ids = await onePerState();
     for (const state of BOARD_STATES) {
       const detail = await getRequirementDetail(ids.get(state)!);
-      if (state === 'inbox') expect(detail!.actions).toContain('evaluate');
-      else expect(detail!.actions).not.toContain('evaluate');
+      if (state === 'inbox') expect(detail!.actions).toContain('approve');
+      else expect(detail!.actions).not.toContain('approve');
     }
     // 认领只给负责人、不动状态；收集状态的唯一出口就是这条边，所以 agent 也要能走。
-    expect(LEGAL_FROM.evaluate).toEqual(['inbox']);
-    expect(TOOLS.filter((def) => def.action === 'evaluate')).toHaveLength(1);
+    expect(LEGAL_FROM.approve).toEqual(['inbox']);
+    expect(TOOLS.filter((def) => def.action === 'approve')).toHaveLength(1);
   });
 
   it('每个 DetailAction 都有恰好一个工具', () => {
@@ -164,9 +166,9 @@ describe('actionsFor 对齐（漂移探测器）', () => {
     expect(new Set(declared).size).toBe(declared.length);
 
     const covered = [...new Set(declared)].sort();
-    // `DetailAction` 的九个成员各有一个工具——包括 `evaluate`（立项）。
+    // `DetailAction` 的九个成员各有一个工具——包括 `approve`（立项）。
     expect(covered).toEqual([
-      'bounce', 'evaluate', 'reject', 'restore', 'reviewPass', 'reviewReject', 'schedule',
+      'approve', 'bounce', 'reject', 'restore', 'reviewPass', 'reviewReject', 'schedule',
       'shelve', 'submitReview',
     ]);
     for (const action of covered) expect(LEGAL_FROM[action].length).toBeGreaterThan(0);

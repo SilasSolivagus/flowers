@@ -444,7 +444,8 @@ describe('composeEvaluation → build.py 的产物', () => {
 
     const out = await composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' }, fake.deps);
 
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    // 版本化文件名（2026-11-10）：第一版是 v001。
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
     expect(out.url).toBe(url);
     expect(await artifactExists(url)).toBe(true);
 
@@ -519,7 +520,7 @@ describe('composeEvaluation → build.py 的产物', () => {
     expect(error.message).not.toContain('一个页面片段都没有');
     expect(built).toBe(0);
     expect(fake.prompts).toHaveLength(3);
-    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate.html`)).toBe(false);
+    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate-v001.html`)).toBe(false);
   });
 
   it('片段里没有 wt- 类 → 带这句中文重问一次，第二次合规就过', async () => {
@@ -581,6 +582,7 @@ describe('composeEvaluation → build.py 的产物', () => {
     const rows = await db.execute<{ n: number }>(sql`select count(*)::int as n from uemaster_artifacts`);
     expect(Number(rows.rows[0]!.n)).toBe(1);
     const state = await db.execute<{ state: string }>(sql`select state from requirements where id = ${r.id}`);
-    expect(state.rows[0]!.state).toBe('design');
+    // 2026-11-10 起生成不改状态：材料落库、需求仍在收集，立项要单独点。
+    expect(state.rows[0]!.state).toBe('inbox');
   });
 });

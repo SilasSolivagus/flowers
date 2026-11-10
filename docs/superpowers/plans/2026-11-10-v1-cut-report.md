@@ -611,3 +611,106 @@ update requirements r set state = 'design', state_entered_at = now()
    若要把同一道门套过去，改的是 `guard` 表，不是再抄一句判据。
 4. **恢复路径是 SQL**：没有界面能把这 42 条放回待设计（`restore` 那条边只从 `shelved`
    出来）。这与 0021 那次回退同一形状：系统批量做的口径修订，反向操作是运维动作。
+
+---
+
+# 十六、材料按版本留 + 评估 ≠ 立项（2026-11-10 第四遍，owner 的两条产品模型纠正）
+
+> 起点 `52e4267`。两条都不是打磨，是**产品模型**错了：
+> ① 材料被覆盖——库里说「存过两版」，盘上只有一份；
+> ② 「点评估」把材料生成与 `收集 → 待设计` 绑成一个点击——**把决定藏进了产物里**。
+
+## 一、版本化 URL：`evaluate-v001.html`
+
+| 决定 | 内容 | 为什么 |
+|---|---|---|
+| 名字 | `<stage>-v<NNN>.html`，零填充三位：`evaluate-v001.html`、`evaluate-v002.html`… | 选版本号而不是时间戳：版本号就是界面上那个数字（「第 3 版」/「v2」），文件名与抽屉对得上。零填充是为了**自然排序**——不填充时 `ls` 把 `-v10` 排在 `-v2` 前面，而版本化的一半价值就是「按名字排出来就是时间顺序」。999 版之内成立；第 1000 版会变成 `v1000` 重新破序（那是同一需求重做过一千次的极端情形） |
+| 版本号 | `max(库里的行数, 盘上最大版号) + 1`（`src/core/uemaster/versions.ts` 的 `nextArtifactVersion`） | 只看库会漏掉「attach 失败但文件已写下」的孤儿；只看盘会漏掉「行删了但版本号不该复用」。取大者 + 1，两头都不覆盖。并发安全来自 `uemaster_jobs_running_unique`（同一需求同一阶段同时只有一条 running 作业） |
+| 谁写这个名字 | `packs.ts` 的 `versionedName`（纯函数），三处消费者：CLI 包的「交付」行、`compose/review/inspect` 三个落盘点（经 `versions.ts` 的 `versionedFileOf`）、`generator.ts` 的 `artifactUrlIn` 反向解析 | 包怎么写、文件就该在哪：这是 P2.6 的老契约，版本号必须跟着包一起走。放 `store.ts` 会成环（它反向 import 了 `packs.ts` 的 `isStage`） |
+| 存量 | 一个字节都不动 | 那些 `evaluate.html` 是某次评审依据过的材料，磁盘上剩的哪份就是哪份 |
+
+`attachArtifact` 的入参形状没变（仍是站内路径或 http(s)）：版本号是**写侧**的事，
+`parseUrl` / `artifactFile` 那条围栏不需要认识 `-vNNN`。
+
+## 二、存量同 URL 的多行：如实标注（迁移 0036）
+
+- 新列 `uemaster_artifacts.content_lost boolean not null default false`。
+- 判据（`0036_artifact_content_lost.sql`）：同一 `(requirement_id, stage)` 内**同一个 url
+  有多行**时，除最新那一行（`created_at` 最大，同时刻用 `id` 定序，与读侧
+  `created_at desc, id desc` 同一套）之外都置 `true`。
+- 实测：**7 组共享同一链接、13 行被标注**（`artifacts` 共 26 行）。PAN-47 就是那两条：
+  `03:34` 那行 `content_lost = true`，`04:40` 那行 `false`。
+- **不编数据**：不删行（行是「当时确实生成过一次」的证据）、不生成占位文件、不把最新那份
+  拷成旧版的副本。被标注的行在界面上写「内容已被覆盖」，整段上面写一句为什么救不回来。
+- 抽屉里那句话逐字：`更早的版本内容已被覆盖，无法恢复（当时按固定文件名保存）`
+  （常量 `LOST_HISTORY_NOTE`，`app/components/Drawer.tsx`）。
+
+## 三、拆开两个动作：哪几个名字变了
+
+| 位置 | 之前 | 现在 | 为什么 |
+|---|---|---|---|
+| 状态机 trigger（`inbox → design`） | `evaluate` | **`approve`** | 这条边现在只剩「立项」一个含义。留着 `evaluate` 会让下一个人以为「评估 = 立项」，而生成材料已经完全不碰这条边了 |
+| 界面动作（`DetailAction`） | `evaluate` | **`approve`**（按钮文案仍是「立项」） | 动作名要能对上它做的事；`evaluate` 这个名字属于「生成评估材料」，而那个动作不在动作条上 |
+| `app/actions.ts` | `evaluateAction` | `approveAction`（底下仍调 `requirements/evaluate.ts` 的 `evaluate()`） | 领域服务名的改名会动 19 个用例文件与三处脚本，收益只有名字；真正的口径在 trigger、动作名与两个调用点 |
+| `uemaster/attach.ts` | 落地评估材料时同事务调 `evaluateInTx` 推进到待设计 | **删掉整段** | 见下 |
+| 时间线事件 `requirement.evaluated` 的标签 | 「评估完成，进入待设计」 | 「立项，进入待设计」 | 事件类型是库里的历史字符串（改名会把一条时间线劈成两个名字），但它记的事实只有一件：这一行进了待设计 |
+| MCP 工具 | `requirement_start_design`（action `evaluate`） | 同名工具、action `approve`，描述里加一句「与 uemaster_plan / uemaster_attach 是两件事」 | 工具名本来就叫「立项」，没有误导；误导的是 description 里那句「评估材料推进到待设计是 attachArtifact 内部的事」——已删 |
+| 六问门的文案（`brief.ts` 的 `lockMessage`） | 「补完才能评估——评估要拿这三问立项、按这三问出材料」 | 「补完才能立项，也才能出评估材料——立项要拿这三问站住，材料要按这三问画」 | 旧句子把两个动作写成一句话（「评估…立项」），拆开之后它就成了错的。判据、code（`missing_brief`）、「还差N条没填：…」的前缀一个字没动 |
+
+**为什么必须分开**（写进 `attach.ts` / `state-machine.ts` / `brief.ts` 的注释里）：
+**材料是产物，立项是决定**。把决定藏在产物里，「我生成一份材料看看」与「这条需求我接了」
+就成了同一个点击——用户没有改主意的机会，而「材料出过几版」与「立没立项」在时间线上也
+分不开。删掉那条自动推进、而不是「留着但默认关掉」：一条「材料落地会改状态」的路径只要
+还在，就还有一个入口把决定藏在产物里（人 / agent / 批量导入都踩得到）。
+
+## 四、阶段门现在说的是什么
+
+判据与文案不变（`gate.ts` 的 `evaluateStageLock`：`v1 只在收集阶段生成评估材料。这条需求
+现在在「X」——想用这个能力，请在收集里新建一条。`），**行为上唯一的变化是它读起来更简单
+了**：生成不再改状态，所以**收集里的需求可以随便重做多少次评估材料**，每次都只是一份新
+产物（v001 / v002 / v003…）。「待设计之后不再生成新评估材料」这条仍然成立，理由改写成
+如实的那一版：那条需求在收集里出过材料、然后有人点了立项，再生成一次等于用今天的描述
+重画一张当初没人看过的图。
+
+## 五、权限：两个动作同一套规则，拦在不同的层（照实报告差异）
+
+| 动作 | 读模型（看不看得见） | 服务层（做不做得到） |
+|---|---|---|
+| 生成材料 `startGeneration` | `permissions.edit`（`can('edit')`），`Drawer` 里 `canEdit` 才渲染 `GenerateButton` | **没有** `can()` 检查：`generateAction` 只解身份（`currentMember()`） |
+| 立项 `evaluate` | `visibleActions` 用 `ACTION_ABILITY.approve = 'edit'` 过滤动作条 | `assertCan(tx, actor, …, 'edit')`（先锁行、先判权限、再判状态门） |
+
+**规则相同（都是 `can('edit')`）、执行位置不同**。这一版**没有**给生成补一道服务层检查：
+那会把「按钮能不能点」变成一条新的线上行为（无主需求的生成会被拒），超出这两条纠正的
+范围；而 `tests/artifact-versions.test.ts` 里那条表驱动用例钉住的是**规则相同**（六种演员：
+`approve` 在动作条里 ⇔ `can('edit')` ⇔ 生成按钮会渲染），差异本身写在这里备查。
+
+## 六、五条 mutation（把判据改坏，用例就红；逐条真跑过）
+
+| 改法 | 哪条用例红 |
+|---|---|
+| `nextArtifactVersion` 恒返回 `1`（= 回到固定文件名） | `连续生成两次：v001 与 v002 是两份文件`、`版本号 = max(库里行数, 盘上最大版号) + 1`、`上一版还在而这一版什么都没写` **3** 条 |
+| 把 `attach` 的自动推进加回去（`if (stage === 'evaluate' && state === 'inbox') evaluateInTx(...)`） | `生成 / 交回材料不改状态` 整组 4 条、`uemaster_attach`、`runJob 成功…`、`交回一份评估材料：状态还在收集` 等 **8** 条 |
+| 摘掉表上的 `guard: 'brief'` | `六问缺一条 → 立项被拒`、`表：门挂在变迁上` 2 条、`判据：核心三条` 5 条、`缺成功口径` **10** 条 |
+| 读模型把 `contentLost` 恒置 `false` | `读模型：最新一份 + 历史（1 版）…` **1** 条 |
+| 抽屉不画那句「无法恢复」、不标「内容已被覆盖」 | `那一行标「内容已被覆盖」…`、`被覆盖的行仍然给出链接…` **2** 条 |
+
+## 七、计数
+
+- `npx vitest run`：**1839 → 1858**（新增 19：`tests/artifact-versions.test.ts` 14 条 +
+  `tests/artifact-versions-ui.test.tsx` 5 条；`3 skipped` 不变）。94 个文件全绿。
+- `npx tsc --noEmit` 干净；`npm run build` 通过（7 条路由，与上一轮一致）。
+- `requirements` 活行 **814 → 814**：`inbox 286` / `design 69` **before = after**
+  （这一轮没有迁移任何需求状态，只加了产物那一列）。
+- `uemaster_artifacts` 26 行不变，其中 **13 行** `content_lost = true`。
+
+## 八、这一轮留下的坑（照实写）
+
+1. **`evaluate` 这个名字还留在领域服务上**（`src/core/requirements/evaluate.ts` 的
+   `evaluate()` / `evaluateInTx()`）。它做的是立项；改名要动 19 个用例文件与三处脚本。
+   读这一行的人该记住的是「它做立项」，不是「它叫 evaluate」。
+2. **被覆盖的那 13 行没有内容可显示**：界面上它们只是「内容已被覆盖」的一条链接。要真正
+   看到那一版，只能回到当时评审过它的人手里。历史数据救不回来，这一版只保证**不再发生**。
+3. **生成没有服务层权限检查**（见第五节）。界面挡住了，MCP 的 `uemaster_plan` 也不检查
+   （它只是取包）；会不会有人绕过界面对别人的需求跑一次生成，这一版不回答。
+4. **版本号不是事务里算的**：它读库 + 读盘，然后写文件。唯一挡住并发的是「同一需求同一
+   阶段只有一条 running 作业」这条库约束；若将来支持并行生成，这一处要挪进事务。

@@ -624,8 +624,9 @@ describe('getRequirementDetail', () => {
     const inbox = await seedInbox('房超');
     // 收集（inbox）里现在有「立项」：认领只给负责人、不动状态，而收集状态的唯一出口
     // 就是 inbox → 待设计。收进的直提评审那条路仍然开着（spec §6：评估是加速器，不是关卡）。
+    // 动作名 2026-11-10 从 `evaluate` 改成 `approve`（它就是「立项」，与出材料无关）。
     expect((await getRequirementDetail(inbox.id))!.actions).toEqual([
-      'evaluate', 'submitReview', 'reject', 'shelve',
+      'approve', 'submitReview', 'reject', 'shelve',
     ]);
 
     const review = await seedInReview('commercial');

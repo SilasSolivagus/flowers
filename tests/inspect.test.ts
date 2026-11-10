@@ -499,7 +499,8 @@ describe('inspect：PRD ⇄ 真实代码', () => {
 
     const out = await inspect(db, '吕品', { requirementId: r.id }, deps());
 
-    expect(out.url).toBe(`/uemaster/PAN-${r.number}/inspect.html`);
+    // 版本化文件名（2026-11-10）：第一版是 v001。
+    expect(out.url).toBe(`/uemaster/PAN-${r.number}/inspect-v001.html`);
     expect(await artifactExists(out.url)).toBe(true);
     expect(await artifactCount()).toBe(1);
 
@@ -604,7 +605,7 @@ describe('inspect：PRD ⇄ 真实代码', () => {
     expect(error.message).toContain('src/pages/share/Ghost.tsx');
     expect(fake.calls()).toBe(2); // 上限是硬的：没有第 3 次
     expect(await artifactCount()).toBe(0);
-    expect(await artifactExists(`/uemaster/PAN-${r.number}/inspect.html`)).toBe(false);
+    expect(await artifactExists(`/uemaster/PAN-${r.number}/inspect-v001.html`)).toBe(false);
   }, 60_000);
 
   it('missing 带了证据路径 → 接受（那是"它本该在的位置"，读者能去看一眼）', async () => {

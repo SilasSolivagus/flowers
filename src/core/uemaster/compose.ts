@@ -7,6 +7,7 @@ import type { Db } from '../../db/client.js';
 import { AppError } from '../errors.js';
 import { parseRequirementId } from '../validate.js';
 import { attachArtifact } from './attach.js';
+import { nextArtifactVersion, versionedFileOf } from './versions.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import { typeLabel } from '../requirements/type.js';
@@ -25,7 +26,7 @@ import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
 } from './provider.js';
-import { ARTIFACT_ROOT, artifactUrl } from './store.js';
+import { artifactUrl } from './store.js';
 import {
   MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, missingStepsReason, normalizeSteps, renderSequencePage,
   type SeqStep,
@@ -1494,8 +1495,11 @@ export async function buildPages(
  * 只负责「把模型交的片段拼成契约要求的样子」，以及「在 spawn 之前把话说清楚」。
  *
  * 为什么写文件在 attach 之前：`attachArtifact` 会 stat 站内链接（没有文件就是
- * `artifact_missing`），而且它在同一个事务里把 inbox 的需求推到待设计。文件先落地，
- * 这一步就只剩「验 + 记」。
+ * `artifact_missing`）。文件先落地，这一步就只剩「验 + 记」。
+ *
+ * 2026-11-10 起它**不改需求状态**（以前 attach 会在同一个事务里把 inbox 推到待设计）：
+ * 生成材料只是一个动作，立项是另一个动作。所以这里也不再有「材料落地但迁移失败」
+ * 那种半成品要回滚——文件写出去就是一份历史版本，产物行记下来就是一次发生过的生成。
  *
  * 失败一律抛 `AppError`：`runJob` 接住它写进 `uemaster_jobs.error`，用户看到的就是
  * 这句话。所以每一句都必须说清「哪里不行」，不能出现「生成失败」四个字。
@@ -1577,7 +1581,16 @@ export async function composeEvaluation(
     throw new AppError('walkmap_rejected', `走查页构建失败：${built.error ?? built.errors.join('；')}`);
   }
 
-  const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, `${stage}.html`);
+  /**
+   * 产物落到**版本化的文件名**（2026-11-10 owner 的第一次纠正）：`evaluate-v003.html`。
+   *
+   * 以前是写死的 `evaluate.html`：重做一次就把上一份覆盖掉，而库里照样多一行——库说
+   * 「两版」，盘上只有一份。材料不可重建，覆盖就是丢（见 `versions.ts` 文件头）。
+   * 版本号取「库里行数」与「盘上最大版本号」的大者 + 1，所以既不会覆盖历史，也不会
+   * 与一次失败留下的孤儿文件撞名。
+   */
+  const version = await nextArtifactVersion(db, requirementId, req.number, stage);
+  const file = versionedFileOf(req.number, stage, version);
   await mkdir(path.dirname(file), { recursive: true });
   /**
    * 正文那一层（2026-11-09）：页面片段与标注都是给 PM 读的，所以先过 `relocateHtmlBody`

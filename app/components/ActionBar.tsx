@@ -24,14 +24,14 @@ const IDLE: ActionResult = { ok: true };
 /**
  * 动作名就是中文按钮名。同一个状态里不会同时出现两个同名的动作（打回分属评审/测试两态）。
  *
- * `evaluate`（评估）留在这张表里只是为了让 `Record<DetailAction, …>` 完整：读模型已经
- * 不再把它列进任何状态的动作条（P2 Task 4：它不是一次点击就能完成的动作，材料要生成）。
- * 评估的入口在抽屉「参考」段评估材料那一行的「生成」（P2.6 起由服务端跑生成器）。
- * 删掉这里的键会连类型并集一起动，而 `runAction` 仍然接得住这个领域动作
- * （`inbox → design` 是合法迁移，seed 就走它）。
+ * `approve` 就是「立项」（2026-11-10 起叫这个名字，之前叫 `evaluate`）。
+ *
+ * 它**不是**「出评估材料」：材料由抽屉「参考」段那一行的「生成」产出
+ * （`GenerateButton` → `generateAction`），那个动作不改状态。两个按钮、两件事——
+ * 材料是产物，立项是决定；把决定藏在产物里，用户就没有改主意的机会。
  */
 const LABEL: Record<DetailAction, string> = {
-  evaluate: '立项',
+  approve: '立项',
   submitReview: '提交评审',
   reviewPass: '通过',
   reviewReject: '打回',
@@ -56,7 +56,7 @@ type Field = {
  * 晚于发版日）因此都还走得到——表单不做客户端预校验，失败原因由服务说。
  */
 const FIELDS: Record<DetailAction, Field[]> = {
-  evaluate: [],
+  approve: [],
   submitReview: [{ name: 'prdUrl', label: 'PRD 链接', kind: 'text' }],
   reviewPass: [],
   reviewReject: [{ name: 'reason', label: '原因', kind: 'text' }],

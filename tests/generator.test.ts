@@ -544,7 +544,7 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
       select status, error from uemaster_jobs where id = ${jobId}`);
     expect(job.rows[0]).toMatchObject({ status: 'done', error: null });
 
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
     expect(await artifactExists(url)).toBe(true);
     // 产物根在仓库外（`FLOWERS_DATA_DIR` 指向临时目录），按站内路径反解，不拼仓库路径。
     const body = await readFile(siteFile(url), 'utf8');

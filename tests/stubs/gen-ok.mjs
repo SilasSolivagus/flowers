@@ -10,7 +10,11 @@
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 
-const file = /data\/uemaster\/PAN-\d+\/(?:evaluate|review|inspect)\.html/.exec(input)?.[0];
+/**
+ * 产物路径从包正文里抠出来。2026-11-10 起包里带版本号（`evaluate-v003.html`），
+ * 所以版本段是可选的——老包（没有版本号）与存量用例都还这么写。
+ */
+const file = /data\/uemaster\/PAN-\d+\/(?:evaluate|review|inspect)(?:-v\d+)?\.html/.exec(input)?.[0];
 if (!file) {
   process.stderr.write('stub: 任务包里没有产物路径\n');
   process.exit(2);
@@ -24,6 +28,9 @@ await writeFile(file, [
   '<meta charset="utf-8">',
   '<title>stub 产物</title>',
   '<p data-stub="ok">这是测试 stub 写出来的材料，不是模型生成的。</p>',
+  // 把「写的是哪个文件」也写进正文：这样才能证明两次生成落的是**两份不同的文件**，
+  // 而不是同一份被覆盖了两次（那正是 2026-11-10 要修的那个 bug）。
+  `<p data-stub-file="${file}">${file}</p>`,
 ].join('\n'), 'utf8');
 
 process.stdout.write(`stub wrote ${file}\n`);

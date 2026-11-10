@@ -111,7 +111,8 @@ describe('runJob（worker 的那一段）', () => {
     process.env.FLOWERS_GEN_CMD = stub('gen-ok.mjs');
     const r = await inbox();
     const jobId = await insertJob(r.id, 'evaluate');
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    // 版本化文件名（2026-11-10）：第一版是 v001，不再写死 `evaluate.html`。
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
 
     await runJob(db, jobId, { actor: '吕品', timeoutMs: 10000 });
 
@@ -130,8 +131,9 @@ describe('runJob（worker 的那一段）', () => {
     expect(artifact.rows[0]!.created_by).toBe('吕品');
     expect(artifact.rows[0]!.id).toBe(job.artifact_id);
 
-    // attach 的既有语义透过生成这条路照样成立：收集里的需求收到评估材料 → 待设计。
-    expect(await requirementState(r.id)).toBe('design');
+    // 2026-11-10 起生成**不改状态**：材料是产物，立项是决定。这条需求仍然在收集里，
+    // 要进待设计得有人点「立项」（trigger `approve`）。
+    expect(await requirementState(r.id)).toBe('inbox');
 
     const status = await jobStatus(db, jobId);
     expect(status).toMatchObject({ status: 'done', url, error: null });
@@ -141,7 +143,7 @@ describe('runJob（worker 的那一段）', () => {
     process.env.FLOWERS_GEN_CMD = stub('gen-fail.mjs');
     const r = await inbox();
     const jobId = await insertJob(r.id, 'evaluate');
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
 
     await runJob(db, jobId, { timeoutMs: 10000 });
 
@@ -190,20 +192,26 @@ describe('runJob（worker 的那一段）', () => {
     expect(await artifactCount()).toBe(0);
   });
 
-  it('旧文件还在但没被重写：也不算成功（不把上一版当新结果）', async () => {
+  it('上一版还在而这一版什么都没写：不算成功，且上一版一个字节都没动', async () => {
     process.env.FLOWERS_GEN_CMD = stub('gen-silent.mjs');
     const r = await inbox();
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
-    // 上一版产物：路径是固定的，重做会覆盖同一份文件。
-    await writeArtifact(url, '<!doctype html><title>上一版</title>');
+    const old = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
+    // 上一版产物（存量形状：没有 `-v` 段的老文件也照样在盘上）。
+    await writeArtifact(old, '<!doctype html><title>上一版</title>');
     const jobId = await insertJob(r.id, 'evaluate');
 
     await runJob(db, jobId, { timeoutMs: 10000 });
 
     const job = await jobRow(jobId);
     expect(job.status).toBe('failed');
-    expect(job.error).toContain('产物文件没有更新');
+    // 2026-11-10 起这一版的落点是**另一个文件**（v002），所以文件根本不存在。
+    // 以前路径是固定的，同样的失败会表现为「文件没有更新」；两种形状指向同一件事：
+    // 这次没有写出新东西，不能把上一版当成新结果。
+    expect(job.error).toContain('产物文件不存在');
+    expect(job.error).toContain('evaluate-v002.html');
     expect(await artifactCount()).toBe(0);
+    // 上一版原样还在（覆盖不会再发生）。
+    expect(await artifactExists(old)).toBe(true);
   });
 
   it('没有 PRD 的评审：不跑生成器，直接给出缺什么', async () => {
@@ -318,6 +326,11 @@ describe('artifactUrlIn（包 → 产物路径）', () => {
     const pack = '交付：把文件写到 data/uemaster/PAN-7/review.html，'
       + '然后调用 uemaster_attach，把站内路径 /uemaster/PAN-7/review.html 交回';
     expect(artifactUrlIn(pack)).toBe('/uemaster/PAN-7/review.html');
+
+    // 2026-11-10 起包里带版本号；同一个解析器也要认它（否则新包会解析失败）。
+    const versioned = '交付：把文件写到 data/uemaster/PAN-7/review-v003.html，'
+      + '然后调用 uemaster_attach，把站内路径 /uemaster/PAN-7/review-v003.html 交回';
+    expect(artifactUrlIn(versioned)).toBe('/uemaster/PAN-7/review-v003.html');
   });
 
   it('包里没有路径：抛中文错误', () => {
@@ -342,7 +355,7 @@ describe('整条路（startGeneration 真的甩出一个 detached worker）', ()
     }
 
     expect(status?.status).toBe('done');
-    expect(status?.url).toBe(`/uemaster/PAN-${r.number}/evaluate.html`);
+    expect(status?.url).toBe(`/uemaster/PAN-${r.number}/evaluate-v001.html`);
     expect(await artifactExists(status!.url!)).toBe(true);
   }, 30000);
 });

@@ -287,8 +287,9 @@ describe('写工具：每个都调到对的服务，actor 是 token 那个人', 
     const got = await call('uemaster_attach', { requirementId: id, stage: 'evaluate', url });
     expect(attach).toHaveBeenCalledWith(db, '吕品', { requirementId: id, stage: 'evaluate', url });
     expect(jsonOf(got)).toEqual({ ok: true, url });
-    // 评估材料是通行证：同一次 attach 把「收集」推进到「待设计」（领域层的事）。
-    expect(await stateOf(id)).toBe('design');
+    // 2026-11-10 起交材料**不改状态**：状态要由 requirement_start_design（立项）推。
+    // 这条边界是 owner 的第二次纠正——把决定藏在产物里，用户就没有改主意的机会。
+    expect(await stateOf(id)).toBe('inbox');
   });
 
   it('requirement_submit_review', async () => {

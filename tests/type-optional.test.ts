@@ -68,7 +68,7 @@ describe('Ruling 1：类型可空', () => {
     const edge = TRANSITIONS.find((t) => t.from === 'inbox' && t.to === 'design')!;
     expect(edge.guard).not.toBe('type');
     expect(edge.guard).toBe('brief');
-    expect(edge.trigger).toBe('evaluate');
+    expect(edge.trigger).toBe('approve');   // 2026-11-10：trigger 从 evaluate 改名 approve（立项）
   });
 
   it('显式空串（表单里那个「未指定」）落成 null，不是空串', async () => {

@@ -465,51 +465,54 @@ describe('attachArtifact', () => {
 });
 
 /**
- * R-P2-8：评估产物即通行证。
+ * 生成 / 交回材料**不改需求状态**（2026-11-10 owner 的第二次纠正）。
  *
- * Task 4 把「评估」从动作条拿掉之后，`收集 → 待设计` 这道门在界面上没有入口了
- * （剩下的只有 提交评审 / 拒绝 / 搁置）。裁决：**产物本身是那道门的触发**——
- * 给一条还在收集里的需求接上 evaluate 材料，就要在同一个事务里把它推进到待设计，
- * 两件事要么都成、要么都不成。
+ * 这个 describe 原来叫「R-P2-8：评估产物即通行证」——那时给一条收集里的需求接上
+ * evaluate 材料，会在同一个事务里把它推进到待设计。owner 看出来的问题是**把决定
+ * 藏进了产物里**：「我生成一份材料看看」与「这条需求我接了、我立项」成了同一个动作，
+ * 用户没有改主意的机会。
  *
- * 三条边界都在这一个 describe 里钉住：只认 evaluate、只认 inbox、门禁与真 evaluate
- * 同一条（走错门的动作整条 attach 回滚——Ruling 1 之前这条门是「没有类型」，
- * 类型可空之后换成「只有 evaluate 能触发迁移」，见最后那条用例）。
+ * 现在：**材料是产物，立项是决定**。attach 只落产物行 + `uemaster.attached` 事件，
+ * 状态一个字不动；立项由 `evaluate()`（trigger `approve`，门是 `guard: 'brief'`）
+ * 或界面上那个「立项」按钮做。这一组用例钉住的是「没有第二种改状态的路径」。
  */
-describe('R-P2-8：评估产物即通行证', () => {
+describe('生成 / 交回材料不改状态', () => {
   async function stateOf(id: string): Promise<string> {
     const res = await db.execute<{ state: string }>(sql`select state from requirements where id = ${id}`);
     return res.rows[0]!.state;
   }
 
-  async function payloadOf(type: string): Promise<unknown> {
-    const res = await db.execute<{ payload: string }>(
-      sql`select payload from events where type = ${type} order by seq desc limit 1`);
-    return JSON.parse(res.rows[0]!.payload);
-  }
-
-  it('收集 + 评估产物：落材料的同时推进到待设计，两条事件按「材料 → 迁移」的次序写', async () => {
+  it('收集 + 评估材料：材料落地、状态不动的，只有两条事件（创建 + 材料）', async () => {
     const { id } = await newRequirement();
     expect(await stateOf(id)).toBe('inbox');
 
-    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v001.html');
 
-    // 状态：待设计。它不是 attach 的副作用，是这次 attach 的一部分。
-    expect(await stateOf(id)).toBe('design');
+    // 状态：仍在收集。材料出过几版都可以，状态只有点了「立项」才动。
+    expect(await stateOf(id)).toBe('inbox');
     expect(await artifactCount()).toBe(1);
-    // 事件：建需求 → 提交评估材料 → 评估完成。相邻两条读起来是同一件事的两个事实。
-    expect(await eventTypes()).toEqual([
-      'requirement.created', 'uemaster.attached', 'requirement.evaluated',
-    ]);
-    // 迁移事件的 payload 与真 evaluate 的**逐字段一致**：时间轴 / 报表不该能分辨
-    // 「谁踩的这道门」，它只该看到一次 inbox → design。
-    expect(await payloadOf('requirement.evaluated')).toEqual({ from: 'inbox', to: 'design' });
+    expect(await eventTypes()).toEqual(['requirement.created', 'uemaster.attached']);
   });
 
-  it('评审 / 走查产物绝不改状态', async () => {
+  it('连续两次生成：两行产物、两份文件，状态仍然不动（这正是要保住的历史）', async () => {
     const { id } = await newRequirement();
-    await attachOk(id, 'review', '/uemaster/PAN-1/review.html');
-    await attachOk(id, 'inspect', '/uemaster/PAN-1/inspect.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v001.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v002.html');
+
+    expect(await stateOf(id)).toBe('inbox');
+    expect(await artifactCount()).toBe(2);
+    expect(await eventTypes()).toEqual([
+      'requirement.created', 'uemaster.attached', 'uemaster.attached',
+    ]);
+    // 两份文件的链接不同（版本化之前它们是同一个 url，第二份把第一份盖掉了）。
+    const urls = (await listArtifacts(db, id)).map((row) => row.url);
+    expect(new Set(urls).size).toBe(2);
+  });
+
+  it('评审 / 走查材料同样不改状态', async () => {
+    const { id } = await newRequirement();
+    await attachOk(id, 'review', '/uemaster/PAN-1/review-v001.html');
+    await attachOk(id, 'inspect', '/uemaster/PAN-1/inspect-v001.html');
 
     expect(await stateOf(id)).toBe('inbox');
     expect(await eventTypes()).toEqual([
@@ -517,51 +520,40 @@ describe('R-P2-8：评估产物即通行证', () => {
     ]);
   });
 
-  it('待设计（以及更后面）重做评估：只落新材料，不把人拽回也不动状态', async () => {
+  it('待评审上重做评估材料：停在待评审（补材料不该变成回退）', async () => {
     const { id } = await newRequirement();
-    // 先正常评估到待设计，再提交评审到待评审——「重做评估」最常发生在更后面。
     await evaluate(db, '吕品', { requirementId: id });
     await submitReview(db, '吕品', { requirementId: id, prdUrl: 'https://x/prd' });
     expect(await stateOf(id)).toBe('review');
 
-    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v2.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v002.html');
 
-    // 停在待评审：一条已经过了评审的需求，不该因为补一份评估材料被打回设计。
     expect(await stateOf(id)).toBe('review');
     expect(await artifactCount()).toBe(1);
-    // 只有材料事件，没有第二条 requirement.evaluated。
+    // 迁移事件只有立项那一条（来自前面的 evaluate），attach 一条都不添。
     expect((await eventTypes()).filter((t) => t === 'requirement.evaluated')).toHaveLength(1);
-    expect(await eventTypes()).toEqual([
-      'requirement.created', 'requirement.evaluated',
-      'requirement.review_requested', 'uemaster.attached',
-    ]);
   });
 
-  it('收集 + 没有类型：照样推进到待设计（Ruling 1：类型不再是门）', async () => {
-    const { id } = await newRequirement();
-    // 类型现在可以是 null（Ruling 1）。这条用例是 attach 那条路上的同一件事：
-    // 「评估产物即通行证」不该因为需求没填类型而失效——那正是裁决要放行的需求。
-    await db.execute(sql`update requirements set type = null where id = ${id}`);
-
-    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');
-
-    expect(await stateOf(id)).toBe('design');
-    expect(await artifactCount()).toBe(1);
-    expect(await eventTypes()).toEqual([
-      'requirement.created', 'uemaster.attached', 'requirement.evaluated',
-    ]);
-  });
-
-  it('收集 + 评审材料：不推进（这道门只认 evaluate，与真 evaluate 同一条规则）', async () => {
-    // Ruling 1 之前这条边界由 missing_type 顺带守住（那时「没有类型」的需求连
-    // 立项都过不去）。类型可空之后，仍然要有一条用例钉住「只有 evaluate 触发迁移」，
-    // 否则「补一份评审材料把需求推进到待设计」会变成一条没人拦的路。
+  it('收集 + 没有类型：材料照样落地，状态照样不动（Ruling 1：类型不再是门）', async () => {
     const { id } = await newRequirement();
     await db.execute(sql`update requirements set type = null where id = ${id}`);
-    await attachOk(id, 'review', '/uemaster/PAN-1/review.html');
+
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v001.html');
 
     expect(await stateOf(id)).toBe('inbox');
+    expect(await artifactCount()).toBe(1);
     expect(await eventTypes()).toEqual(['requirement.created', 'uemaster.attached']);
+  });
+
+  it('收集里六问不齐：材料照样能落地（六问管的是「能不能立项 / 材料能不能编」的那道门，在生成入口上）', async () => {
+    // 直接 attach（人手 / agent 交回材料）这条路不过六问门：门在「生成」与「立项」
+    // 两处，而不是在所有写产物的地方。这条边界有意留在服务层：attach 收的是链接，
+    // 它无从判断那份材料是按什么画出来的。
+    const { id } = await createRequirement(db, '吕品', {
+      title: '没有六问的需求', type: 'feature', requester: '孙建宏',
+    });
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v001.html');
+    expect(await stateOf(id)).toBe('inbox');
   });
 });
 
@@ -571,17 +563,26 @@ describe('listArtifacts', () => {
     expect(await listArtifacts(db, id)).toEqual([]);
   });
 
-  it('同一 stage 取最新一行，旧的只是历史', async () => {
+  it('同一 stage 的每一版都给（新的在前），历史行要能点开', async () => {
+    // 2026-11-10 起不再「每 stage 只给最新一行」：抽屉画「最新一份 + 历史（N 版）」，
+    // 而历史版本必须打得开——只给最新一行的话，旧版本在库里有、在盘上有、在界面上
+    // 一个入口都没有（那和丢掉只差一步）。
     const { id } = await newRequirement();
-    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');
-    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v2.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v001.html');
+    await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate-v002.html');
     const rows = await listArtifacts(db, id);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ stage: 'evaluate', url: '/uemaster/PAN-1/evaluate-v2.html' });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.url)).toEqual([
+      '/uemaster/PAN-1/evaluate-v002.html',
+      '/uemaster/PAN-1/evaluate-v001.html',
+    ]);
     expect(rows[0]!.at).toBeInstanceOf(Date);
+    // 版本数两条行上都写着同一个数（它属于「这一组」，不属于某一行）。
+    expect(rows.map((r) => r.versions)).toEqual([2, 2]);
+    expect(rows.map((r) => r.contentLost)).toEqual([false, false]);
   });
 
-  it('三个 stage 各一行，按固定顺序 evaluate → review → inspect', async () => {
+  it('三个 stage 各一行（没有重做时），按固定顺序 evaluate → review → inspect', async () => {
     const { id } = await newRequirement();
     await attachOk(id, 'inspect', '/uemaster/PAN-1/inspect.html');
     await attachOk(id, 'evaluate', '/uemaster/PAN-1/evaluate.html');

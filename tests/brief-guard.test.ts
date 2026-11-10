@@ -113,9 +113,11 @@ afterAll(async () => {
 });
 
 describe('表：门挂在变迁上', () => {
-  it('inbox → design / evaluate 那一条带 guard: brief（不是靠调用方自觉）', () => {
+  it('inbox → design / approve（立项）那一条带 guard: brief（不是靠调用方自觉）', () => {
+    // trigger 2026-11-10 从 `evaluate` 改名 `approve`：生成材料不再走这条边，
+    // 这条边只剩「立项」一个含义（见 `state-machine.ts` 的 `Trigger`）。
     const edge = TRANSITIONS.find(
-      (t) => t.from === 'inbox' && t.to === 'design' && t.trigger === 'evaluate',
+      (t) => t.from === 'inbox' && t.to === 'design' && t.trigger === 'approve',
     )!;
     expect(edge.guard).toBe('brief');
   });
@@ -130,7 +132,7 @@ describe('表：门挂在变迁上', () => {
 describe('判据：核心三条，逐条点名', () => {
   it('三条齐 → 放行（返回那一条迁移）', () => {
     expect(evaluateLock(FILLED)).toBeNull();
-    expect(assertTrigger('inbox', 'design', 'evaluate', { brief: FILLED })).toMatchObject({
+    expect(assertTrigger('inbox', 'design', 'approve', { brief: FILLED })).toMatchObject({
       from: 'inbox', to: 'design', guard: 'brief',
     });
   });
@@ -139,7 +141,7 @@ describe('判据：核心三条，逐条点名', () => {
     for (const missing of ['context', 'problem', 'outcome'] as BriefKey[]) {
       const error = (() => {
         try {
-          assertTrigger('inbox', 'design', 'evaluate', { brief: without(missing) });
+          assertTrigger('inbox', 'design', 'approve', { brief: without(missing) });
         } catch (e) {
           return e as AppError;
         }
@@ -209,24 +211,34 @@ describe('服务层：立项被拒，而且什么都没发生', () => {
     ]);
   });
 
-  it('直接交回一份材料（attach 那条路）也撞同一道门：材料与迁移一起回滚', async () => {
+  it('交回一份材料（attach 那条路）不再撞这道门：它不改状态，所以也不需要过六问', async () => {
+    // 2026-11-10 owner 的第二次纠正之前，这里断言的是「材料与迁移一起回滚」——
+    // 那时 attach 顺手把需求推进到待设计，所以它必须过六问门。
+    //
+    // 现在 attach **只落产物**：状态一个字不动，也就没有什么「迁移」要过门。六问
+    // 只拦两个地方——生成（材料不能编，`start.ts`）与立项（决定不能空，`state-machine.ts`
+    // 的 `guard: 'brief'`）。这条用例钉住的是「没有第三处」。
     const requirementId = await seed(without('problem'));
 
-    const error = await caught(attachArtifact(db, '吕品', {
+    const attached = await attachArtifact(db, '吕品', {
       requirementId,
       stage: 'evaluate',
-      // 站外链接：attach 不会去 stat 本地文件，这一条只测状态迁移那道门。
-      url: 'https://example.com/evaluate.html',
-    }));
-    expect(error.code).toBe('missing_brief');
-    expect(error.message).toContain('还差一条没填：现在怎么做/哪不好');
+      // 站外链接：attach 不会去 stat 本地文件。
+      url: 'https://example.com/evaluate-v001.html',
+    });
+    expect(attached.stage).toBe('evaluate');
 
-    // 事务回滚：库里的材料行一条都没有，状态也没动（半个成果都不留）。
+    // 材料落了库、状态没动、没有迁移事件。
     const artifacts = await db.execute<{ n: number }>(sql`
       select count(*)::int as n from uemaster_artifacts where requirement_id = ${requirementId}`);
-    expect(Number(artifacts.rows[0]!.n)).toBe(0);
+    expect(Number(artifacts.rows[0]!.n)).toBe(1);
     expect(await stateOf(requirementId)).toBe('inbox');
-    expect(await eventTypes(requirementId)).toEqual(['requirement.created']);
+    expect(await eventTypes(requirementId)).toEqual(['requirement.created', 'uemaster.attached']);
+
+    // 而立项仍然撞同一道门（缺 problem）。
+    const error = await caught(evaluate(db, '吕品', { requirementId }));
+    expect(error.code).toBe('missing_brief');
+    expect(error.message).toContain('还差一条没填：现在怎么做/哪不好');
   });
 });
 
@@ -284,8 +296,10 @@ describe('两个门各说各的事，谁都不许开空头支票', () => {
     const message = lockMessage(['context', 'problem', 'outcome']);
     expect(message).not.toContain('收集阶段');
     expect(message).not.toContain('新建');
-    // 只承诺真能做的那一步：补完再评估。
-    expect(message).toContain('补完才能评估');
+    // 只承诺真能做的那一步：补完再回来点（立项与生成都要这三问，一句话点名两件事）。
+    expect(message).toContain('补完才能立项');
+    // 也不再写「评估要拿这三问立项」那种把两个动作混成一句话的措辞。
+    expect(message).not.toContain('评估要拿这三问立项');
   });
 });
 

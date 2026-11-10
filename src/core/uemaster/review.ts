@@ -8,6 +8,7 @@ import { parseRequirementId } from '../validate.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
+import { nextArtifactVersion, versionedFileOf } from './versions.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import {
@@ -39,7 +40,7 @@ import {
   answerTruncated, coerceAnswer, noJsonReason, normalizeFindingType,
   type ReviewFindingType,
 } from './shape.js';
-import { ARTIFACT_ROOT, artifactUrl } from './store.js';
+import { artifactUrl } from './store.js';
 import {
   findEmoji, renderWalkthrough, validateWalkmap,
   type Anno, type BuildResult, type Walkmap, type WalkmapNode,
@@ -1376,7 +1377,11 @@ export async function reviewRequirement(
     throw new AppError('walkmap_rejected', `评审材料构建失败：${built.error ?? built.errors.join('；')}`);
   }
 
-  const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, 'review.html');
+  // 版本化文件名（2026-11-10 owner 的第一次纠正）：`review-v002.html`。理由与评估那条路
+  // 逐字相同——写死的 `review.html` 让「重做一次」等于覆盖上一份材料，而库里照样多一行
+  // （见 `versions.ts` 文件头）。评审材料尤其不能覆盖：它是评审判定的依据。
+  const version = await nextArtifactVersion(db, requirementId, req.number, 'review');
+  const file = versionedFileOf(req.number, 'review', version);
   await mkdir(path.dirname(file), { recursive: true });
   // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
   // 于是落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，`why`（唯一能拿去催人的

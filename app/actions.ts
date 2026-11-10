@@ -210,8 +210,18 @@ export async function retryGenerationAction(jobId: string): Promise<StartGenerat
   }
 }
 
-/** 评估：inbox → design。 */
-export async function evaluateAction(formData: FormData): Promise<ActionResult> {
+/**
+ * 立项：inbox → design（2026-11-10 owner 的第二次纠正之后，这是**唯一**改这个状态的动作）。
+ *
+ * 名字叫 `approveAction`、动作名是 `approve`、按钮写「立项」，而它底下调的领域服务仍叫
+ * `evaluate`（19 个用例文件与三处脚本 import 的那个名字）：改名只会让这一版多出二十个
+ * 文件的 diff，不会让任何人少踩一次坑。真正的口径在 trigger（`approve`）与这道动作本身。
+ *
+ * **它不生成评估材料**：材料由「参考」段那一行的「生成」产出（`generateAction`），
+ * 生成不改状态。两个动作分开的理由——材料是产物，立项是决定；把决定藏在产物里，
+ * 用户就没有改主意的机会。
+ */
+export async function approveAction(formData: FormData): Promise<ActionResult> {
   const requirementId = field(formData, 'id');
   return run((actor) => evaluate(db, actor, { requirementId }));
 }
@@ -280,7 +290,7 @@ export async function restoreAction(formData: FormData): Promise<ActionResult> {
  * 类型系统钉住：读模型加了动作而这里没接，`Record` 会编译失败。
  */
 const ACTIONS: Record<DetailAction, (formData: FormData) => Promise<ActionResult>> = {
-  evaluate: evaluateAction,
+  approve: approveAction,
   submitReview: submitReviewAction,
   reviewPass: reviewPassAction,
   reviewReject: reviewRejectAction,

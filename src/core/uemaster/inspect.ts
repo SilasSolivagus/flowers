@@ -31,6 +31,7 @@ import type { LocateResult } from '../locate/types.js';
 import { readPrd, type PrdReadResult } from '../prd/read.js';
 import { latestSnapshot, type Snapshot } from '../prd/snapshots.js';
 import { attachArtifact } from './attach.js';
+import { nextArtifactVersion, versionedFileOf } from './versions.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import {
@@ -44,7 +45,7 @@ import {
   complete, extractJson, resolveProviderConfig,
   type ProviderConfig, type ProviderResult,
 } from './provider.js';
-import { ARTIFACT_ROOT, artifactUrl } from './store.js';
+import { artifactUrl } from './store.js';
 import {
   renderWalkthrough, validateWalkmap,
   type Anno, type BuildResult, type Frame, type NodeKind,
@@ -1884,7 +1885,10 @@ export async function inspect(
     throw new AppError('walkmap_rejected', `走查材料构建失败：${built.error ?? built.errors.join('；')}`);
   }
 
-  const file = path.join(ARTIFACT_ROOT, `PAN-${req.number}`, 'inspect.html');
+  // 版本化文件名（2026-11-10 owner 的第一次纠正）：`inspect-v002.html`。同评估 / 评审两条
+  // 路一样的理由：写死名字等于让重做覆盖上一份，而库里照样多一行（见 `versions.ts`）。
+  const version = await nextArtifactVersion(db, requirementId, req.number, 'inspect');
+  const file = versionedFileOf(req.number, 'inspect', version);
   await mkdir(path.dirname(file), { recursive: true });
   // 横幅在**写盘之前**插（终审 Blocker 2）：那几句话原本只进提示词，材料里一个字都不带，
   // 于是评审/走查落 `absent` 时 PM 只看到标题里一句「未参考代码现状」，而 `why`（唯一

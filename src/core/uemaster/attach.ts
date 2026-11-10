@@ -4,7 +4,6 @@ import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { asText, parseRequirementId, requirePlainObject } from '../validate.js';
-import { evaluateInTx } from '../requirements/evaluate.js';
 import type { Locked } from '../requirements/lock.js';
 import { isStage, type Stage } from './packs.js';
 import { ARTIFACT_PREFIX, BAD_URL, adoptLegacyArtifact, artifactFile } from './store.js';
@@ -82,7 +81,7 @@ function decodedLayers(url: string): string {
  * 产物链接的两种合法形状：完整 http(s) 链接，或以 `/uemaster/` 开头的站内路径。
  *
  * 为什么站内路径是必需的形状：文件写在项目里的 `data/uemaster/`，交回来的就是
- * `/uemaster/PAN-7/evaluate.html`（由 `app/uemaster/[...path]/route.ts` 服务）；
+ * `/uemaster/PAN-7/evaluate-v003.html`（由 `app/uemaster/[...path]/route.ts` 服务）；
  * 要求它拼一个绝对域名只会拼错。
  *
  * 为什么站内路径的口径从「以 / 开头」收紧成「以 /uemaster/ 开头」：静态根已经不是
@@ -147,23 +146,40 @@ async function assertSiteFileExists(url: string): Promise<void> {
 }
 
 /**
- * 记一份 UEmaster 产物：校验 + 落库 + 事件（+ 收集里的评估材料顺带推进到待设计）。
+ * 记一份 UEmaster 产物：校验 + 落库 + 事件。**不改需求状态**（2026-11-10 起）。
  *
  * 只存链接、不存正文（spec §5）：正文是 HTML，进库就成了「谁负责渲染、谁负责清理」
  * 的新问题；而文件的位置是确定的（`data/uemaster/`，经 `/uemaster/...` 这条路由
  * 带着 sandbox CSP 出去），链接已经够用。
  *
- * 同一 (requirement, stage) 允许多行：重做一次就是一条新版本，读侧取最新。
- * 不 update 旧行——历史版本是「当初评审看的什么」的证据。
+ * 同一 (requirement, stage) 允许多行：重做一次就是一条新版本，读侧取最新一行，
+ * 其余进「历史」。2026-11-10 起每份新材料的文件名带版本号（`evaluate-v003.html`，
+ * 见 `versions.ts`），所以「多行」在磁盘上也真的是多份文件——在这之前它们指向
+ * 同一个 `evaluate.html`，第二份把第一份覆盖掉了。
+ *
+ * ── 为什么这里**不再**推进状态（owner 的第二次纠正）
+ *
+ * R-P2-8 曾经让「接上一份评估材料」本身成为 `收集 → 待设计` 的扳机：材料落了库，需求
+ * 就顺带被推到待设计。owner 看出来的问题是**把决定藏进了产物里**——「我生成一份材料
+ * 看看」与「这条需求我接了、我立项」于是变成同一个点击，用户没有改主意的机会，而
+ * 「材料出过几版」与「立没立项」在时间线上也分不开。
+ *
+ * 现在两件事分开：
+ * - **生成 / 交回材料**：只是一个动作，落一行产物 + 一条 `uemaster.attached` 事件，
+ *   状态一个字不动（收集里的需求可以反复重做材料，这正是它该有的自由）；
+ * - **立项**：`收集 → 待设计`，由用户点「立项」触发（`requirements/evaluate.ts`，
+ *   trigger `approve`，带 `guard: 'brief'`），或走 MCP 的 `requirement_start_design`。
+ *
+ * 理由一句话：**材料是产物，立项是决定**。决定该由一个明说的动作做，而不是「我看过
+ * 材料」的副作用。
  *
  * 存在性检查放在事务里、并且用一次 `select ... for update` 而不是直接 insert：外键
  * 冲突抛的是英文的 23503，而「这条需求不存在」是调用方（MCP agent）最常撞上的错误，
- * 得给它中文 code。加行锁是为了 R-P2-8：这条需求如果还在收集里，本次 attach 会顺带
- * 把它推进到待设计（见下面最后一段），那次判断必须读在一个不会被并发迁移改掉的
- * 视图上。
+ * 得给它中文 code。行锁仍然要：软删除可能正好发生在这次 attach 中间，而「需求还在
+ * 不在」是这个事务唯一的判断——锁住的才是这次 insert 真正插进去的那一行。
  *
- * 顺序是「需求存在」→「站内文件存在」→ insert → 事件 →（必要时）推进：需求 id 打错
- * 时该报「需求不存在」，而不是报一个跟这条需求毫无关系的文件缺失。
+ * 顺序是「需求存在」→「站内文件存在」→ insert → 事件：需求 id 打错时该报「需求不存在」，
+ * 而不是报一个跟这条需求毫无关系的文件缺失。
  *
  * P4-02 起多收一个可空的 `inputHash`：这份产物是照着哪一版描述生成的。它由**生成
  * 入口**在读需求那一刻算好带下来（见 `fingerprint.ts` 与 `start.ts` 的注释），这里
@@ -185,16 +201,18 @@ export async function attachArtifact(
   return db.transaction(async (tx) => {
     // `deleted_at is null`：软删除的需求对外等于不存在（P4-02）。这条检查同时守住了
     // 一条更隐蔽的路——一次生成跑完时需求已经被删了，attach 会在这里说不，而不是
-    // 往一条看不见的需求上再挂一份材料、再推它一次状态。
-    // 取回来的就是 `Locked` 那一整行：`evaluateInTx` 会把这一行交给 `brief` 门，
-    // 而那道门要逐条点名缺哪几格（2026-11-10）。少取 context / problem / outcome，
-    // 迁移会被拒成「三条全空」——材料落了库、状态没推进，正是要防的那一半。
+    // 往一条看不见的需求上再挂一份材料。
+    //
+    // 取回整行（`Locked`）而不是只判存在：下面的 insert 是这次唯一一处写入，行锁让
+    // 「这条需求还在」这个判断读到的就是它将要写入的那一行。
+    //
+    // 列的清单仍是 `Locked` 那一整行：`evaluateInTx` 不再从这里调用了（见下），但那
+    // 一行是「这条需求现在长什么样」的公共形状，删列会让下一次需要它的人再猜一遍。
     const found = await tx.execute<Locked>(
       sql`select state, type, prd_url, context, problem, outcome from requirements
            where id = ${requirementId} and deleted_at is null
            for update`);
-    const row = found.rows[0];
-    if (!row) throw new AppError('not_found', NO_REQUIREMENT);
+    if (!found.rows[0]) throw new AppError('not_found', NO_REQUIREMENT);
 
     // 只验站内路径：http(s) 的产物在别人服务器上，这里够不着。
     if (url.startsWith('/')) await assertSiteFileExists(url);
@@ -212,32 +230,17 @@ export async function attachArtifact(
     });
 
     /**
-     * R-P2-8：**评估产物即通行证**。
+     * 这里**曾经**有一段 R-P2-8：`stage === 'evaluate' && row.state === 'inbox'` 时
+     * 调 `evaluateInTx` 把需求推进到待设计（并在同一个事务里跑 `brief` 门）。
      *
-     * Task 4 把「评估」从动作条拿掉之后，`收集 → 待设计` 这道门在界面上没有入口了
-     * （只余 提交评审 / 拒绝 / 搁置）。裁决是让材料本身成为扳机：收集里的需求接上
-     * evaluate 材料，就说明评估这一步真的发生了，它该进待设计。
+     * 2026-11-10 owner 的第二次纠正把它删掉了：**评估 ≠ 立项**。生成材料只落产物，
+     * 立项是一个单独的动作（trigger `approve`，见 `requirements/evaluate.ts`）。
+     * 报告：`docs/superpowers/plans/2026-11-10-v1-cut-report.md` §16。
      *
-     * 三条边界，缺一条都会造出更坏的行为：
-     * - 只认 `evaluate`：review / inspect 是旁证，不是这道门的材料，永远不改状态。
-     * - 只认 `inbox`：已经在待设计（或更后面）的需求重做评估，只该换一份新版本，
-     *   不该被打回——「补材料」变成「回退」是最难解释的一种。
-     * - 走 `evaluateInTx`，即真 evaluate 的那道门（Ruling 2 之后是 `brief`：核心三问
-     *   不齐不能立项）。它在**本事务里**执行，所以门一响，上面那行产物与
-     *   `uemaster.attached` 一起回滚——要么材料落地且需求推进，要么两件都没发生。
-     *   这就是为什么门必须在**变迁**上而不只在生成器上：这条 attach 路也是立项的入口
-     *   （人 / agent 把材料交回来），只装门在生成器里，这条路会绕过去。
-     *
-     * 事件用两条而不是一条：`uemaster.attached`（材料，payload 带 stage/url）在前，
-     * `requirement.evaluated`（迁移，payload `{from,to}`）在后。理由见
-     * task-4-report.md「R-P2-8」一节：现有约定里每个事件类型只承载**一件**领域事实
-     * （`requirement.review_requested` 折进 skippedEvaluation 只是同一步的细节），
-     * 而 `requirement.evaluated` 是读侧、报表、时间轴都认的迁移事件——把它藏进
-     * attach 的 payload 里，会有一条「状态变了但没有迁移事件」的路。
+     * 为什么不是「留着但默认关掉」：一条「材料落地会改状态」的路径只要还在，就还有
+     * 一个入口把决定藏在产物里（人 / agent / 批量导入都踩得到它）。删掉它，状态只能由
+     * `收集 → 待设计` 那条边改——那是唯一一处写着 `guard: 'brief'` 的地方。
      */
-    if (stage === 'evaluate' && row.state === 'inbox') {
-      await evaluateInTx(tx, actor, requirementId, row);
-    }
 
     return { id: inserted.rows[0]!.id, stage, url };
   });

@@ -47,6 +47,18 @@ const PILL: Record<string, string> = {
 };
 
 /**
+ * 存量「内容已被覆盖」的那句话（2026-11-10 owner 的第一次纠正）。
+ *
+ * 说清三件事，一件都不能省：**更早的版本**（哪几行）、**内容已被覆盖**（发生了什么）、
+ * **无法恢复，当时按固定文件名保存**（为什么救不回来）。省掉第三句，读的人会以为
+ * 「点开就有」，去点、发现内容不对，然后再也不信这一行。
+ *
+ * 导出成常量而不是写在 JSX 里：用例要断言**这一句**出现在屏幕上（`tests/artifact-versions.test.tsx`），
+ * 两处各写一份，某一天就会只改一处。
+ */
+export const LOST_HISTORY_NOTE = '更早的版本内容已被覆盖，无法恢复（当时按固定文件名保存）';
+
+/**
  * 导出的理由只有一条：这一行「画链接还是画『文件已丢失』」是一个必须被用例钉住的
  * 判断（`tests/artifact-missing.test.tsx`），而整张抽屉带着 `next/link`，在用例进程里
  * 起不来。判据在这一格里，用例就渲染这一格。
@@ -96,6 +108,33 @@ export function RefRow({
             但没有 `edit` 的人看不到按钮，所以这句话里要带动作名。 */}
         {item.present && item.filePresent === false && (
           <span className="miss">文件已丢失，重新生成</span>
+        )}
+        {/* 历史（N 版）：2026-11-10 起产物按版本号落盘，旧版本**打得开**。
+            默认收起：一屏三行里塞十几条历史链接，最新的那一份就找不着了。
+            版本号清零之前的那批数据（固定文件名时代）由 `contentLost` 如实标注——
+            那一行点开看到的是后来那一版的内容，所以行上写「内容已被覆盖」，整段
+            上面再写一句为什么救不回来（`LOST_HISTORY_NOTE`）。 */}
+        {item.history.length > 0 && (
+          <details className="hist">
+            <summary>历史（{item.history.length} 版）</summary>
+            {item.history.some((older) => older.contentLost) && (
+              <p className="note">{LOST_HISTORY_NOTE}</p>
+            )}
+            <ul>
+              {item.history.map((older) => (
+                <li key={`${older.url}@${older.at}`}>
+                  <a className="att" href={older.url} target="_blank" rel="noreferrer">
+                    {older.url}
+                  </a>
+                  <span>{older.atLabel ?? '—'}</span>
+                  {older.contentLost && <span className="miss">内容已被覆盖</span>}
+                  {!older.contentLost && older.filePresent === false && (
+                    <span className="miss">文件已丢失</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </div>
       <div className="acts">

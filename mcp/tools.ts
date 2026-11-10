@@ -9,6 +9,7 @@ import { BOARD_STATES } from '../src/core/read/board.js';
 import type { DetailAction } from '../src/core/read/detail.js';
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
 import { packFor, STAGES, type Stage } from '../src/core/uemaster/packs.js';
+import { nextArtifactVersion } from '../src/core/uemaster/versions.js';
 import { SERVICES } from './services.js';
 import { scopeAllows, scopeLabel, type Identity, type Scope } from './tokens.js';
 
@@ -193,12 +194,16 @@ function parseInput<T extends z.ZodTypeAny>(schema: T, raw: unknown): z.infer<T>
  * `Record<DetailAction, …>` 不是 `Record<string, …>`：`DetailAction` 加了成员而这里没跟，
  * 编译就失败——比测试早一步。
  *
- * `evaluate` 是「立项」：inbox → 待设计。它曾经刻意留空（当时把它当成「生成评估材料」，
- * 而那不是一个点一下就能完成的动作）。P4-08 认领上线之后它回来了——认领只给负责人、
- * 不动状态，而收集状态的唯一出口就是这条边；不把工具放出来，agent 认领完同样卡死。
+ * `approve` 是「立项」：inbox → 待设计（2026-11-10 起叫这个名字，之前叫 `evaluate`）。
+ * 它曾经刻意留空（当时把它当成「生成评估材料」，而那不是一个点一下就能完成的动作）。
+ * P4-08 认领上线之后它回来了——认领只给负责人、不动状态，而收集状态的唯一出口就是
+ * 这条边；不把工具放出来，agent 认领完同样卡死。
+ *
+ * 它与 `uemaster_plan` / `uemaster_attach`（出材料 / 交材料）是**两件事**：那两个不改
+ * 状态，这一个改。理由见 `requirement_start_design` 的 purpose。
  */
 export const LEGAL_FROM: Record<DetailAction, readonly State[]> = {
-  evaluate: ['inbox'],
+  approve: ['inbox'],
   submitReview: ['inbox', 'design'],
   reject: ['inbox'],
   shelve: ['inbox', 'design', 'review', 'queue', 'ready', 'dev', 'test', 'live'],
@@ -228,8 +233,9 @@ type Draft = Omit<ToolDef, 'description'> & { purpose: string };
  * 每个工具声明的「合法状态」。
  *
  * 没有 `action` 的工具（列表 / 详情 / PRD / 任务包 / 建需求 / 交材料）不受状态机约束：
- * 它们在任何状态下都能调，其中只有「交材料」会写库（但它也不推状态机——评估材料
- * 推进到待设计那一步是 `attachArtifact` 内部的事，agent 不需要知道）。
+ * 它们在任何状态下都能调，其中只有「交材料」会写库。它**不推状态机**（2026-11-10 起）：
+ * 「材料落地就进待设计」那条内部耦合已经删掉，推进状态只能调
+ * `requirement_start_design`（立项）。
  */
 function legalSentence(draft: Draft): string {
   if (draft.action === null) return '合法状态：任何状态都能调，不按状态拒绝。';
@@ -272,6 +278,14 @@ async function planTool(identity: Identity, raw: unknown): Promise<string[]> {
   const detail = await SERVICES.getRequirementDetail(requirementId);
   if (detail === null) throw new AppError('not_found', NO_REQUIREMENT);
 
+  /**
+   * 这一版是第几版（2026-11-10 owner 的第一次纠正）：包里那句「写到哪个文件」必须带
+   * 版本号，否则照着做的 agent 会覆盖上一份材料（而库里照样多一行）。
+   *
+   * 版本号在这里算一次（与 `start.ts` 的 runJob 同一个函数），所以「MCP 拿到的包」与
+   * 「Flowers 自己跑出来的包」写的是同一个文件名形状：`evaluate-v003.html`。
+   */
+  const version = await nextArtifactVersion(db, detail.id, detail.number, stage);
   const pack = packFor(stage, {
     id: detail.id,
     number: detail.number,
@@ -279,6 +293,7 @@ async function planTool(identity: Identity, raw: unknown): Promise<string[]> {
     type: detail.info.type,
     requester: detail.info.requester,
     prdUrl: detail.info.prdUrl,
+    version,
   });
 
   // 包正文单独一段：它就是给 agent 的指令，不该被 JSON 转义成一行。
@@ -518,10 +533,14 @@ async function shelveTool(identity: Identity, raw: unknown): Promise<string[]> {
 }
 
 /**
- * 「立项」= 收集 → 待设计。
+ * 「立项」= 收集 → 待设计（状态机的 trigger 叫 `approve`）。
  *
  * 认领（`requirement_claim`）只把负责人换成你，**不动状态**；收集状态的唯一出口是
  * 这一条边。没有它，agent 认领完就卡在收集列，只能直接提交 PRD 跳过设计。
+ *
+ * 2026-11-10 起它**不再**是「交回评估材料」的副作用：`uemaster_attach` 只落产物、
+ * 不改状态（owner 的第二次纠正：材料是产物，立项是决定）。所以 agent 想推进这条需求，
+ * 必须显式调这个工具——这也是六问那道门（核心三问）唯一的入口。
  */
 async function startDesignTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId } = parseInput(restoreInput, raw);
@@ -594,7 +613,9 @@ export const TOOLS: readonly ToolDef[] = [
     inputSchema: planInput,
     purpose: '为一条需求生成某个阶段的 UEmaster 任务包（可直接执行的中文指令：画什么、'
       + '写到哪个文件、怎么交回来）。阶段只有 evaluate（评估）/ review（评审）/ inspect（走查）。'
-      + '纯读：不改需求状态、不写时间线。拿到包之后照它做，写完文件再调 uemaster_attach。',
+      + '纯读：不改需求状态、不写时间线——材料是产物，立项（requirement_start_design）是'
+      + '另一个动作。包里的文件名带版本号（evaluate-v003.html），照着写不会覆盖历史版本。'
+      + '拿到包之后照它做，写完文件再调 uemaster_attach。',
     call: planTool,
   }),
   tool({
@@ -613,7 +634,7 @@ export const TOOLS: readonly ToolDef[] = [
     scope: 'write',
     action: null,
     inputSchema: attachInput,
-    purpose: '把已经生成好的产物链接交出：站内路径（形如 /uemaster/PAN-7/evaluate.html，'
+    purpose: '把已经生成好的产物链接交出：站内路径（形如 /uemaster/PAN-7/evaluate-v003.html，'
       + '项目根目录 data/uemaster/ 下必须真有这个文件）或 http(s) 完整链接。'
       + '会写一条 uemaster.attached 事件；需求还在「收集」时交评估材料会顺带推进到「待设计」。',
     call: attachTool,
@@ -681,10 +702,13 @@ export const TOOLS: readonly ToolDef[] = [
     name: 'requirement_start_design',
     title: '立项（收集 → 待设计）',
     scope: 'write',
-    action: 'evaluate',
+    action: 'approve',
     inputSchema: restoreInput,
     purpose: '接手之后往下走一步：从「收集」进「待设计」，意思是「我去出正式 PRD」。'
-      + '无主的需求要先 requirement_claim；有主之后只有负责人 / 条线负责人 / 超管能立项。',
+      + '无主的需求要先 requirement_claim；有主之后只有负责人 / 条线负责人 / 超管能立项。'
+      + '核心三问（谁在什么情况下用 / 现在怎么做哪不好 / 做成什么样算成功）不齐会被拒，'
+      + '拒的那句话会点名缺哪几条。**它与生成评估材料是两件事**：uemaster_plan / '
+      + 'uemaster_attach 只出材料、交材料，不改状态。',
     call: startDesignTool,
   }),
   tool({

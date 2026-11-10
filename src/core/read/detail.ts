@@ -31,14 +31,17 @@ import {
 /**
  * 当前状态下合法的动作。名字与页面动作条、server action 一一对应。
  *
- * **`evaluate` 留在这个并集里，但没有任何状态会给出它**（P2 Task 4）：从动作条上
- * 拿掉它的理由不是「评估不需要发生」，而是它根本不是一个点一下就能完成的动作
- * （材料要生成）。P2.6 之后材料由「参考」段那一行的「生成」产出，类型里保留它，
- * 是因为 `inbox → design` 仍是领域里合法的迁移（`src/core/requirements/evaluate.ts`
- * 与 seed 都走它），`runAction` 也还接得住；删掉它等于让动作条与领域对不上账。
+ * `approve` 就是「立项」（2026-11-10 owner 的第二次纠正）。它此前叫 `evaluate`（评估），
+ * 因为当时「生成评估材料」与「进待设计」是同一个点击。拆开之后：**材料是产物，
+ * 立项是决定**——生成走「参考」段那一行的「生成」（`uemaster/start.ts`），不改状态；
+ * 立项是这里这个动作，`inbox → design`，状态机的 trigger 也叫 `approve`。
+ *
+ * 名字必须改，不能留：一个叫 `evaluate` 的动作会让人以为「点它 = 出材料」，而它做的
+ * 恰恰是**与材料无关**的那件事（决定）。「评估」两个字只剩一个合法去处——评估材料
+ * 那个产物槽位（`Stage` 的 `evaluate`）。
  */
 export type DetailAction =
-  | 'evaluate' | 'submitReview' | 'reject' | 'shelve'
+  | 'approve' | 'submitReview' | 'reject' | 'shelve'
   | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore';
 
 /**
@@ -53,7 +56,7 @@ export type DetailAction =
  * 所以「待评审」「不是派给我」两件事都由它回答，这里不重复写。
  */
 export const ACTION_ABILITY: Record<DetailAction, Ability> = {
-  evaluate: 'edit',
+  approve: 'edit',
   submitReview: 'edit',
   reject: 'edit',
   shelve: 'edit',
@@ -80,6 +83,24 @@ export type DetailPermissions = {
 
 const NO_PERMISSIONS: DetailPermissions = {
   edit: false, review: false, reassignOwner: false, claim: false, manageMembers: false,
+};
+
+/**
+ * 参考段里**一个历史版本**的一行（2026-11-10）。
+ *
+ * 三格各自回答一件事，谁都不能顶替谁：
+ * - `url` / `atLabel`：那一版叫什么、哪天生成的（历史行要能点开原文件）；
+ * - `filePresent`：那个文件**现在**还在不在（三态，站外链接给 null）；
+ * - `contentLost`：那一版的内容是不是**已经被后来的一版覆盖**（存量数据才可能为
+ *   true，见迁移 0036）。这一格为 true 时，`url` 指向的文件里装的是别人的内容——
+ *   点开能看见东西，但**不是那一版**，界面上必须说清，否则就是拿一份材料冒充另一份。
+ */
+export type DetailHistoryRef = {
+  url: string;
+  at: string;
+  atLabel: string | null;
+  filePresent: boolean | null;
+  contentLost: boolean;
 };
 
 export type DetailRef = {
@@ -120,6 +141,18 @@ export type DetailRef = {
   freshness: Freshness;
   /** 这个阶段存过几版（0 = 还没生成过）。按钮上的「第 N 版」用它。 */
   versions: number;
+  /**
+   * **更早的那几版**（2026-11-10 owner 的第一次纠正）：最新一份之外的历史，新的在前。
+   *
+   * 为什么它是读模型的一格而不是界面自己数：历史版本必须**打得开**（owner 的原话），
+   * 而「打不开」有两种完全不同的原因——文件不在了（`filePresent: false`），与文件还在
+   * 但装的是后来那一版的内容（`contentLost: true`，固定文件名时代的存量数据）。两件事
+   * 要分两句说，所以两格分开给；界面只负责画。
+   *
+   * `[]` = 没有历史（第一次生成，或只有一版）。这一格**不含**最新那一份：最新的事
+   * 上面的 `url` / `at` / `freshness` 已经说完，重复出现只会让人以为有两份。
+   */
+  history: DetailHistoryRef[];
   /**
    * 这个阶段**正在跑**的那次生成（null = 没有）。
    *
@@ -348,16 +381,18 @@ const ATTACH_LABEL: Record<string, string> = {
 export function actionsFor(state: State): DetailAction[] {
   switch (state) {
     case 'inbox':
-      // 「立项」= inbox → 待设计，触发是 `evaluate`（状态机里那条边就叫这个名字）。
+      // 「立项」= inbox → 待设计，触发是 `approve`（状态机里那条边就叫这个名字）。
       //
       // 它一度被拿掉，理由是「评估材料要生成，一个点一下就能完成的按钮是假的」。
-      // 认领进来之后这个理由不成立了：认领只给了负责人，**状态没动**，而收集状态的
-      // 唯一出口就是立项——不把它放回来，认领完就卡死在收集列，只能直接提交 PRD
-      // 跳过设计。评估材料仍然是可选的（参考段那一行照旧）。
+      // 那个理由现在反而更成立了——**因为生成本身不再是一个「顺带改状态」的动作**
+      // （2026-11-10 的第二次纠正）：材料出几版都可以，状态只有点了这个按钮才动。
+      // 认领只给了负责人、不动状态，收集状态的唯一出口就是立项——不把它放回来，
+      // 认领完就卡死在收集列，只能直接提交 PRD 跳过设计。
       //
       // 谁能点由 `can('edit')` 过滤：无主时谁都不行（先认领），有主时只有负责人 /
-      // 条线负责人 / 超管。
-      return ['evaluate', 'submitReview', 'reject', 'shelve'];
+      // 条线负责人 / 超管。生成按钮与它同一条能力（`detail.permissions.edit`），
+      // 两个动作的权限口径因此不会分叉。
+      return ['approve', 'submitReview', 'reject', 'shelve'];
     case 'design':
       return ['submitReview', 'shelve'];
     case 'review':
@@ -422,7 +457,11 @@ function describe(type: string, payload: Payload): { label: string; note: string
     case 'requirement.created':
       return { label: '提出需求', note: text(payload, 'title') };
     case 'requirement.evaluated':
-      return { label: '评估完成，进入待设计', note: null };
+      // 事件类型是库里的历史字符串（改它会让同一条时间线出现两个名字），但它记的事实
+      // 只有一件：这一行进入了待设计。2026-11-10 起那件事只能由「立项」触发——材料
+      // 落地不再改状态（见 `uemaster/attach.ts`）。所以标签就写动作名，不写「评估完成」：
+      // 评估材料出没出、出了几版，与这一行无关。
+      return { label: '立项，进入待设计', note: null };
     case 'requirement.review_requested': {
       const skipped = payload.skippedEvaluation === true;
       return {
@@ -579,11 +618,16 @@ async function filePresentOf(url: string): Promise<boolean | null> {
  * `generation` 是「这个阶段正在跑的那次作业」，由调用方传入。三行同一种形状，
  * 包括 review（P2 之前它在没有产物时显示「PRD 快照」）：PRD 链接不靠这一行承载——
  * 信息段的「PRD 链接」一直在，抽屉里点得到。
+ *
+ * 2026-11-10 起第三个参数是**这一阶段的全部版本**（新的在前，来自 `listArtifacts`），
+ * 不再是「最新那一行」：抽屉现在画「最新一份 + 历史（N 版）」，而历史行要能点开。
+ * 最新 = `versions[0]`；其余照原顺序进 `history`。三个 stage 的 `stat` 并发跑
+ * （`Promise.all`），不是一个版本一个来回。
  */
 async function artifactRef(
   stage: DetailRef['stage'],
   label: string,
-  artifact: ArtifactRef | undefined,
+  versions: ArtifactRef[],
   running: RunningJob | null,
   currentHash: string,
   /**
@@ -600,21 +644,38 @@ async function artifactRef(
     phase: running.phase,
     attempt: running.attempt,
   };
-  if (!artifact) {
+  const latest = versions[0];
+  if (!latest) {
     // 没有产物：新鲜度这一格没有意义（界面上那一行是「生成」入口，不是链接）。
     // 给 'unknown' 而不是留空：类型只有三态，而这一格只在 `present` 时被读。
     // `filePresent: false`：库里没有行，也就不可能有「这一行的文件」。
     return {
       stage, label, url: null, at: null, atLabel: null, present: false,
-      filePresent: false, freshness: 'unknown', versions: 0, generation, needsDescription,
+      filePresent: false, freshness: 'unknown', versions: 0, history: [],
+      generation, needsDescription,
     };
   }
-  const at = artifact.at.toISOString();
+  const at = latest.at.toISOString();
+  // 历史行的 `stat` 与最新那一份并发：一行一 stat 是可接受的（一条需求最多三处材料、
+  // 每处最多几十版），串行写却会让抽屉为一屏历史多等几十个来回。
+  const history = await Promise.all(versions.slice(1).map(async (older): Promise<DetailHistoryRef> => {
+    const olderAt = older.at.toISOString();
+    return {
+      url: older.url,
+      at: olderAt,
+      atLabel: formatMonthDay(olderAt),
+      filePresent: await filePresentOf(older.url),
+      // 覆盖这件事是**历史里的一件事实**，不接受「文件还在」的修正：被覆盖的行指向的
+      // 文件里装的是后来那一版的内容，`filePresent` 为 true 不代表那一版还在。
+      contentLost: older.contentLost,
+    };
+  }));
   return {
-    stage, label, url: artifact.url, at, atLabel: formatMonthDay(at), present: true,
-    filePresent: await filePresentOf(artifact.url),
-    freshness: freshnessOf(artifact.inputHash, currentHash),
-    versions: artifact.versions,
+    stage, label, url: latest.url, at, atLabel: formatMonthDay(at), present: true,
+    filePresent: await filePresentOf(latest.url),
+    freshness: freshnessOf(latest.inputHash, currentHash),
+    versions: latest.versions,
+    history,
     generation, needsDescription,
   };
 }
@@ -759,10 +820,22 @@ export async function getRequirementDetail(
     }
     : null;
 
-  // 参考段的产物：每 stage 只取最新一份（重做会留下历史行，读侧只认当前有效的）。
-  // 走 `listArtifacts` 而不是在这里再写一遍 `distinct on`：两个读侧各写一份 SQL，
-  // 迟早在「同毫秒写入怎么定序」这种细节上分叉。
-  const artifacts = new Map((await listArtifacts(db, id)).map((a) => [a.stage, a]));
+  /**
+   * 参考段的产物：**每一版都取**，按 stage 分组（组内新的在前）。
+   *
+   * 2026-11-10 之前这里 `new Map(...map(a => [a.stage, a]))`，把同一 stage 的多行
+   * 覆盖成最后一行——那正是「抽屉里只看得到一版」的实现。现在抽屉画「最新一份 +
+   * 历史（N 版）」，历史行要能点开，所以每一行都得传下去。
+   *
+   * 走 `listArtifacts` 而不是在这里再写一遍 SQL：两个读侧各写一份，
+   * 迟早在「同毫秒写入怎么定序」这种细节上分叉。
+   */
+  const byStage = new Map<DetailRef['stage'], ArtifactRef[]>();
+  for (const artifact of await listArtifacts(db, id)) {
+    const bucket = byStage.get(artifact.stage);
+    if (bucket === undefined) byStage.set(artifact.stage, [artifact]);
+    else bucket.push(artifact);
+  }
 
   /**
    * 当前描述的指纹：产物那三行把它与各自存下来的 `input_hash` 比一次，得出
@@ -890,11 +963,11 @@ export async function getRequirementDetail(
     // 2026-11-10：评估那一行的理由算在**这里**、只算一次（两道门，见 `evaluateReason`）。
     // 评审 / 走查拿到的是 null——它们的输入不是六问，把同一句话挂在它们身上是错的。
     refs: await Promise.all([
-      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'),
+      artifactRef('evaluate', '评估材料', byStage.get('evaluate') ?? [],
         running.get('evaluate') ?? null, currentHash, evaluateReason),
-      artifactRef('review', '评审材料', artifacts.get('review'),
+      artifactRef('review', '评审材料', byStage.get('review') ?? [],
         running.get('review') ?? null, currentHash, null),
-      artifactRef('inspect', '走查材料', artifacts.get('inspect'),
+      artifactRef('inspect', '走查材料', byStage.get('inspect') ?? [],
         running.get('inspect') ?? null, currentHash, null),
     ]),
     review,

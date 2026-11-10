@@ -352,6 +352,19 @@ export const uemasterArtifacts = pgTable('uemaster_artifacts', {
    * 拿不到就存 null —— 存一个编出来的值比存 null 坏得多。
    */
   inputHash: text('input_hash'),
+  /**
+   * 这一行的内容**已经不在磁盘上了**（2026-11-10 的第一次纠正）。
+   *
+   * 2026-11-10 之前产物按固定文件名落盘（`evaluate.html`）：同一条需求生成两次，库里
+   * 两行、盘上一份文件，后一份把前一份覆盖掉。那些更早的行指向的文件现在装的是**后来
+   * 那一版**的内容——库里说「存过两版」而事实上只有一版可读。
+   *
+   * 这一列由迁移 0036 按「同一 (requirement, stage, url) 组里除最新一行之外」算出来并
+   * 落库，读侧只原样带出、不推算、不猜测：**不编内容，也不假装它们还是不同的版本**。
+   * 抽屉里那句「更早的版本内容已被覆盖，无法恢复（当时按固定文件名保存）」就是它的
+   * 唯一用途。新的产物不会再出现 true（文件名带版本号，见 `uemaster/versions.ts`）。
+   */
+  contentLost: boolean('content_lost').notNull().default(false),
 }, (t) => ({
   stageCheck: check(
     'uemaster_artifacts_stage_check',

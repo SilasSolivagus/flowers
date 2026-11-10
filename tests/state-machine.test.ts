@@ -113,7 +113,7 @@ describe('state machine', () => {
     expect(TRANSITIONS).toEqual([
       // Ruling 1：立项不再有 type 门（类型可空，且不承载权限）。
       // Ruling 2（2026-11-10）：换成 brief 门——核心三问不齐不能立项。
-      { from: 'inbox', to: 'design', trigger: 'evaluate', guard: 'brief' },
+      { from: 'inbox', to: 'design', trigger: 'approve', guard: 'brief' },
       { from: 'inbox', to: 'review', trigger: 'submit_review', guard: 'prd' },
       { from: 'inbox', to: 'rejected', trigger: 'reject' },
       { from: 'inbox', to: 'shelved', trigger: 'shelve' },
@@ -210,13 +210,13 @@ describe('assertTrigger — 配对合法但动作不对', () => {
     });
   });
 
-  it('待评审上点通过 / 评估都报动作', () => {
-    // review → queue 是 review_pass 的路，用 evaluate 撞上去
-    expect(caught(() => assertTrigger('review', 'queue', 'evaluate'))).toMatchObject({
+  it('待评审上点通过 / 立项都报动作', () => {
+    // review → queue 是 review_pass 的路，用 approve（立项）撞上去
+    expect(caught(() => assertTrigger('review', 'queue', 'approve'))).toMatchObject({
       message: '这条需求当前在「待评审」，不能执行这一步',
     });
-    // review → design 是 review_reject 的路，用 evaluate 撞上去
-    expect(caught(() => assertTrigger('review', 'design', 'evaluate'))).toMatchObject({
+    // review → design 是 review_reject 的路，用 approve（立项）撞上去
+    expect(caught(() => assertTrigger('review', 'design', 'approve'))).toMatchObject({
       message: '这条需求当前在「待评审」，不能执行这一步',
     });
   });
@@ -231,7 +231,7 @@ describe('assertTrigger — 配对合法但动作不对', () => {
 
   it('配对本身不存在时报的是配对（两条消息各管一件事）', () => {
     // R44：这条消息会渲染到界面上，所以两端都是 STATE_LABEL，不是 State 原值。
-    expect(caught(() => assertTrigger('inbox' as State, 'dev' as State, 'evaluate')))
+    expect(caught(() => assertTrigger('inbox' as State, 'dev' as State, 'approve')))
       .toMatchObject({
         code: 'illegal_transition', message: '不能从「收集」直接到「开发中」',
       });

@@ -154,7 +154,7 @@ describe('阶段门那一格：禁用 + 理由 + 不给「去补」', () => {
 it('读模型的理由到位：RefList 在待设计上禁用「生成」，且不给「去补」', () => {
   const parked: DetailRef = {
     stage: 'evaluate', label: '评估材料', url: null, at: null, atLabel: null,
-    present: false, filePresent: false, freshness: 'unknown', versions: 0,
+    present: false, filePresent: false, freshness: 'unknown', versions: 0, history: [],
     generation: null, needsDescription: STAGE_LOCK,
   };
   const html = renderToStaticMarkup(

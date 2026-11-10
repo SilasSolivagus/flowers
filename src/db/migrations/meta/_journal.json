@@ -267,6 +267,13 @@
       "when": 1794112000000,
       "tag": "0035_job_liveness",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794114000000,
+      "tag": "0036_artifact_content_lost",
+      "breakpoints": true
     }
   ]
 }

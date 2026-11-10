@@ -326,7 +326,8 @@ describe('reviewRequirement', () => {
 
     const out = await reviewRequirement(db, '吕品', { requirementId: r.id });
 
-    const url = `/uemaster/PAN-${r.number}/review.html`;
+    // 版本化文件名（2026-11-10）：第一版是 v001。
+    const url = `/uemaster/PAN-${r.number}/review-v001.html`;
     expect(out.url).toBe(url);
     expect(await artifactExists(url)).toBe(true);
     expect(await artifactCount()).toBe(1);
@@ -458,7 +459,7 @@ describe('reviewRequirement', () => {
     // 图 + 问题清单两轮；页面片段一次都没问过
     expect(provider.prompts).toHaveLength(3);
     expect(await artifactCount()).toBe(0);
-    expect(await artifactExists(`/uemaster/PAN-${r.number}/review.html`)).toBe(false);
+    expect(await artifactExists(`/uemaster/PAN-${r.number}/review-v001.html`)).toBe(false);
   }, 60_000);
 
   it('没有快照 → 先 readPrd；有快照 → 不再读', async () => {
@@ -621,7 +622,8 @@ describe('start.ts 接线', () => {
     expect(row.rows[0]!.error).toBeNull();
     expect(row.rows[0]!.artifact_id).not.toBeNull();
 
-    const url = `/uemaster/PAN-${r.number}/review.html`;
+    // 版本化文件名（2026-11-10）：第一版是 v001。
+    const url = `/uemaster/PAN-${r.number}/review-v001.html`;
     expect(await artifactExists(url)).toBe(true);
     const html = await readFile(siteFile(url), 'utf8');
     // 走的是评审：标题带 PRD 版本与问题分布，而不是「评估材料」的标题

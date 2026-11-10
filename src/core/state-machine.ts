@@ -19,9 +19,22 @@ export const STATE_LABEL: Record<State, string> = {
   shelved: '已搁置',
 };
 
-/** 触发方式。同一对 from/to 可能被不同动作踩到，trigger 就是用来区分它们的。 */
+/**
+ * 触发方式。同一对 from/to 可能被不同动作踩到，trigger 就是用来区分它们的。
+ *
+ * 2026-11-10 owner 的第二次纠正：`evaluate` → `approve`。
+ *
+ * 这条边的名字曾经叫 `evaluate`（评估），因为当时「生成评估材料」与「进待设计」是
+ * 同一件事（材料落在库上，attach 顺手把需求推过去）。拆开之后它们不是一件事了：
+ * **生成材料不再改状态**，`inbox → design` 只由人点「立项」触发。名字留着 `evaluate`
+ * 会让下一个人以为「评估 = 立项」，而那条边已经与「评估材料」没有任何关系。
+ *
+ * 所以 trigger 叫 `approve`（立项 / 批准进入设计），`evaluate` 这个名字在状态机里
+ * 不再存在；「评估」两个字只剩一个合法的去处：**评估材料**（`Stage` 里的 `evaluate`，
+ * 那是产物槽位，不是状态迁移）。
+ */
 export type Trigger =
-  | 'evaluate' | 'submit_review' | 'reject' | 'shelve'
+  | 'approve' | 'submit_review' | 'reject' | 'shelve'
   | 'review_pass' | 'review_reject' | 'schedule'
   | 'clock' | 'bounce' | 'restore';
 
@@ -35,15 +48,21 @@ export type Trigger =
  *
  * ## Ruling 2（2026-11-10）：`brief` 这道门挂在**变迁**上，不挂在生成器上
  *
- * owner 的裁决：「六问不齐不能立项。收集阶段必须填好核心三问才能点评估；点了评估就进
- * 待设计，所以『六问不齐』既不能生成材料、也不能进待设计。」实测收集 244 条里六问全齐
+ * owner 的裁决：「六问不齐不能立项。收集阶段必须填好核心三问才能点立项；立项就进
+ * 待设计，所以『六问不齐』既不能生成材料、也不能进待设计。」（2026-11-10 的第二次
+ * 纠正把「生成材料」与「立项」拆成两个动作，但这道门管的两件事没变：材料不能编，
+ * 立项不能空。）实测收集 244 条里六问全齐
  * 只有 1 条（后三格在收集阶段本来就填不出来），卡「六问全齐」等于上线即空转，所以必填
  * 只取核心三条；判据与那句话在 `requirements/brief.ts`，一处定义、三处共用。
  *
- * 门为什么在这条边上：**立项是一个动作，材料是这个动作的产物。** 只把门装进生成器，
- * 挡住的是「不许出材料」，而「没有六问的需求照样能立项」会从别的入口漏过去——MCP 的
- * `requirement_start_design`、直接 attach 一份材料（`uemaster/attach.ts` 走的也是这条
- * 迁移）、以及将来的批量导入。装在这条边上，所有入口一次覆盖。
+ * 门为什么在这条边上：**立项是一个动作，材料是另一个动作的产物**（2026-11-10 之后
+ * 两者彻底分开）。只把门装进生成器，挡住的是「不许出材料」，而「没有六问的需求照样
+ * 能立项」会从别的入口漏过去——MCP 的 `requirement_start_design`、将来的批量导入。
+ * 装在这条边上，所有入口一次覆盖：状态的每一次 `inbox → design` 都要过这道门。
+ *
+ * 反过来说，**这条路已经不是「attach 材料」的路**：材料落库不再改状态（见
+ * `uemaster/attach.ts`），所以「没有六问 ⇒ 不能立项」不再依赖「attach 与迁移同事务」
+ * 那套原子性——那条耦合正是 owner 第二次纠正要拆掉的东西。
  *
  * 这道门**只作用于 `inbox → design`**：已经过了评估的需求（review / queue / ready /
  * dev / test / live / rejected / shelved）的存量数据一个字不动——终态与进行中的位置是
@@ -90,7 +109,9 @@ export type Transition = {
 export const TRANSITIONS: readonly Transition[] = [
   // Ruling 1：立项不再要求类型（`guard: 'type'` 已摘掉，见上面 `Guard` 的注释）。
   // Ruling 2：立项要求核心三问（`guard: 'brief'`，判据在 `requirements/brief.ts`）。
-  { from: 'inbox',  to: 'design',  trigger: 'evaluate', guard: 'brief' },
+  // 2026-11-10：trigger 从 `evaluate` 改名 `approve`——生成材料不再走这条边，
+  // 这条边只剩「立项」一个含义（见 `Trigger` 的注释）。
+  { from: 'inbox',  to: 'design',  trigger: 'approve', guard: 'brief' },
   { from: 'inbox',  to: 'review',  trigger: 'submit_review', guard: 'prd'  },
   { from: 'inbox',  to: 'rejected', trigger: 'reject' },
   { from: 'inbox',  to: 'shelved', trigger: 'shelve' },

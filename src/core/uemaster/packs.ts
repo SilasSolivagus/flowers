@@ -18,6 +18,36 @@ export function isStage(value: unknown): value is Stage {
 }
 
 /**
+ * 产物的**版本化文件名**：`evaluate-v001.html`（2026-11-10 owner 的第一次纠正）。
+ *
+ * ── 为什么这个纯函数在这张文件里
+ *
+ * 因为它有两类读者，而这层是它们唯一的公共点：
+ * 1. **任务包自己**——「交付」那一段要对外部 CLI 说「写到 data/uemaster/PAN-7/
+ *    evaluate-v001.html，然后把 /uemaster/PAN-7/evaluate-v001.html 交回来」；
+ * 2. **落盘那一层**（`compose.ts` / `review.ts` / `inspect.ts` / `start.ts`，都经
+ *    `versions.ts` 的 `versionedFileOf`）。
+ *
+ * 两处必须是同一个字符串：包怎么写、文件就该在哪，这条契约（`generator.ts` 的
+ * `artifactUrlIn` 反向解析它）不靠调用方再猜一次。放在 `store.ts` 会成环——它反向
+ * import 了这张文件的 `isStage`；放在 `versions.ts` 则会让本文件反向依赖 db 与磁盘。
+ *
+ * ── 为什么零填充三位
+ *
+ * 「版本化」的一半价值是**按名字排出来就是时间顺序**：`evaluate-v10.html` 会被 `ls`
+ * 排在 `evaluate-v2.html` 前面（字典序 ≠ 版本序），`v001` 修掉的就是这件事。999 版
+ * 之内都成立；第 1000 版会变成 `v1000` 重新破序，那是「重做过一千次」的极端情形。
+ *
+ * ── 存量不受影响
+ *
+ * 老文件仍叫 `evaluate.html`（没有 `-v` 段）：历史产物一个字节都不动，它们的「内容
+ * 已被覆盖」由库里那一列（`content_lost`，迁移 0036）如实标注。
+ */
+export function versionedName(stage: Stage, version: number): string {
+  return `${stage}-v${String(version).padStart(3, '0')}.html`;
+}
+
+/**
  * 任务包要的输入：需求的身份 + PRD 链接。
  *
  * 为什么要 `id` 与 `requester` 而不只是编号标题：`uemaster_attach` 收的是 uuid
@@ -32,6 +62,14 @@ export type PackInput = {
   type: string | null;
   requester: string;
   prdUrl: string | null;
+  /**
+   * 这一版是第几版（2026-11-10 owner 的第一次纠正）：决定包里那个**文件名**。
+   *
+   * 不传 = 老口径 `<stage>.html`。只有「手上没有库的调用方」（比如一份手工贴出去的
+   * 示例包）会走到它；两条真入口（`start.ts` 的 runJob 与 MCP 的 `uemaster_plan`）
+   * 都会从 `versions.ts` 算出真实版本号再传进来——不传就等于让 agent 去覆盖历史。
+   */
+  version?: number;
 };
 
 type Spec = {
@@ -100,7 +138,8 @@ const SPEC: Record<Stage, Spec> = {
       '     不要照 PRD 修图，实现跟 PRD 不一样的照实画。',
       '  2. 与 PRD 版的差异清单：基线是本需求已交回的那一版评审材料——',
       '     stage=review 的最新产物，没有就退到 stage=evaluate 的最新产物，',
-      '     路径形如 data/uemaster/PAN-7/review.html，先确认这个文件在项目里存在再动手；',
+      '     路径形如 data/uemaster/PAN-7/review-v003.html（老需求是 review.html，没有版本号），',
+      '     先确认这个文件在项目里存在再动手；',
       '     然后同一条流程两边逐节点对比，每条标一个档位——',
       '     一致（两边都有且一样）、缺失（PRD 里有、实现里没有）、溢出（实现里有、PRD 里没写）。',
       '     每条都要带位置：PRD 侧写小节号或原文摘句，实现侧写文件路径或节点编号。',
@@ -146,6 +185,11 @@ export function packFor(stage: Stage, req: PackInput): string {
   const requester = flat(req.requester ?? '');
   const name = `PAN-${number}`;
   const id = flat(req.id ?? '');
+  /**
+   * 产物文件名：给了版本号就是 `evaluate-v003.html`，没给就是老口径 `evaluate.html`。
+   * 下面「交付」那两行、以及 `generator.ts` 的 `artifactUrlIn` 都读同一个值。
+   */
+  const fileName = req.version === undefined ? `${stage}.html` : versionedName(stage, req.version);
 
   const head = [
     `任务：为 ${name}「${title}」生成${spec.noun}`,
@@ -182,8 +226,8 @@ export function packFor(stage: Stage, req: PackInput): string {
       + '它们是纯提示词 + 排版脚本，不需要模型 key。',
     '产出：',
     ...spec.output,
-    `交付：把文件写到本项目根目录下的 data/uemaster/${name}/${stage}.html，`
-      + `然后调用 uemaster_attach，把站内路径 /uemaster/${name}/${stage}.html`
+    `交付：把文件写到本项目根目录下的 data/uemaster/${name}/${fileName}，`
+      + `然后调用 uemaster_attach，把站内路径 /uemaster/${name}/${fileName}`
       + ` 和需求 ID ${id} 一起交回（工具收的就是以 / 开头的站内路径，或 http(s) 完整链接）。`
       + '文件必须是单个自足的 HTML：样式与脚本内联、不引 CDN、不引任何相对资源，双击就能在浏览器里打开。',
     spec.constraint,

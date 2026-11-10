@@ -86,7 +86,7 @@ describe('判据（纯函数：一句话，两个地方用）', () => {
   it('三问全空 → 三条都点名，顺序与裁定一致', () => {
     expect(lockMessage(missingRequired({}))).toBe(
       '还差三条没填：谁在什么情况下用、现在怎么做/哪不好、做成什么样算成功。'
-      + '补完才能评估——评估要拿这三问立项、按这三问出材料，缺了只能靠编。',
+      + '补完才能立项，也才能出评估材料——立项要拿这三问站住，材料要按这三问画，缺了只能靠编。',
     );
   });
 
@@ -94,7 +94,7 @@ describe('判据（纯函数：一句话，两个地方用）', () => {
     expect(lockMessage(missingRequired({
       context: FILLED.context, problem: FILLED.problem,
     }))).toBe('还差一条没填：做成什么样算成功。'
-      + '补完才能评估——评估要拿这三问立项、按这三问出材料，缺了只能靠编。');
+      + '补完才能立项，也才能出评估材料——立项要拿这三问站住，材料要按这三问画，缺了只能靠编。');
   });
 
   it('只缺现状问题 / 只缺使用场景 → 各自点名', () => {
@@ -124,7 +124,7 @@ describe('服务层：生成被拒（唯一真相）', () => {
 
     expect(error.code).toBe('description_incomplete');
     expect(error.message).toContain('还差三条没填');
-    expect(error.message).toContain('补完才能评估');
+    expect(error.message).toContain('补完才能立项');
     expect(await jobCount(requirementId)).toBe(0);
   });
 

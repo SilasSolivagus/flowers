@@ -60,8 +60,17 @@ export type GenOptions = {
   before?: number | null;
 };
 
-/** 任务包里那行站内路径。三份包各写一次，形状固定。 */
-const SITE_PATH = /\/uemaster\/PAN-\d+\/(?:evaluate|review|inspect)\.html/;
+/**
+ * 任务包里那行站内路径。三份包各写一次，形状固定。
+ *
+ * 2026-11-10 起带可选的版本段（`evaluate-v003.html`）：新包一定带（`packs.ts` 的
+ * `versionedName`），老包 / 存量示例没有。两种都要认——这个正则解析的是**包**，
+ * 而包是可能从别处粘贴进来的（`uemaster_plan` 的返回值、文档里的示例）。
+ *
+ * `\d+` 而不是 `\d{3}`：三位是今天写出去的形状，读回来的口径不该比写出去的更窄
+ * （第 1000 版会是 `v1000`）。
+ */
+const SITE_PATH = /\/uemaster\/PAN-\d+\/(?:evaluate|review|inspect)(?:-v\d+)?\.html/;
 
 /**
  * 从任务包里取出这次要交回的站内路径。

@@ -51,6 +51,7 @@ function ref(stage: DetailRef['stage'], label: string): DetailRef {
     filePresent: false,
     freshness: 'unknown',
     versions: 0,
+    history: [],
     generation: null, needsDescription: null,
   };
 }

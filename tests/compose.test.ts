@@ -261,7 +261,8 @@ describe('composeEvaluation', () => {
 
     const out = await composeEvaluation(db, '吕品', { requirementId: r.id, stage: 'evaluate' });
 
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    // 版本化文件名（2026-11-10）：第一版是 v001。
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
     expect(out.url).toBe(url);
     expect(out.attempts).toBe(1);
     // 两次调用都带回了 token 用量（服务端给了 usage，我们只负责相加）。
@@ -270,8 +271,8 @@ describe('composeEvaluation', () => {
 
     expect(await artifactExists(url)).toBe(true);
     expect(await artifactCount()).toBe(1);
-    // attach 那条规矩照旧：evaluate 材料落到 inbox 的需求上 → 推进到待设计。
-    expect(await requirementState(r.id)).toBe('design');
+    // 2026-11-10 起那条规矩**不在了**：材料落地不改状态（材料是产物，立项是决定）。
+    expect(await requirementState(r.id)).toBe('inbox');
 
     const html = await readFile(siteFile(url), 'utf8');
     // 1) 引擎的 SVG 是**内联**进文档的（不是 <img>，不是外链）
@@ -359,7 +360,7 @@ describe('composeEvaluation', () => {
     // 三次都问了，但**没有**第 4 次：上限是硬的
     expect(provider.prompts).toHaveLength(3);
     expect(await artifactCount()).toBe(0);
-    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate.html`)).toBe(false);
+    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate-v001.html`)).toBe(false);
     // 需求还在原地（没有材料 = 没有通行证）
     expect(await requirementState(r.id)).toBe('inbox');
   });
@@ -408,7 +409,7 @@ describe('composeEvaluation', () => {
     // 第二次失败的原因是「少节点」：A 之外全缺
     expect(error.message).toContain('没有页面片段');
     expect(await artifactCount()).toBe(0);
-    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate.html`)).toBe(false);
+    expect(await artifactExists(`/uemaster/PAN-${r.number}/evaluate-v001.html`)).toBe(false);
     // 图那一关只花了一次；页面说明问了两遍
     expect(provider.prompts).toHaveLength(3);
   });
@@ -435,7 +436,7 @@ describe('策略与作业管线', () => {
       insert into uemaster_jobs (requirement_id, stage, status)
       values (${r.id}, 'evaluate', 'running') returning id`);
     const jobId = job.rows[0]!.id;
-    const url = `/uemaster/PAN-${r.number}/evaluate.html`;
+    const url = `/uemaster/PAN-${r.number}/evaluate-v001.html`;
 
     await runJob(db, jobId, { actor: '吕品' });
 
@@ -445,7 +446,8 @@ describe('策略与作业管线', () => {
     expect(row.rows[0]!.error).toBeNull();
     expect(row.rows[0]!.artifact_id).not.toBeNull();
     expect(await artifactExists(url)).toBe(true);
-    expect(await requirementState(r.id)).toBe('design');
+    // 2026-11-10 起生成不改状态（材料是产物，立项是决定）。
+    expect(await requirementState(r.id)).toBe('inbox');
     // 一个 key、零 CLI：两次模型调用就是全部劳动
     expect(provider.prompts).toHaveLength(2);
   });
