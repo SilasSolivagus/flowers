@@ -13,7 +13,7 @@ import {
   saveMemberProviderSettings,
 } from '../src/core/uemaster/member-provider.js';
 import {
-  PROBE_TIMEOUT_MS, probeProvider, resolveProvider, resolveProviderConfig,
+  PROBE_MAX_TOKENS, PROBE_TIMEOUT_MS, probeProvider, resolveProvider, resolveProviderConfig,
 } from '../src/core/uemaster/provider.js';
 import { saveProviderSettings } from '../src/core/uemaster/settings.js';
 import { resolveStrategy } from '../src/core/uemaster/start.js';
@@ -362,8 +362,11 @@ describe('probeProvider：一次极小的补全', () => {
       expect(probe.tokens).toBe(21);
       expect(stub.calls[0]!.url).toBe('/v1/chat/completions');
       expect(stub.calls[0]!.auth).toBe('Bearer sk-probe-00000000');
-      // 极小：16 个 token 的预算，不要一份材料。
-      expect((JSON.parse(stub.calls[0]!.body) as { max_tokens: number }).max_tokens).toBe(16);
+      // 极小，但要留出「想」的空间：推理模型（deepseek-flash）实测思考 27–85 字 /
+      // 16–60 reasoning tokens，16 的预算会被思考一口吃光，答案一个字都轮不到。
+      expect(PROBE_MAX_TOKENS).toBe(512);
+      expect((JSON.parse(stub.calls[0]!.body) as { max_tokens: number }).max_tokens)
+        .toBe(PROBE_MAX_TOKENS);
     } finally {
       await stub.close();
     }

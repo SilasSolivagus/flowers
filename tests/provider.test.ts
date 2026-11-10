@@ -4,7 +4,8 @@ import type { AddressInfo } from 'node:net';
 import { sql } from 'drizzle-orm';
 import { db, pool } from '../src/db/client.js';
 import {
-  complete, extractJson, redactSecret, resolveProviderConfig, type ProviderConfig,
+  complete, extractJson, probeProvider, PROBE_MAX_TOKENS, redactSecret, resolveProviderConfig,
+  type ProviderConfig,
 } from '../src/core/uemaster/provider.js';
 import { providerSettings, saveProviderSettings } from '../src/core/uemaster/settings.js';
 
@@ -81,6 +82,22 @@ function chatBody(content: string, usage?: { prompt_tokens?: number; completion_
     object: 'chat.completion',
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
     ...(usage === undefined ? {} : { usage }),
+  });
+}
+
+/**
+ * 推理模型「预算被思考吃光」时的真实形状（2026-11 拿 deepseek-flash 抓的）：
+ * `content` 空串、`reasoning_content` 有一大段、`finish_reason=length`。
+ */
+function reasoningOnlyBody(reasoningChars: number): string {
+  return JSON.stringify({
+    id: 'chatcmpl-test',
+    object: 'chat.completion',
+    choices: [{
+      index: 0,
+      message: { role: 'assistant', content: '', reasoning_content: '思'.repeat(reasoningChars) },
+      finish_reason: 'length',
+    }],
   });
 }
 
@@ -244,6 +261,54 @@ describe('complete：空内容算失败', () => {
     try {
       const result = await complete(cfgFor(provider.baseUrl), '你好');
       expect(result).toEqual({ ok: false, error: '响应不是 chat 补全的格式' });
+    } finally {
+      await provider.close();
+    }
+  });
+});
+
+describe('probeProvider：小测只判「连得上 + 钥匙对」', () => {
+  it('答案 0 字但思考过 29 字：算通过，并在那一行把实话说全', async () => {
+    const provider = await startProvider(() => ({ status: 200, body: reasoningOnlyBody(29) }));
+    try {
+      const probe = await probeProvider(cfgFor(provider.baseUrl));
+      expect(probe.ok).toBe(true);
+      expect(probe.error).toBeNull();
+      expect(probe.label).toMatch(/^通过 · \d+ms · 推理模型：思考 29 字、答案 0 字（连接与密钥有效）$/);
+      // 没有 usage 就不编 token 数。
+      expect(probe.tokens).toBeNull();
+      // 预算：512 是实测最长思考（60 reasoning tokens）的八倍多，不是拍的。
+      expect(PROBE_MAX_TOKENS).toBeGreaterThanOrEqual(512);
+      const sent = JSON.parse(provider.calls[0]!.body) as { max_tokens: number };
+      expect(sent.max_tokens).toBe(PROBE_MAX_TOKENS);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('鉴权错：失败，服务端原文照登（key 已脱敏）', async () => {
+    const provider = await startProvider(() => ({
+      status: 401,
+      body: JSON.stringify({ error: { message: `Incorrect API key provided: ${KEY}` } }),
+    }));
+    try {
+      const probe = await probeProvider(cfgFor(provider.baseUrl));
+      expect(probe.ok).toBe(false);
+      expect(probe.label).toContain('Incorrect API key provided');
+      expect(probe.label).not.toContain(KEY);
+      expect(probe.error).toBe(probe.label);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('答案 0 字、思考也 0 字：仍然失败——那不是推理模型没轮到，是它没说话', async () => {
+    const provider = await startProvider(() => ({ status: 200, body: chatBody('') }));
+    try {
+      const probe = await probeProvider(cfgFor(provider.baseUrl));
+      expect(probe.ok).toBe(false);
+      expect(probe.label).toBe('模型返回了空内容');
+      expect(probe.error).toBe('模型返回了空内容');
     } finally {
       await provider.close();
     }

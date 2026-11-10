@@ -30,7 +30,12 @@ export type ProviderConfig = { baseUrl: string; apiKey: string; model: string };
 
 export type ProviderResult =
   | { ok: true; text: string; usage?: { prompt?: number; completion?: number } }
-  | { ok: false; error: string };
+  /**
+   * `reasoningChars` 只在「预算被思考吃光」这一支出现：它是**给调用方做判断用的证据**，
+   * 不是给人看的文案（文案是 `error`）。真正的生成流程只看 `ok`/`error`，不受影响；
+   * 设置页的小测靠它区分「没连上」与「连上了但模型光在思考」（见 `probeProvider`）。
+   */
+  | { ok: false; error: string; reasoningChars?: number };
 
 /** 默认给一次生成 120 秒：够一个慢模型吐完一份需求文档，又不至于让人以为卡死。 */
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -233,6 +238,7 @@ export async function complete(
         return {
           ok: false,
           error: `模型把输出预算用在了思考上（max_tokens=${String(maxTokens)}，思考 ${String(reasoned)} 字、答案 0 字）。把这个阶段的 max_tokens 调大`,
+          reasoningChars: reasoned,
         };
       }
       return { ok: false, error: '模型返回了空内容' };
@@ -407,9 +413,18 @@ export async function resolveProviderConfig(actor?: string): Promise<ProviderCon
  */
 export const PROBE_TIMEOUT_MS = 15_000;
 
-/** 小测问的话与预算：只要一个 token 级别的回答，不要一份材料。 */
+/**
+ * 小测问的话与预算。
+ *
+ * 预算 512 是**量出来的**，不是拍的：同一个模型（deepseek-flash）对着这句「只回四个字」
+ * 的小问题，`reasoning_content` 实测 27 / 42 / 47 / 85 字（对应 reasoning_tokens
+ * 16 / 26 / 29 / 60）。原来的 16 连「想」都不够——思考吃掉全部 16 个 token，`content`
+ * 是空串、`finish_reason=length`，于是 key 明明能用也会被判成失败。
+ * 512 是实测最长思考（60 tokens）的 8 倍多，想完还剩三百多个 token 写那四个字；
+ * 它同时也远低于任何网关的 `max_tokens` 下限。换成更爱想的模型也不会立刻撞墙。
+ */
 const PROBE_PROMPT = '只回四个字：接口可用';
-const PROBE_MAX_TOKENS = 16;
+export const PROBE_MAX_TOKENS = 512;
 
 export type ProbeResult = {
   ok: boolean;
@@ -417,6 +432,9 @@ export type ProbeResult = {
    * 那一行要显示的字：`通过 · 412ms · 21 tokens`，或者**服务端的原文**
    * （`分组 auto 下模型 x 的可用渠道不存在` / `Incorrect API key provided: ***`）。
    * 失败时不做任何改写——那句话就是下一步。
+   *
+   * 推理模型把预算全用在思考上时也算通过，但话说全（不假装答案写出来了）：
+   * `通过 · 9206ms · 推理模型：思考 29 字、答案 0 字（连接与密钥有效）`。
    */
   label: string;
   /** 通过时是 null；失败时与 `label` 同值，给需要分支的调用方用。 */
@@ -434,7 +452,7 @@ export type ProbeResult = {
  * 一次网络抖动把整页打崩。
  *
  * 为什么不用 `maxTokens: 1`：有的网关在 `max_tokens` 太小时直接 400
- * （`max_tokens must be greater than 0` 之外还有自家的下限）。16 够便宜，也不会被拒。
+ * （`max_tokens must be greater than 0` 之外还有自家的下限）。512 够便宜，也不会被拒。
  */
 export async function probeProvider(
   cfg: ProviderConfig,
@@ -446,7 +464,31 @@ export async function probeProvider(
     timeoutMs: opts.timeoutMs ?? PROBE_TIMEOUT_MS,
   });
   const ms = Date.now() - started;
-  if (!result.ok) return { ok: false, label: result.error, error: result.error, ms, tokens: null };
+  if (!result.ok) {
+    // 小测只回答一件事：**连得上吗、这把钥匙对不对**。内容好不好、答案写没写出来，
+    // 都不是它的事——它连的是「同一张嘴」，不是「同一份材料」。
+    //
+    // 推理模型（deepseek-flash、o 系、各种 reasoner）会把预算先花在思考上：预算不够时
+    // `content` 是空串、`reasoning_content` 却有一大段。这时 `complete()` 说得没错
+    // （对生成流程来说那就是一次失败的生成），但用在小测上就是**误判**：HTTP 200 拿到了、
+    // 鉴权过了、模型确实回了话——只是答案还没轮到。把它报成失败，用户会拿着一个能用的
+    // key 回去改一个没坏的东西，而真正该改的是那个阶段的 max_tokens。
+    //
+    // 所以这里按「有没有回话」而不是「答案有没有字」判通过，并且把实话说在那一行上；
+    // 传输、鉴权、4xx、超时都没有 `reasoningChars`，一条都不会被这句放过。
+    const reasoned = result.reasoningChars ?? 0;
+    if (reasoned > 0) {
+      return {
+        ok: true,
+        label: `通过 · ${ms}ms · 推理模型：思考 ${String(reasoned)} 字、答案 0 字（连接与密钥有效）`,
+        error: null,
+        ms,
+        tokens: null,
+      };
+    }
+    // 答案 0 字、思考 0 字：这不是「预算不够」，是模型真的没说话——继续算失败。
+    return { ok: false, label: result.error, error: result.error, ms, tokens: null };
+  }
 
   const usage = result.usage;
   if (usage === undefined) return { ok: true, label: `通过 · ${ms}ms`, error: null, ms, tokens: null };
