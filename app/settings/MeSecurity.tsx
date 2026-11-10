@@ -7,7 +7,7 @@ import {
 } from '../../src/core/notify/prefs';
 
 /**
- * 设置 · 我的那两块（P4-05 起）：**通知频道** 与 **自改口令**。
+ * 设置 · 我的那两块（P4-05 起）：**通知频道** 与 **自改密码**。
  *
  * 通知这一块是 P4-07 的形状：两行（站内 / 企微），每行一个三档分段控件
  * （全部 / 只关键 / 关）。只有标签，没有解释段落——每一档是什么意思，是产品
@@ -180,7 +180,7 @@ export function PasswordRow() {
   return (
     <>
       <div className="i">
-        <div className="l"><b>口令</b></div>
+        <div className="l"><b>密码</b></div>
         <div className="v gen-actions">
           <button
             className="btn ghost sm"
@@ -196,11 +196,11 @@ export function PasswordRow() {
         <div className="i gen-detail mk-form">
           <form action={formAction} onSubmit={() => setSent(true)}>
             <div className="fld">
-              <label htmlFor="pw-old">旧口令</label>
+              <label htmlFor="pw-old">旧密码</label>
               <input id="pw-old" name="oldPassword" type="password" autoComplete="current-password" />
             </div>
             <div className="fld">
-              <label htmlFor="pw-new">新口令</label>
+              <label htmlFor="pw-new">新密码</label>
               <input id="pw-new" name="newPassword" type="password" autoComplete="new-password" />
             </div>
             <div className="fld">

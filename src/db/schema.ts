@@ -30,10 +30,10 @@ export const requirementsNumberSeq = pgSequence('requirements_number_seq');
  *   `can`），以及界面按线筛人。**权限判断不看这一列**——「谁是这条线的负责人」由
  *   `role` 决定（`feature_reviewer` / `commercial_reviewer`），那是唯一的映射来源；
  *   两列同时存在时，role 是权威，line 是展示与招聘（转交/建人）用的。
- * - `password_hash`：null = 这个账号还没有口令（老数据、或刚建还没设密码）。null
+ * - `password_hash`：null = 这个账号还没有密码（老数据、或刚建还没设密码）。null
  *   一律按「登录失败」处理，绝不当成「空密码可以登」。格式见
  *   `src/core/auth/password.ts`（scrypt + 每人一个盐，参数写进串里，改参数不炸老行）。
- * - `password_updated_at`：改口令的时刻。它只有一个用途——审计（谁什么时候重置过）。
+ * - `password_updated_at`：改密码的时刻。它只有一个用途——审计（谁什么时候重置过）。
  * - `notify_prefs`：JSON 文本，P4-07 起是**两个频道 × 三档**：
  *   `{"site":"key","wecom":"key"}`（站点铃铛 / 企微推送 × 全部 / 只关键 / 关）。
  *   null 与缺字段都等于 `key`（只收「需要我动手」与「有结果」两类），这是产品定的
@@ -73,7 +73,7 @@ export const members = pgTable('members', {
    * 会话纪元：签发 cookie 时那一瞬间的值会写进票据，每次请求都拿它跟这一列比。
    *
    * 为什么需要它：cookie 是**无状态**的，签名一发出就管 12 小时。改角色、改条线、
-   * 重置口令这些事在那 12 小时里发生了，旧 cookie 仍然能验过——实测就是房超被改成
+   * 重置密码这些事在那 12 小时里发生了，旧 cookie 仍然能验过——实测就是房超被改成
    * PM 之后仍然是登录态，直到他自己重新登录。降权不及时等于没降权。
    * 改这些字段时把这一列往前推（`now()`），旧票立刻对不上，等于把人踢下线。
    */
@@ -580,7 +580,7 @@ export const appSettings = pgTable('app_settings', {
  * 三条硬规矩：
  * - **只存 sha256**（`token_hash`），原文只在生成的那一秒出现在响应里。库被读走时，
  *  里面的东西换不成一个能用的 token。为什么不是 bcrypt/argon2：token 是 32 字节随机
- *  值，不是人选的口令——没有字典可查、没有彩虹表，sha256 的「太快」在这里不是缺点，
+ *  值，不是人选的密码——没有字典可查、没有彩虹表，sha256 的「太快」在这里不是缺点，
  *   而每次请求都要验一次，慢哈希会把每个 tools/call 拖上几十毫秒。
  * - **撤销是软删除**（`revoked_at`，不改行、不删行）：时间线上那句「这个 agent 交的材料」
  *   要能追到它当时用的是哪个 token。「删掉」会让这条线索断在一个不存在的主键上。

@@ -30,7 +30,7 @@ export { resetDb, truncateMembersOnly } from '../../src/db/reset.js';
  * 邮箱是**登录名**（P4-08，来自企微通讯录，不猜拼音）；名字仍然是身份——事件、
  * 权限、通知里的「这条欠谁」都按名字。
  *
- * 口令**不在这里设**：绝大多数用例不需要它，而每次 scrypt（约 60ms）乘 7 乘 30 个
+ * 密码**不在这里设**：绝大多数用例不需要它，而每次 scrypt（约 60ms）乘 7 乘 30 个
  * 测试文件是一笔白付的账。要登录的用例自己 `setPassword(db, id, '...')`。
  */
 export const ROSTER = [

@@ -102,11 +102,11 @@ describe('迁移 0037：存量成员落到同一条', () => {
   it('文件里的哈希验得过那一条明文（抄错一个字符就红）', async () => {
     const hash = await hashInMigration();
     expect(await verifyHash(DEFAULT_MEMBER_PASSWORD, hash)).toBe(true);
-    // 别的口令验不过：这条断言挡住「哈希是随便一串」的情况。
+    // 别的密码验不过：这条断言挡住「哈希是随便一串」的情况。
     expect(await verifyHash('2026@1234', hash)).toBe(false);
   });
 
-  it('文件里没有明文（只有派生键），也没有把别人的口令写进去', async () => {
+  it('文件里没有明文（只有派生键），也没有把别人的密码写进去', async () => {
     const text = await readFile(FILE, 'utf8');
     expect(text).not.toContain(DEFAULT_MEMBER_PASSWORD);
     expect(text).toContain('password_updated_at = now()');

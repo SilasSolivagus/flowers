@@ -751,14 +751,14 @@ describe('登录', () => {
     });
   });
 
-  it('口令正确就通过，登录名去空白、折小写，返回的仍然是名字', async () => {
+  it('密码正确就通过，登录名去空白、折小写，返回的仍然是名字', async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
     // 大小写与首尾空白都不是问题：`memberByEmail` 与限速键走同一条归一。
     expect((await attemptLogin(db, `  ${emailFor(PM).toUpperCase()}  `, 'correct-horse')).name)
       .toBe(PM);
   });
 
-  it(`连续失败 ${MAX_FAILURES} 次后锁 ${LOCK_MS / 60000} 分钟：正确口令也进不来`, async () => {
+  it(`连续失败 ${MAX_FAILURES} 次后锁 ${LOCK_MS / 60000} 分钟：正确密码也进不来`, async () => {
     await setPassword(db, idOf(PM), 'correct-horse');
     const now = 1_800_000_000_000;
     for (let i = 0; i < MAX_FAILURES; i += 1) {
@@ -803,15 +803,15 @@ describe('登录', () => {
     });
   });
 
-  it('没有口令的账号一律登录失败（绝不当成空密码）', async () => {
+  it('没有密码的账号一律登录失败（绝不当成空密码）', async () => {
     expect(await caught(attemptLogin(db, emailFor(PM), ''))).toMatchObject({
       code: 'bad_credentials',
     });
   });
 });
 
-describe('口令存储', () => {
-  it('scrypt + 每人一个盐：同一个口令两次哈希不同，但都能验过', async () => {
+describe('密码存储', () => {
+  it('scrypt + 每人一个盐：同一个密码两次哈希不同，但都能验过', async () => {
     const a = await hashPassword('same-password');
     const b = await hashPassword('same-password');
     expect(a).not.toBe(b);
@@ -827,12 +827,12 @@ describe('口令存储', () => {
     expect(await verifyHash('x', null)).toBe(false);
   });
 
-  it(`太短的口令被拒（${MIN_PASSWORD_LENGTH} 位起），中文消息`, async () => {
+  it(`太短的密码被拒（${MIN_PASSWORD_LENGTH} 位起），中文消息`, async () => {
     expect(await caught(setPassword(db, idOf(PM), 'short')))
       .toMatchObject({ code: 'weak_password', message: `密码至少 ${MIN_PASSWORD_LENGTH} 位` });
   });
 
-  it('生成的初始口令长度够、字符表里没有易混字符', () => {
+  it('生成的初始密码长度够、字符表里没有易混字符', () => {
     const password = generatePassword();
     expect(password.length).toBeGreaterThanOrEqual(MIN_PASSWORD_LENGTH);
     expect(password).not.toMatch(/[0O1lI]/);
@@ -932,7 +932,7 @@ describe('currentMember() 的解析顺序', () => {
 // ─── 7. 成员管理（只有超管） ─────────────────────────────────────────────────
 
 describe('成员管理', () => {
-  it('只有超管能建人 / 改人 / 停用 / 重置口令', async () => {
+  it('只有超管能建人 / 改人 / 停用 / 重置密码', async () => {
     for (const actor of [PM, FEATURE_LEAD, COMMERCIAL_LEAD]) {
       expect(await caught(createMember(db, actor, {
         name: '新人', email: 'xinren@123pan.com', role: 'pm', line: 'feature',
@@ -947,7 +947,7 @@ describe('成员管理', () => {
     }
   });
 
-  it('建人：返回一次初始口令，用邮箱登录能过；名字或邮箱重复被拒', async () => {
+  it('建人：返回一次初始密码，用邮箱登录能过；名字或邮箱重复被拒', async () => {
     const created = await createMember(db, ADMIN, {
       name: '新同学', email: 'xintongxue@123pan.com', role: 'pm', line: 'commercial',
     });
@@ -1017,7 +1017,7 @@ describe('成员管理', () => {
       .toMatchObject({ code: 'invalid', message: '不能停用自己' });
   });
 
-  it('重置口令：新口令能登，旧口令不能', async () => {
+  it('重置密码：新密码能登，旧密码不能', async () => {
     await setPassword(db, idOf(PM), 'old-password');
     const result = await resetPassword(db, ADMIN, { memberId: idOf(PM) });
     expect((await attemptLogin(db, emailFor(PM), result.password)).name).toBe(PM);
@@ -1196,7 +1196,7 @@ describe('会话纪元', () => {
     expect(after!.sessionEpoch!.getTime()).not.toBe(ticket.epoch);
   });
 
-  it('重置口令 → 纪元也推进（旧票作废）', async () => {
+  it('重置密码 → 纪元也推进（旧票作废）', async () => {
     await createMember(db, ADMIN, {
       name: '纪元乙', email: 'jiyuanb@123pan.com', role: 'pm', line: 'commercial',
       password: 'pw-epoch-2',

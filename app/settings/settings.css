@@ -83,7 +83,7 @@
 .sg .i.mcp-form{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch;gap:8px;padding-top:0;padding-bottom:12px}
 .sg .i.mcp-token{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding-top:0;padding-bottom:12px}
 
-/* P4-05：成员管理、通知开关、自改口令。
+/* P4-05：成员管理、通知开关、自改密码。
    仍然是「标签 + 值 + 控件」三样，没有解释段落；颜色只取 var(--c-*)。 */
 
 /* 成员行：名字下面一行小字（角色 · 条线），右端「状态 / 负责需求数」。
@@ -103,7 +103,7 @@
 .sw:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .sw[disabled]{opacity:.45;cursor:not-allowed}
 
-/* 一次性口令：只出现这一行，选得中、抄得走。等宽字是必须的（0/O、1/l 要能分辨）。 */
+/* 一次性密码：只出现这一行，选得中、抄得走。等宽字是必须的（0/O、1/l 要能分辨）。 */
 .pw-once{display:flex;align-items:center;gap:12px;min-width:0}
 .pw-once b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-3);flex:0 0 auto}
 .pw-once code{font:400 var(--t-body-s) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:4px 8px;border-radius:var(--r-xs);user-select:all;overflow-wrap:anywhere}

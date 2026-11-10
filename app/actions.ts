@@ -874,7 +874,7 @@ export async function claimAction(formData: FormData): Promise<ActionResult> {
   }));
 }
 
-/** 建人（设置 · 成员）。返回初始口令一次——之后再也拿不到。 */
+/** 建人（设置 · 成员）。返回初始密码一次——之后再也拿不到。 */
 export async function createMemberAction(formData: FormData): Promise<
   { ok: true; id: string; password: string } | { ok: false; message: string }
 > {
@@ -932,7 +932,7 @@ export async function deactivateMemberAction(formData: FormData): Promise<Action
   }
 }
 
-/** 重置口令：新口令只在这一次的返回值里出现。 */
+/** 重置密码：新密码只在这一次的返回值里出现。 */
 export async function resetPasswordAction(formData: FormData): Promise<
   { ok: true; password: string } | { ok: false; message: string }
 > {
@@ -947,11 +947,11 @@ export async function resetPasswordAction(formData: FormData): Promise<
 }
 
 /**
- * 自改口令（设置 · 我的）：旧口令 + 新口令 + 确认。
+ * 自改密码（设置 · 我的）：旧密码 + 新密码 + 确认。
  *
- * 规则在 `app/password-change.ts`（旧口令验一次、两次一致、长度交给 `setPassword`）；
+ * 规则在 `app/password-change.ts`（旧密码验一次、两次一致、长度交给 `setPassword`）；
  * 这里只做那三件 Next 专有的事：取字段、把 `AppError` 翻成一句中文、失效设置页。
- * 成功不返回任何口令——本人刚输入的那个就在他手里，回显一次只是多一个能把它读走的地方。
+ * 成功不返回任何密码——本人刚输入的那个就在他手里，回显一次只是多一个能把它读走的地方。
  */
 export async function changePasswordAction(formData: FormData): Promise<ActionResult> {
   const actor = await currentMember();

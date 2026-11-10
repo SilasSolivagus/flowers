@@ -84,7 +84,7 @@ export async function hasActiveSession(): Promise<boolean> {
   if (ticket === null) return false;
   const member = await memberByName(db, ticket.name);
   if (member === null || member.deactivatedAt !== null) return false;
-  // 纪元对不上 = 这张票签的时候他还有那个权限，之后被改过角色 / 条线 / 口令。
+  // 纪元对不上 = 这张票签的时候他还有那个权限，之后被改过角色 / 条线 / 密码。
   // 实测过：房超被改成 PM 之后仍然是登录态，直到他自己退出。降权不及时等于没降权。
   return epochMatches(ticket.epoch, member);
 }

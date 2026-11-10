@@ -119,7 +119,7 @@ export function databaseNameOf(url: string): string {
 }
 
 /**
- * 换掉连接串里的库名，主机 / 端口 / 账号 / 口令 / query 原样保留。
+ * 换掉连接串里的库名，主机 / 端口 / 账号 / 密码 / query 原样保留。
  *
  * 为什么不直接拼死 `postgres://postgres:flowers@localhost:54330/flowers_test`：
  * 有人把 `DATABASE_URL` 指向远端主机或别的账号时，测试库应该跟着同一个服务器走，

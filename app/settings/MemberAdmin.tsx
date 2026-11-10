@@ -21,7 +21,7 @@ import { LINE_LABEL, lineLabel } from './roles';
  *    这一层不 import 任何带 `node:crypto` 的模块）。它出现在两个地方：表单上先写清
  *    「新成员会拿到哪一条」，建完之后再回显一次——两个地方都带**改的入口**
  *    （「我的」→「密码」），因为一条大家都知道的密码必须有一条明确的改法。
- * 3. **改**：角色 / 条线 / 停用 / 重置口令（同样只显示一次）。停用还占着需求的负责人时，
+ * 3. **改**：角色 / 条线 / 停用 / 重置密码（同样只显示一次）。停用还占着需求的负责人时，
  *    服务层会拒绝并说「这个人还负责 N 条需求，先转交」——那句话原文显示在行下，
  *    旁边就是「转交」：选一个人，一次把他名下全部需求转过去（逐条走 `reassignOwner`，
  *    权限与事件都由那个服务回答）。
@@ -278,7 +278,7 @@ function MemberRow({ row, rows }: { row: MemberAdminRow; rows: MemberAdminRow[] 
                 disabled={busy !== null}
                 onClick={() => void reset()}
               >
-                重置口令
+                重置密码
               </button>
               <button
                 className="btn sm"
@@ -379,7 +379,7 @@ function MemberRow({ row, rows }: { row: MemberAdminRow; rows: MemberAdminRow[] 
       )}
       {password !== null && (
         <div className="i gen-detail">
-          <div className="pw-once"><b>新口令</b><code>{password}</code></div>
+          <div className="pw-once"><b>新密码</b><code>{password}</code></div>
         </div>
       )}
     </>

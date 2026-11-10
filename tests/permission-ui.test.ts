@@ -38,7 +38,7 @@ import { BRIEF } from './helpers/brief.js';
  * 3. 成员管理：只有超管拿得到视图；停用被占用的负责人时服务给的那句中文原样存在，
  *    并且“转交后就能停用”这条路真的走得通。
  * 4. 通知偏好：关掉之后，条线负责人**不再**收到扇出的行，但派单给他的那条仍在。
- * 5. 自改口令：旧口令 / 两次不一致 / 成功三条路。
+ * 5. 自改密码：旧密码 / 两次不一致 / 成功三条路。
  */
 
 let people: SeededPerson[] = [];
@@ -346,17 +346,17 @@ describe('通知偏好：关掉 = 扇出停，关系不动', () => {
   });
 });
 
-describe('自改口令', () => {
-  it('旧口令不对 / 两次不一致 / 成功', async () => {
+describe('自改密码', () => {
+  it('旧密码不对 / 两次不一致 / 成功', async () => {
     await setPassword(db, idOf(PM), 'old-password-1');
 
     await expect(changePassword(db, PM, {
       oldPassword: 'wrong-password', newPassword: 'new-password-1', confirm: 'new-password-1',
-    })).rejects.toMatchObject({ code: 'invalid', message: '旧口令不对' });
+    })).rejects.toMatchObject({ code: 'invalid', message: '旧密码不对' });
 
     await expect(changePassword(db, PM, {
       oldPassword: 'old-password-1', newPassword: 'new-password-1', confirm: 'new-password-2',
-    })).rejects.toMatchObject({ code: 'invalid', message: '两次输入的新口令不一致' });
+    })).rejects.toMatchObject({ code: 'invalid', message: '两次输入的新密码不一致' });
 
     await changePassword(db, PM, {
       oldPassword: 'old-password-1', newPassword: 'new-password-1', confirm: 'new-password-1',
