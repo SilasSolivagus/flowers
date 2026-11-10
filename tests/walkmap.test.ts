@@ -16,7 +16,7 @@ import {
 } from '../src/core/uemaster/walkmap.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { BRIEF } from './helpers/brief.js';
-import { artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
+import { REPO_ROOT, artifactExists, cleanArtifacts, siteFile } from './helpers/files.js';
 
 /**
  * walkmap/1 契约的我们这一侧：拼装、校验、以及**和上游逐字节对齐**。
@@ -325,24 +325,43 @@ const PATCH_RULE = '.flow-panel.fs ~ .stage, .flow-panel.fs ~ .anno-panel { disp
 const PATCH2_START = '本地补丁（2026-11-09，非上游）';
 const PATCH2_END = '本地补丁结束（2026-11-09）';
 
+/**
+ * 第三块补丁（2026-11-10）：手机 chrome（状态栏 + 导航栏）归模板，模型只交内容区。
+ *
+ * 三处、同一个标记：模板的 CSS 段（`.wt-sb-ico` / `.wt-nav-back` / `.page` 定位）、模板里
+ * 那份 `<template id="wt-chrome-phone">` 定义（取走之后从产物里摘掉，所以产物里看不到）、
+ * 以及 `build.py` 逐页注入的那一段（每张手机页面各一份，start/end 成对）。剥除口径与
+ * 2026-11-09 那块相同：从 start 标记所在行剥到 end 标记所在行（含换行），剩下的必须与
+ * 上游逐字节相同——所以剥完之后的页面 div 又只剩 `<div class="page">\n片段\n</div>`。
+ */
+const PATCH3_START = '本地补丁（2026-11-10，非上游）';
+const PATCH3_END = '本地补丁结束（2026-11-10）';
+
 /** 剥掉那块补丁（含它上面的注释）。找不到就原样返回——让 byte 比对自己去红。 */
 function withoutLocalPatch(html: string): string {
   let out = html;
-  // ① 2026-11-09 的两段：整段（标记 → 结束标记所在行）连行尾换行一起剥。
-  for (;;) {
-    const from = out.indexOf(PATCH2_START);
-    if (from < 0) break;
-    const end = out.indexOf(PATCH2_END, from);
-    if (end < 0) break;
-    const lineEnd = out.indexOf('\n', end);
-    const to = lineEnd < 0 ? out.length : lineEnd + 1;
-    // 起点回退到行首：注释是从行首开始的，回退之后剥掉的是整行。
-    let lineStart = from;
-    while (lineStart > 0 && out[lineStart - 1] !== '\n') lineStart -= 1;
-    // 补丁是「空行 + 块」插进去的（读起来才不挤），所以剥的时候把它前面那一行空行一起剥；
-    // 不然剩下的产物比上游多一个换行，字节比对会以「差 1 个字节」的形式红掉。
-    if (lineStart > 0 && (lineStart - 2 < 0 || out[lineStart - 2] === '\n')) lineStart -= 1;
-    out = out.slice(0, lineStart) + out.slice(to);
+  // ① 2026-11-09 / 2026-11-10 的成对补丁：整段（标记 → 结束标记所在行）连行尾换行一起剥。
+  //    两块用同一条口径，只是标记不同——所以这里按「(start, end) 对」循环，而不是写两遍。
+  const pairs: Array<[string, string]> = [
+    [PATCH2_START, PATCH2_END],
+    [PATCH3_START, PATCH3_END],
+  ];
+  for (const [startMark, endMark] of pairs) {
+    for (;;) {
+      const from = out.indexOf(startMark);
+      if (from < 0) break;
+      const end = out.indexOf(endMark, from);
+      if (end < 0) break;
+      const lineEnd = out.indexOf('\n', end);
+      const to = lineEnd < 0 ? out.length : lineEnd + 1;
+      // 起点回退到行首：注释是从行首开始的，回退之后剥掉的是整行。
+      let lineStart = from;
+      while (lineStart > 0 && out[lineStart - 1] !== '\n') lineStart -= 1;
+      // 补丁是「空行 + 块」插进去的（读起来才不挤），所以剥的时候把它前面那一行空行一起剥；
+      // 不然剩下的产物比上游多一个换行，字节比对会以「差 1 个字节」的形式红掉。
+      if (lineStart > 0 && (lineStart - 2 < 0 || out[lineStart - 2] === '\n')) lineStart -= 1;
+      out = out.slice(0, lineStart) + out.slice(to);
+    }
   }
   // ② 2026-11-08 的那一条规则。
   const start = out.indexOf(PATCH_START);
@@ -373,16 +392,32 @@ describe('与上游 build.py 逐字节一致', () => {
     const a = await readFile(path.join(dir, 'mine.html'), 'utf8');
     const b = await readFile(path.join(dir, 'theirs.html'), 'utf8');
 
-    // 1. 两块补丁真的在产物里（模板 → build.py → 产物这条链没断）
+    // 1. 三块补丁真的在产物里（模板 → build.py → 产物这条链没断）
     expect(a).toContain(PATCH_RULE);
     expect(a).toContain(PATCH2_END);
     expect(a).toContain('id="frame-seq"');
+    expect(a).toContain('class="wt-sb-ico"');
     // 2. 剥掉它之后逐字节相同：除了这一块，模板与上游一个字都不差
     expect(withoutLocalPatch(a)).toBe(b);
     // 3. 补丁只多出那几十个字节，不是把整段模板换掉了
     expect(Buffer.byteLength(a)).toBeGreaterThan(40_000);
     expect(Buffer.byteLength(a) - Buffer.byteLength(b))
       .toBe(Buffer.byteLength(a) - Buffer.byteLength(withoutLocalPatch(a)));
+  });
+});
+
+describe('本地补丁（2026-11-10）成对、可整块剥除', () => {
+  it('模板剥完之后一个 2026-11-10 标记都不剩，上游那套 CSS 盒子图标原样在', async () => {
+    const tpl = await readFile(
+      path.join(REPO_ROOT, 'vendor/uemaster/flow-walkthrough/templates/walkthrough.html'), 'utf8');
+    expect(tpl).toContain(PATCH3_START);
+    const stripped = withoutLocalPatch(tpl);
+    // 成对：剥完不该剩半块（剩半块意味着有一条结束标记被漏写，字节比对会以「多几行」红掉）
+    expect(stripped).not.toContain('2026-11-10');
+    expect(stripped).not.toContain('wt-chrome-phone');
+    // 我们只在补丁块里覆盖上游规则，上游那几条一个字都没动
+    expect(stripped).toContain('.wt-sb-icons { position: relative; width: 22px; height: 10px;');
+    expect(stripped).toContain('.wt-nav-back { width: 10px; height: 10px;');
   });
 });
 

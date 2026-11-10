@@ -20,10 +20,52 @@ import json
 import os
 import re
 import sys
+from html import escape as html_escape
 
 SPEC = "walkmap/1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(os.path.dirname(HERE), "templates", "walkthrough.html")
+
+# 本地补丁（2026-11-10，非上游）：手机 chrome 由模板给，模型只交内容区。
+#
+# 为什么挪到模板：模型画不出稳定的图标（PAN-47 真材料顶栏被它拼成两个畸形符号），
+# 而同一块 chrome 每页必须一模一样，读者才能把两页的差别读成内容的差别。现在模板里
+# 有**一份**定义（`<template id="wt-chrome-phone">`，状态栏 + 导航栏 + 三个内联 SVG），
+# 这里取走它、逐页包到内容前面。模型那份片段即便还自带 statusbar/nav，也在拼装前被
+# src/core/uemaster/compose.ts 的 stripPhoneChrome 剥掉了——两道都不许出现两条状态栏。
+CHROME_ID = "wt-chrome-phone"
+CHROME_RE = re.compile(r'<template id="%s">(.*?)</template>' % CHROME_ID, re.S)
+CHROME_BLOCK_RE = re.compile(
+    r'[ \t]*<!-- 本地补丁（2026-11-10，非上游）：手机 chrome.*?本地补丁结束（2026-11-10） -->\n',
+    re.S)
+CHROME_START = "<!-- 本地补丁（2026-11-10，非上游）：手机 chrome（状态栏 + 导航栏）由模板统一画 -->"
+CHROME_END = "<!-- 本地补丁结束（2026-11-10） -->"
+# 回退箭头：首页不注入（那一页在流程里没有前驱），其余页面一个。
+NAV_BACK_SVG = ('<svg class="wt-nav-back" viewBox="0 0 12 12" aria-hidden="true">'
+                '<path d="M7.5 1.5 3 6l4.5 4.5"></path></svg>')
+
+
+def take_chrome(template_text):
+    """从模板里取走唯一一份手机 chrome：返回 (chrome 原文, 模板里那一整块的原文)。
+
+    第二项是**要把产物里那一块摘掉**用的：模板里那份定义是构建期的源，不是产物的一部分
+    （`<template>` 不渲染，但会出现在字节里，审计时同一份材料会被数出两条状态栏标记）。
+    摘的时候按原文整块 `replace`，而不是再写一条正则去猜边界。
+    """
+    match = CHROME_RE.search(template_text)
+    if match is None:
+        return "", ""
+    block = CHROME_BLOCK_RE.search(template_text)
+    return match.group(1).strip(), ("" if block is None else block.group(0))
+
+
+def chrome_for(chrome, title, has_back):
+    """按页把 chrome 填成这一页的：标题是节点文案，回退箭头只在有前驱时给。"""
+    if not chrome:
+        return ""
+    filled = chrome.replace("__WT_NAV_TITLE__", html_escape(title or ""))
+    filled = filled.replace("__WT_NAV_BACK__", NAV_BACK_SVG if has_back else "")
+    return CHROME_START + "\n" + filled + "\n" + CHROME_END
 
 EMOJI_RANGES = [(0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
                 (0xFE0F, 0xFE0F), (0x2705, 0x2705), (0x274C, 0x274C)]
@@ -193,15 +235,35 @@ def main():
     if not args.output:
         raise SystemExit("错误：需要 -o 指定输出文件（或使用 --check）")
 
+    def page_owner(pid):
+        """这个页面归哪个节点：取第一个映射到它的节点（状态组里代表节点总是先出现）。
+
+        导航栏标题要从节点文案来——契约改了以后模型不再自己写标题，而标题必须与左栏
+        选中的步骤同名，读者才知道自己在看哪一步。
+        """
+        for nid, meta in nodes.items():
+            if meta.get("page") == pid:
+                return meta
+        return {}
+
     def page_divs(frame):
         out = []
         for pid, html in pages.items():
             if page_frame[pid] == frame:
-                out.append('<div class="page" id="%s">\n%s\n</div>' % (pid, html))
+                # 本地补丁（2026-11-10，非上游）：手机页面的 chrome 由模板给。
+                # 内容区原样落在它下面；宽窗口那一格没有状态栏（它是浏览器，不是手机）。
+                if frame == "phone":
+                    meta = page_owner(pid)
+                    head = chrome_for(chrome, meta.get("title", ""), bool(meta.get("back")))
+                    out.append('<div class="page" id="%s">\n%s\n%s\n</div>' % (pid, head, html))
+                else:
+                    out.append('<div class="page" id="%s">\n%s\n</div>' % (pid, html))
         return "\n".join(out)
 
     css_vars = "".join("  %s: %s;\n" % (k, v) for k, v in theme_vars(wm.get("css_vars", {})).items())
-    html = (open(TEMPLATE, encoding="utf-8").read()
+    template_text = open(TEMPLATE, encoding="utf-8").read()
+    chrome, chrome_block = take_chrome(template_text)
+    html = (template_text
             .replace("__TITLE__", wm.get("title", "流程走查"))
             .replace("__CSS_VARS__", css_vars)
             .replace("__LEGEND__", legend_html(svg))
@@ -216,7 +278,9 @@ def main():
             .replace("__STATE_GROUPS_JSON__", json.dumps(groups, ensure_ascii=False))
             .replace("__PAGE_FRAME_JSON__", json.dumps(page_frame, ensure_ascii=False))
             .replace("__DEFAULT__", default))
-
+    # 模板里那份 chrome 定义取走之后从产物里摘掉（见 take_chrome）：产物只该有**页面上的** chrome。
+    if chrome_block:
+        html = html.replace(chrome_block, "")
     bad = find_emoji(html)
     if bad:
         raise SystemExit("错误：产物含 emoji 字符 %s" % bad[:5])

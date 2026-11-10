@@ -35,7 +35,7 @@ import { nextArtifactVersion, versionedFileOf } from './versions.js';
 import { fingerprintOfRow } from '../requirements/fingerprint.js';
 import { makeTrace, type Trace } from './attempts.js';
 import {
-  FLOW_DROP_RULE, assembleWalkmap, droppedNotesIn, reportDropped, type PageFragment,
+  FLOW_DROP_RULE, assembleWalkmap, droppedNotesIn, reportDropped, reportStripped, type PageFragment,
 } from './compose.js';
 import {
   MAX_STEPS, MAX_WHAT_CHARS, SEQUENCE_RULE, missingStepsReason, normalizeSteps, type SeqStep,
@@ -1378,7 +1378,7 @@ export function verifyPrompt(
     '',
     'nodes：每个流程节点一条：',
     '{ "id": "A", "kind": "page", "frame": "phone", "title": "分享页搜索入口",',
-    '  "html": "<div class=\\"wt-screen\\">…</div>",',
+    '  "html": "<div class=\\"wt-body\\">…</div>",',
     '  "anno": [["一致", "工具栏已换成输入框式入口"], ["内容", "点进独立搜索页"]] }',
     '',
     '后端节点（kind=system / decision）没有页面：不要给 html，交一组时序步骤 steps：',
@@ -1395,12 +1395,15 @@ export function verifyPrompt(
     '    演示说明一律不写，元素下面不加解释性小字。',
     ' 2. 手机页面 375px 宽（frame 写 phone）；后台/浏览器页面 690px 宽（frame 写 wide）。',
     ' 3. 只用模板内置的 wt-* 组件类，不自带 <style>、不引外部资源：',
-    '    wt-screen、wt-statusbar、wt-nav（wt-nav-back / wt-nav-title / wt-nav-action）、wt-titlebar、',
-    '    wt-body、wt-card、wt-section、wt-list / wt-list-item / wt-li-main / wt-li-title / wt-li-sub /',
+    '    wt-body（内容区，片段从这里开始）、wt-titlebar、wt-card、wt-section、wt-list / wt-list-item / wt-li-main / wt-li-title / wt-li-sub /',
     '    wt-li-extra / wt-li-arrow、wt-input、wt-btn / wt-btn-ghost / wt-btn-sm、wt-badge、wt-dimtext、',
     '    wt-tabs / wt-tab / wt-on、wt-empty、wt-img、wt-bottombar、wt-modal / wt-dialog / wt-dialog-title /',
     '    wt-dialog-body / wt-dialog-actions、wt-toast、wt-browserbar、wt-table。',
     ' 4. 只写 body 内的片段：不要 <html>、<head>、<body>、<script>、<style>。',
+    ' 4b. **手机外壳（状态栏 + 导航栏）由模板画，你不要画**：不写 wt-screen、wt-statusbar、',
+    '    wt-sb-icons、wt-nav（含 wt-nav-back / wt-nav-title / wt-nav-action）。图标是模板里的',
+    '    内联 SVG，模型用 CSS 盒子拼出来的顶栏会读成畸形符号；同一块外壳每页必须一模一样，',
+    '    评审才比得出内容差别。导航栏标题由系统按节点文案填，首页没有回退箭头。',
     ' 5. 不用 emoji（构建器硬校验，出现即整份被拒）。图片用 wt-img 占位。',
     ' 6. 页面按**代码里真实的样子**画，不要照 PRD 的理想状态画：PRD 要求而代码里没有的元素，',
     '    画成它现在缺的样子，由标注去说明。',
@@ -1832,6 +1835,8 @@ export async function inspect(
       if (report.ok) {
         nodes = parsed.doc.nodes;
         assembly = candidate;
+        // 剥过模型自带的手机 chrome 就打一行（与 `[flow-drop]` 同口径：不拦材料，但要看得到）。
+        reportStripped(`PAN-${req.number} 走查`, candidate.stripped);
         if (parsed.doc.findings.length > 0) findings = parsed.doc.findings;
         lastVerifyWhy = '';
       } else {

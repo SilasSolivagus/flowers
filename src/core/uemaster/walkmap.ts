@@ -84,7 +84,14 @@ export type Anno = [string, string] | [string, string, string];
 export type WalkmapPage = { id: string; frame: Frame; file: string; kind?: 'sequence' };
 export type WalkmapState = { id: string; label: string; node: string };
 export type WalkmapStateGroup = { title: string; states: WalkmapState[] };
-export type WalkmapNode = { page: string; state?: string; title: string; anno: Anno[] };
+/**
+ * 一个节点的映射。
+ *
+ * `back`（2026-11-10）是**这一页画不画导航栏的回退箭头**：手机 chrome 改由模板给之后
+ * 箭头不再是模型写的一行字，而模板需要知道「这一页在流程里有没有前驱」。只写 `true`，
+ * 不写 `false`——缺省即首页，产物里连一个属性都不多（旧材料照旧读）。
+ */
+export type WalkmapNode = { page: string; state?: string; title: string; anno: Anno[]; back?: boolean };
 
 export type Walkmap = {
   spec: string;
@@ -123,6 +130,14 @@ export type NodeInput = {
   /** 指向 `pages[].id`（页面或时序伪页面）。 */
   page?: string;
   anno?: Anno[];
+  /**
+   * 这一页在流程里有没有前驱（2026-11-10）。
+   *
+   * 只影响手机 chrome 的导航栏：模板只在 `true` 时注入回退箭头，首页因此天然没有。
+   * 放在节点上而不是页面上：同一个页面可能被多个状态节点共用，回退与否是**流程里
+   * 这一步的位置**决定的，不是页面内容决定的（代表节点先出现，取它的值）。
+   */
+  back?: boolean;
 };
 
 export type WalkmapInput = {
@@ -214,7 +229,11 @@ export function buildWalkmap(input: WalkmapInput): Walkmap {
 
   const nodes: Record<string, WalkmapNode> = {};
   for (const node of input.nodes) {
-    const entry: WalkmapNode = { page: node.page ?? '', title: node.title, anno: node.anno ?? [] };
+    const entry: WalkmapNode = {
+      page: node.page ?? '', title: node.title, anno: node.anno ?? [],
+      // 缺省不写：`back` 只表达「有前驱」，没有前驱是本契约里的常态（首页）。
+      ...(node.back === true ? { back: true } : {}),
+    };
     nodes[node.id] = entry;
   }
 

@@ -117,6 +117,27 @@ diff -r vendor/uemaster/flow-walkthrough/templates /tmp/uem/skills/flow-walkthro
 字没改：`setViewByNode` 按 frame 收起两格，`frame=sequence` 时两格都收起，剩下的正好是
 这一格里的 `.page.active`。
 
+### 本地补丁三：手机 chrome（状态栏 + 导航栏）归模板（2026-11-10）
+
+两个文件、三处，都以 `本地补丁（2026-11-10，非上游）` 开头，模板里的两块以
+`本地补丁结束（2026-11-10）` 结尾（`build.py` 那两段是括号里的注释行）：
+
+1. `templates/walkthrough.html` 的 CSS 段（紧跟 `.wt-nav-action` 之后）：`.wt-sb-ico` /
+   `.wt-sb-time` 的尺寸、`.wt-sb-icons` 从「一个带边框的小方块 + 伪元素尾巴」改成三个
+   内联 SVG 的横排容器、`.wt-nav-back` 从旋转的边框角改成 SVG 箭头、`.page` 的
+   `position: relative` + 手机最小高度（原来由片段的 `.wt-screen` 提供）；
+2. 同一文件 `.stage` 里的 `<template id="wt-chrome-phone">`：**唯一一份** chrome 定义
+   （时间 + 信号/wifi/电池三个 SVG + 导航栏标题/回退箭头两个占位）。build.py 把它取走
+   逐页注入，注入之后从产物里摘掉——它是构建期的源，不是产物的一部分；
+3. `scripts/build.py` 的 `take_chrome / chrome_for / page_divs`：按 `pages[].frame == "phone"`
+   逐页包 chrome，宽窗口那一格不包（它是浏览器，没有状态栏）。
+
+为什么：模型画不出稳定的图标——真材料 `PAN-47` 的顶栏被它拼成两个畸形符号，而且同一块
+chrome 每页必须长得一模一样，评审才比得出内容差别。契约因此改成「模型只交内容区」，
+回退箭头由 `walkmap.nodes[].back`（图里有没有前驱）决定，首页自动没有。旧片段自带
+`wt-statusbar` / `wt-nav` 时由 `src/core/uemaster/compose.ts` 的 `stripPhoneChrome`
+在拼装前剥掉并打一行 `[phone-chrome]`——产物里永远只有一条状态栏。
+
 升级时怎么办：整目录覆盖之后，把这一条规则（连注释）重新贴回同一位置，然后跑
 `npx vitest run tests/walkmap.test.ts`。不要为了省这一步去改那条用例——它是唯一会
 告诉你「上游的模板长什么样、我们差了哪一行」的东西。

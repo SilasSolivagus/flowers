@@ -167,6 +167,25 @@ html, body { min-height: 100%; background: var(--wt-bg); color: var(--wt-text);
 .wt-nav-back { width: 10px; height: 10px; margin-left: var(--ux-s-1); border-left: 2px solid var(--wt-text);
   border-bottom: 2px solid var(--wt-text); transform: rotate(45deg); cursor: pointer; }
 .wt-nav-action { margin-left: auto; color: var(--wt-dim); cursor: pointer; }
+/* 本地补丁（2026-11-10，非上游）：手机 chrome（状态栏 + 导航栏）改由模板给。
+   为什么 chrome 归模板、不归模型：模型画不出稳定的图标——它只会拼 CSS 盒子，
+   于是同一份真材料（PAN-47）的顶栏被画成两个畸形小方块/斜杠；而且同一块 chrome
+   每页必须长得一模一样，读者才能把两页的差别读成内容差别。契约因此改成「模型只交
+   内容区」，图标在这里一次性定义成内联 SVG（信号格 / wifi 弧 / 电池），任何缩放都
+   读得出是状态栏。下面几条覆盖上游那套 CSS 盒子图标：.wt-sb-icons 从「一个带边框的
+   小方块 + 伪元素尾巴」变成三个 SVG 的横排容器；.wt-nav-back 从旋转的边框角变成
+   SVG 的回退箭头（自闭合标签由 build.py 注入，首页不注入）。上游规则保留不动，
+   这一块整块可剥（tests/walkmap.test.ts 的字节比对靠它）。 */
+.wt-sb-time { font-variant-numeric: tabular-nums; letter-spacing: 0.2px; }
+.wt-sb-icons { display: flex; align-items: center; gap: 3px; width: auto; height: auto;
+  border: 0; border-radius: 0; }
+.wt-sb-icons::after { display: none; }
+.wt-sb-ico { display: block; width: 17px; height: 11.5px; fill: currentColor; }
+.wt-nav-back { width: 12px; height: 12px; margin-left: var(--ux-s-1); border: 0; transform: none;
+  fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  color: var(--wt-text); cursor: pointer; }
+#frame-phone .page, #frame-wide .page { position: relative; min-height: var(--ux-h-device-phone-min); }
+/* 本地补丁结束（2026-11-10） */
 .wt-tabs { display: flex; padding: 0 var(--ux-s-2); border-bottom: 1px solid var(--wt-border-light); }
 .wt-tab { padding: var(--ux-s-3) var(--ux-s-3) var(--ux-s-2); font-size: var(--ux-fs-body); color: var(--wt-dim); border-bottom: 2px solid transparent; cursor: pointer; }
 .wt-tab.wt-on { color: var(--wt-text); font-weight: 600; border-bottom-color: var(--wt-accent); }
@@ -267,6 +286,28 @@ __PAGES_WIDE__
 __PAGES_SEQ__
   </div>
   <!-- 本地补丁结束（2026-11-09） -->
+
+  <!-- 本地补丁（2026-11-10，非上游）：手机 chrome（状态栏 + 导航栏）的**唯一一份定义**。
+       build.py 把这段取走，逐页包在手机页面的内容区前面（见 scripts/build.py 的
+       take_chrome / chrome_for / page_divs），然后**把整块从产物里摘掉**——它是构建期
+       的源，不是产物的一部分（留着会让审计在同一份材料里数出第二条状态栏标记）。
+       模型交的片段只从 wt-body 起，不再自己画顶部。
+       三件事因此只有一处能改：时间、三个内联 SVG 图标（信号格 / wifi 弧 / 电池）、
+       导航栏的标题与回退箭头。
+       __WT_NAV_BACK__ 由 build.py 按「这个节点在流程里有没有前驱」填：首页自动为空，
+       不是靠模型记得删。 -->
+  <template id="wt-chrome-phone">
+<div class="wt-statusbar">
+<span class="wt-sb-time">9:41</span>
+<span class="wt-sb-icons" role="img" aria-label="信号 无线网络 电池">
+<svg class="wt-sb-ico" viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="8.5" width="3" height="3.5" rx="0.7"></rect><rect x="5" y="6" width="3" height="6" rx="0.7"></rect><rect x="10" y="3.2" width="3" height="8.8" rx="0.7"></rect><rect x="15" y="0.5" width="3" height="11.5" rx="0.7"></rect></svg>
+<svg class="wt-sb-ico" viewBox="0 0 16 12" aria-hidden="true"><path d="M1 4.1a10 10 0 0 1 14 0"></path><path d="M3.7 6.9a6.2 6.2 0 0 1 8.6 0"></path><path d="M6.3 9.6a2.6 2.6 0 0 1 3.4 0"></path><circle cx="8" cy="11.3" r="1.1" stroke="none"></circle></svg>
+<svg class="wt-sb-ico" viewBox="0 0 25 12" aria-hidden="true"><rect x="0.75" y="0.75" width="20.5" height="10.5" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.5"></rect><rect x="3" y="3" width="14" height="6" rx="1.2" stroke="none"></rect><path d="M23.2 4.2v3.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path></svg>
+</span>
+</div>
+<div class="wt-nav">__WT_NAV_BACK__<span class="wt-nav-title">__WT_NAV_TITLE__</span></div>
+  </template>
+  <!-- 本地补丁结束（2026-11-10） -->
 </div>
 
 <aside class="anno-panel">

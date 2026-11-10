@@ -592,8 +592,18 @@ export function repairPrompt(
 
 // ─── 提示词 2：页面片段（上游 walkmap 契约的输入） ──────────────────────────
 
-/** 图里解析出来的一个节点。`kind` 决定它该画页面还是只写标注。 */
-export type FlowNode = { id: string; label: string; kind: 'process' | 'decision' | 'backend' };
+/**
+ * 图里解析出来的一个节点。`kind` 决定它该画页面还是只写标注。
+ *
+ * `prev`（2026-11-10）：图里指向它的节点 id。只在拼 walkmap 时用一次——手机 chrome 的
+ * 回退箭头「有没有前驱」由它决定（首页不画）。它不写进提示词清单，也不写进标注。
+ */
+export type FlowNode = {
+  id: string;
+  label: string;
+  kind: 'process' | 'decision' | 'backend';
+  prev?: string[];
+};
 
 /** 模型交回来的一份页面片段。`html` 我们**一个字都不改**，原样写进临时目录。 */
 export type PageFragment = {
@@ -677,15 +687,20 @@ export function fragmentsPrompt(
     '    设计理由、边界条件、「本期不做 / 待确认」、演示操作说明一律不写；元素下方不加解释性的小字。',
     ' 2. 手机页面按 375px 宽画（frame 写 phone）；后台与网页页面放 690px 宽的窗口（frame 写 wide）。',
     ' 3. 只用模板内置的 wt-* 组件类，不自带 <style>、不引外部资源：',
-    '    wt-screen（整屏容器）、wt-statusbar、wt-nav（wt-nav-back / wt-nav-title / wt-nav-action）、',
-    '    wt-titlebar、wt-body、wt-card、wt-section、wt-list / wt-list-item / wt-li-main / wt-li-title /',
+    '    wt-body（内容区，片段从这里开始）、wt-titlebar、wt-card、wt-section、wt-list / wt-list-item / wt-li-main / wt-li-title /',
     '    wt-li-sub / wt-li-extra / wt-li-arrow、wt-input、wt-btn（整行主按钮）/ wt-btn-ghost / wt-btn-sm、',
     '    wt-badge、wt-dimtext、wt-tabs / wt-tab / wt-on、wt-empty、wt-img、wt-bottombar、',
     '    wt-modal / wt-dialog / wt-dialog-title / wt-dialog-body / wt-dialog-actions、wt-toast、',
     '    wt-browserbar（后台地址栏）、wt-table。',
     ' 4. 只写 body 内的片段：不要 <html>、<head>、<body>、<script>、<style>。',
+    ' 4b. **手机外壳（状态栏 + 导航栏）由模板画，你不要画**：片段从 wt-body 开始，',
+    '    不要写 wt-screen、wt-statusbar、wt-sb-icons、wt-nav（含 wt-nav-back / wt-nav-title /',
+    '    wt-nav-action）。理由：图标是模板里的内联 SVG，你拿 CSS 盒子和符号拼出来的顶栏',
+    '    在任何缩放下都读成一个畸形小方块（真材料 PAN-47 就是这样）；而且同一块外壳每页',
+    '    必须长得一模一样，评审才比得出页面内容的差别。导航栏标题由系统按节点文案填，',
+    '    首页也不会出现回退箭头——这两件事都不用你写。',
     ' 5. 一个状态一份片段：同一页面因规则不同而出现的态（弹窗、toast、空态、只读态）各写一份；',
-    '    弹窗态 = 原页面 + wt-modal（放在 wt-screen 里），toast 态 = 原页面 + wt-toast。',
+    '    弹窗态 = 原页面 + wt-modal（与 wt-body 并列），toast 态 = 原页面 + wt-toast。',
     '    不同状态之间共用的那部分结构必须一模一样，评审才比得出来。',
     ` 6. 页面上能推进流程的按钮写 onclick="goNode('节点id')"，id 必须是上面清单里的 id。`,
     ' 7. 不用 emoji（构建器硬校验，出现即整份材料被拒）。图片用 wt-img 占位，图标用文字占位。',
@@ -695,10 +710,8 @@ export function fragmentsPrompt(
     '{',
     '  "nodes": [',
     '    { "id": "A", "kind": "page", "frame": "phone", "title": "进入寄养频道",',
-    '      "html": "<div class=\\"wt-screen\\"><div class=\\"wt-statusbar\\"><span>9:41</span>'
-      + '<span class=\\"wt-sb-icons\\"></span></div><div class=\\"wt-nav\\">'
-      + '<span class=\\"wt-nav-title\\">寄养</span></div><div class=\\"wt-body\\">'
-      + '<div class=\\"wt-card\\">…</div></div></div>",',
+    '      "html": "<div class=\\"wt-body\\"><div class=\\"wt-card\\">…</div>'
+      + '<button class=\\"wt-btn\\">立即预约</button></div>",',
     '      "anno": [["内容", "按距离列出可寄养门店"], ["操作", "点「立即预约」后判断是否首次预约"]],',
     '      "open": {',
     '        "req": [["失败怎么办", "门店列表加载失败时停在这一屏还是退回上一屏，是否保留已选门店"]],',
@@ -942,6 +955,132 @@ export function readFragments(
   return { ok: true, doc: { nodes } };
 }
 
+// ─── 手机 chrome：归模板，不归模型（2026-11-10）────────────────────────────────
+
+/**
+ * 片段里那几个「手机外壳」包装类：改契约之后只该由模板画。
+ *
+ * 为什么要有这套剥离（而不是只改提示词）：提示词只约束**下一次**生成。旧的提示词还在
+ * 缓存包与重试路径里，模型也会自己发挥——它见过别的例子里有 statusbar，就会照抄一份。
+ * 两份状态栏叠在一起是最坏的呈现：读者看到两条时间、两组图标，还以为是页面内容。
+ * 而这件事没有任何一层会报错（HTML 合法、wt- 类合法），所以只能在这里兜住。
+ */
+const CHROME_CLASSES = ['wt-statusbar', 'wt-nav'] as const;
+
+/**
+ * 把一棵「同标签名元素」从字符串里删掉（配平嵌套），返回删掉之后的新串。
+ *
+ * 为什么不用 DOM 解析器：这一层没有 DOM（服务端、无依赖），而片段是我们**允许**的
+ * 那种片段（wt-* 类、没有脚本）。用配平扫描足够，而且它不会顺手「修好」别的东西——
+ * 这一层只该剥外壳，别的字节一个字都不动。
+ */
+function removeElementByClass(html: string, cls: string): { html: string; removed: boolean } {
+  const opener = /<([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+  for (let m = opener.exec(html); m !== null; m = opener.exec(html)) {
+    const attrs = m[2] ?? '';
+    const classMatch = /\bclass\s*=\s*("([^"]*)"|'([^']*)')/i.exec(attrs);
+    const classList = classMatch === null ? '' : (classMatch[2] ?? classMatch[3] ?? '');
+    if (!classList.split(/\s+/).includes(cls)) continue;
+    const tag = m[1]!.toLowerCase();
+    const start = m.index;
+    const openEnd = start + m[0].length;
+    // 自闭合（`<div class="wt-nav" />`）：只吃开标签。
+    if (/\/\s*>$/.test(m[0])) {
+      return { html: html.slice(0, start) + html.slice(openEnd), removed: true };
+    }
+    const closer = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'gi');
+    closer.lastIndex = openEnd;
+    let depth = 1;
+    for (let c = closer.exec(html); c !== null; c = closer.exec(html)) {
+      depth += c[1] === '/' ? -1 : 1;
+      if (depth === 0) {
+        const end = c.index + c[0].length;
+        return { html: html.slice(0, start) + html.slice(end), removed: true };
+      }
+    }
+    // 没有配平的收尾：只吃开标签，剩下的留给后面的校验去说——吞掉内容比留个残壳更坏。
+    return { html: html.slice(0, start) + html.slice(openEnd), removed: true };
+  }
+  return { html, removed: false };
+}
+
+/** 整段就是一个 `<div class="wt-screen">…</div>` 时，把这层壳去掉（模板会再包一层）。 */
+function unwrapScreen(html: string): { html: string; removed: boolean } {
+  const text = html.trim();
+  // 变量名不叫 opener：同名的正则字面量在另一个函数里带 `g`，而那条「exec 循环必须带 g」
+  // 的守卫是按**标识符**认声明的，同名两处会互相覆盖——叫 head 就不会被读成同一条正则。
+  const head = /^<div\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i.exec(text);
+  if (head === null) return { html, removed: false };
+  const classMatch = /\bclass\s*=\s*("([^"]*)"|'([^']*)')/i.exec(head[1] ?? '');
+  const classList = classMatch === null ? '' : (classMatch[2] ?? classMatch[3] ?? '');
+  if (!classList.split(/\s+/).includes('wt-screen')) return { html, removed: false };
+  const closer = /<\/?div\b[^>]*>/gi;
+  closer.lastIndex = head[0].length;
+  let depth = 1;
+  for (let c = closer.exec(text); c !== null; c = closer.exec(text)) {
+    depth += c[0].startsWith('</') ? -1 : 1;
+    if (depth !== 0) continue;
+    const end = c.index + c[0].length;
+    if (end !== text.length) return { html, removed: false };  // 壳外面还有东西：不动
+    return { html: text.slice(head[0].length, c.index).trim(), removed: true };
+  }
+  return { html, removed: false };
+}
+
+/**
+ * 剥掉模型自带的手机外壳，只留内容区（2026-11-10 的契约改动）。
+ *
+ * 契约现在是「模板画 chrome，模型交内容」：合法的片段从 `<div class="wt-body">` 起，
+ * 状态栏与导航栏由模板填。旧片段是 `<div class="wt-screen"><div class="wt-statusbar">…
+ * </div><div class="wt-nav">…</div><div class="wt-body">…</div></div>`。这里把前者化成
+ * 后者，于是**新旧片段走同一条渲染路径**，产物里永远只有一条状态栏。
+ *
+ * `parts` 是剥掉了什么（`wt-statusbar` / `wt-nav` / `wt-screen`），调用方据此打一行日志：
+ * 一次生成里剥了几处，是「提示词没跟上」还是「缓存包还是旧的」，看这一行就知道。
+ */
+export function stripPhoneChrome(html: string): { html: string; parts: string[] } {
+  const parts: string[] = [];
+  let out = html;
+  for (const cls of CHROME_CLASSES) {
+    // 循环到没有再出现：一份片段里写两条状态栏也照剥（那也是双份）。
+    let count = 0;
+    for (;;) {
+      const step = removeElementByClass(out, cls);
+      if (!step.removed) break;
+      out = step.html;
+      count += 1;
+    }
+    if (count > 0) parts.push(cls);
+  }
+  const screen = unwrapScreen(out);
+  if (screen.removed) {
+    parts.push('wt-screen');
+    out = screen.html;
+  }
+  return parts.length === 0 ? { html, parts } : { html: out.trim(), parts };
+}
+
+const CHROME_NOUN: Record<string, string> = {
+  'wt-statusbar': '状态栏',
+  'wt-nav': '导航栏',
+  'wt-screen': '整屏容器',
+};
+
+/** 一行日志：这一份材料里剥掉了哪几处模型自带的 chrome（没剥就一个字都不打）。 */
+export function stripReportLine(tag: string, stripped: Assembly['stripped']): string {
+  const what = stripped
+    .map((item) => `${item.id}（${item.parts.map((part) => CHROME_NOUN[part] ?? part).join(' + ')}）`)
+    .join('、');
+  return `[phone-chrome] ${tag} 已剥掉模型自带的手机 chrome：${what}`;
+}
+
+/** 打一行日志并返回剥掉了几份片段数（0 时不占一行，与 `reportDropped` 同口径）。 */
+export function reportStripped(tag: string, stripped: Assembly['stripped']): number {
+  if (stripped.length === 0) return 0;
+  process.stderr.write(`${stripReportLine(tag, stripped)}\n`);
+  return stripped.length;
+}
+
 // ─── 拼 walkmap：片段 → 契约 JSON ────────────────────────────────────────────
 
 /** 形态在提示词清单里的名字。 */
@@ -974,6 +1113,15 @@ export type Assembly = {
   annoRaw: number;
   /** 标注里清洗**之后**还剩多少处（应当恒为 0；不为 0 说明改写/搬走漏了一条路）。 */
   annoLeft: number;
+  /**
+   * 从片段里剥掉的手机 chrome（2026-11-10）：节点 id + 剥掉了哪几个包装类。
+   *
+   * 为什么把这件事**交出去**而不是在这里打日志：这个函数是纯函数（同一份片段永远
+   * 同一份 walkmap，用例靠它做断言），一行 stderr 会让它不再纯。调用方拿到这个数组，
+   * 用 `reportStripped` 打一行——剥掉的东西必须被看见，否则「模板画的」和「模型画的」
+   * 又混成一件事。
+   */
+  stripped: Array<{ id: string; parts: string[] }>;
 };
 
 /**
@@ -1008,14 +1156,31 @@ export type Assembly = {
  *
  * 纯函数：不读磁盘、不看时钟。同一份片段永远得到同一份 walkmap。
  */
-export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: string }): Assembly {
+export function assembleWalkmap(
+  doc: FragmentDoc,
+  opts: {
+    title: string;
+    svg: string;
+    /**
+     * 「这些节点在图里有前驱」（2026-11-10）：决定手机导航栏画不画回退箭头。
+     * 不传就按「除第一个节点外都有」处理——见 `nodes0.forEach` 里那段注解。
+     */
+    hasPrev?: ReadonlySet<string>;
+  },
+): Assembly {
   // ── 缺口 / 建议那一档：标注比正文更严（2026-11-09 第二轮）──
   //
   // 为什么在**这里**洗而不是等 `relocateHtmlBody`：`build.py` 把 walkmap 的 JSON 原样塞进
   // `<script>`，而那一层按「正文文本节点」处理时会把脚本整块跳过（不跳过就会把页面脚本
   // 删成残句）。所以标注必须在上游洗——它同时也是唯一知道「哪一行是 verdict、哪一行是
   // 缺口」的地方：verdict 按正文档，其余按缺口档（`sanitizeAnno`）。
+  const chrome: Array<{ id: string; parts: string[] }> = [];
   const cleaned = doc.nodes.map((fragment) => {
+    // 手机 chrome 的兜底（2026-11-10）：契约改了，模型只交内容区；但旧提示词、缓存包、
+    // 或者模型自己发挥，仍会交一份自带 statusbar/nav 的整屏片段。这里把那一层剥掉，
+    // **永不静默双份**：一条页面上只能有一条状态栏。剥了什么由调用方打一行日志。
+    const stripped = stripPhoneChrome(fragment.html);
+    if (stripped.parts.length > 0) chrome.push({ id: fragment.id, parts: stripped.parts });
     const result = sanitizeAnno(fragment.anno);
     const anno = result.rows.map((row): Anno =>
       (row.length >= 3 ? [row[0]!, row[1]!, row[2]!] : [row[0]!, row[1]!]));
@@ -1025,7 +1190,7 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
      * 清洗之后再 `openRows` 铺行：组标题是我们写的固定文案，不参与清洗（见 `sanitizeOpen`）。
      */
     const open = sanitizeOpen(fragment.open);
-    return { fragment, anno, open: open.rows, result, openResult: open };
+    return { fragment: { ...fragment, html: stripped.html }, anno, open: open.rows, result, openResult: open };
   });
   const moved = cleaned.flatMap((item) => item.result.moved);
   const annoRaw = cleaned.reduce((sum, item) => sum + item.result.raw + item.openResult.raw, 0);
@@ -1056,7 +1221,7 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
   const nodes: NodeInput[] = [];
   const sequences: Array<{ node: string; page: string; steps: number }> = [];
 
-  nodes0.forEach((fragment) => {
+  nodes0.forEach((fragment, index) => {
     if (fragment.kind !== 'page' || fragment.html === '') {
       // ① 后端节点带步骤 → 它自己的时序伪页面（本次改动的核心，见上面规则 3）。
       const steps = fragment.steps ?? [];
@@ -1093,12 +1258,21 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
       fragments[pageId] = fragment.html;
     }
 
+    /**
+     * 回退箭头归模板（2026-11-10）：只在这一页**确实有前驱**时给。
+     *
+     * `opts.hasPrev` 由调用方从图里算好（`parseFlow` 的 `prev`）；没有传的时候退回
+     * 「不是第一个节点」——`inspect` 那条路的主干是一条线性链，根就是第一个，这个退路
+     * 与精确答案同值。两条都只有一个目的：首页不许出现一个点不回去的箭头。
+     */
+    const back = opts.hasPrev === undefined ? index > 0 : opts.hasPrev.has(fragment.id);
     const node: NodeInput = {
       id: fragment.id,
       title: fragment.title,
       kind: 'page',
       page: pageId,
       anno: fragment.anno,
+      ...(back ? { back: true } : {}),
     };
     nodes.push(node);
   });
@@ -1110,6 +1284,7 @@ export function assembleWalkmap(doc: FragmentDoc, opts: { title: string; svg: st
     moved,
     annoRaw,
     annoLeft,
+    stripped: chrome,
   };
 }
 
@@ -1235,21 +1410,42 @@ export function parseFlow(mermaid: string): FlowShape {
   }
 
   let edges = 0;
+  /**
+   * 谁指向谁（2026-11-10）。只留下每个节点的**前驱 id**：手机 chrome 的回退箭头要说
+   * 「这一页在流程里有没有上一步」，而这个事实只有图知道。链 `A --> B --> C` 在这里已经
+   * 被 `normalizeMermaid` 拆成两两一条，所以逐段相邻取一对就是全部边。
+   */
+  const preds = new Map<string, string[]>();
+  const link = (from: string, to: string): void => {
+    if (from === to) return;
+    const list = preds.get(to) ?? [];
+    if (!list.includes(from)) list.push(from);
+    preds.set(to, list);
+  };
+  const idsIn = (line: string): string[] => line.split('-->')
+    // `-->|是| C`：`|` 那一节是边标签，不是节点 id。
+    .map((part) => /^([A-Za-z0-9_]+)/.exec(part.replace(/^\|[^|]*\|/, '').trim())?.[1])
+    .filter((id): id is string => id !== undefined);
+
   for (const raw of mermaid.split('\n')) {
     const line = raw.trim();
     if (line === '' || HEADER.test(line) || CLASS_LINE.test(line)) continue;
     const parts = line.split('-->');
     if (parts.length === 1) continue;
     edges += parts.length - 1;
-    for (const part of parts) {
-      // `-->|是| C`：`|` 那一节是边标签，不是节点 id。
-      const clean = part.replace(/^\|[^|]*\|/, '').trim();
-      const id = /^([A-Za-z0-9_]+)/.exec(clean)?.[1];
-      if (id !== undefined) note(id);
-    }
+    const ids = idsIn(line);
+    for (let i = 0; i < ids.length - 1; i += 1) link(ids[i]!, ids[i + 1]!);
+    for (const id of ids) note(id);
   }
 
-  return { nodes: order.map((id) => byId.get(id)!), edges };
+  return {
+    nodes: order.map((id) => {
+      const node = byId.get(id)!;
+      const prev = preds.get(id);
+      return prev === undefined ? node : { ...node, prev };
+    }),
+    edges,
+  };
 }
 
 // ─── 小工具 ──────────────────────────────────────────────────────────────────
@@ -1420,6 +1616,8 @@ export async function buildPages(
   known: KnownSurfaces = EMPTY_SURFACES,
 ): Promise<{ assembly: Assembly; warnings: string[]; usage: ComposeUsage }> {
   const ids = nodes.map((node) => node.id);
+  // 回退箭头只认图（2026-11-10）：有入边的节点才算「有上一步」，首页因此没有箭头。
+  const hasPrev = new Set(nodes.filter((node) => (node.prev ?? []).length > 0).map((node) => node.id));
   const title = `PAN-${req.number}「${flat(req.title)}」${NOUN[stage]}`;
   let prompt = fragmentsPrompt(req, stage, nodes, known);
   let spent = usage;
@@ -1452,9 +1650,14 @@ export async function buildPages(
     if (!read.ok) {
       why = read.why;
     } else {
-      const assembly = assembleWalkmap(read.doc, { title, svg: flow.svg });
+      const assembly = assembleWalkmap(read.doc, { title, svg: flow.svg, hasPrev });
       const report = validateWalkmap(assembly.walkmap, { svg: flow.svg, fragments: assembly.fragments });
-      if (report.ok) passed = { assembly, warnings: report.warnings };
+      if (report.ok) {
+        // 剥过模型自带的手机 chrome 就打一行（没剥不占行）：这一行是流水线的交代，
+        // 与 `[flow-drop]` 同口径——不拦材料，但复核的人得看得见。
+        reportStripped(`PAN-${req.number} ${stage}`, assembly.stripped);
+        passed = { assembly, warnings: report.warnings };
+      }
       // 校验器的原话直接当 `why`：它就是我们要在界面上说的那一句。
       else why = report.errors.join('；');
     }
