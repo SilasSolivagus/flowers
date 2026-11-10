@@ -410,3 +410,204 @@ worker 起来了：pid=39680 活着=true
 5. **六问必填只作用于「评估」**：评审的输入是 PRD 本身，走查是 PRD + 代码镜像，两条都不以
    六问为前提（v1 里这两条也还没开放）。若 owner 要把同一道门套到评审上，改的是
    `startGeneration` 里那个 `stage === 'evaluate'` 判断。
+
+---
+
+# 十五、六问不齐不能立项——门挪到状态变迁上（2026-11-10 第三遍）
+
+> 起点 `28cea24`。上一轮把六问门装在生成器上（`startGeneration` 里那个
+> `stage === 'evaluate'` 判断）：它挡住「不许出材料」，但**档不住立项**。owner 的
+> 这一次裁决把这件事说清了。
+
+## 一、裁决（owner，记录在案）
+
+> **六问不齐不能立项。** 收集阶段必须填好核心三问才能点评估；点了评估就进待设计，
+> 所以「六问不齐」既不能生成材料、也不能进待设计。存量数据同一规则；但**已到
+> 待评审 / 待排期 / 待开发 / 开发中 / 测试中 / 已上线 / 已拒绝 / 已搁置 的一律不动**。
+
+**被否决的选项：卡「六问全齐」。** 实测收集 244 条里只有 **1 条**六问全齐（后三格在
+收集阶段本来就填不出来），卡它会等于上线即空转。**采用「核心三条」**：
+
+```
+必填（进待设计 / 生成评估材料）   context 谁在什么情况下用
+                                problem 现在怎么做 / 哪不好
+                                outcome 做成什么样算成功
+不必填                          surfaces / edge_cases / out_of_scope
+```
+
+## 二、三个实测数（这条规则的依据，执行前从演示库现查）
+
+```
+收集 244 · 六问全齐 1 · 核心三条齐 108
+待设计 111 · 六问全齐 5 · 核心三条齐 69
+已过评估的状态（review/queue/ready/dev/test/live/rejected/shelved）一律不动
+```
+
+三条 SQL（`deleted_at is null`，空白串按没写算）：
+
+```sql
+select count(*) filter (where coalesce(btrim(context),'')<>'' and coalesce(btrim(problem),'')<>''
+                          and coalesce(btrim(outcome),'')<>'') as core3,
+       count(*) filter (where 六格全非空) as six_full
+  from requirements where deleted_at is null and state = '<state>';
+```
+
+「核心三条齐 69」直接给出应退回数：`111 − 69 = 42`。第一行那个 `1 / 244` 就是
+「卡六问全齐 = 上线即空转」的证据。
+
+## 三、门在哪：`inbox → design` 的 `guard: 'brief'`
+
+```ts
+// src/core/state-machine.ts
+export type Guard = 'prd' | 'brief';
+export type TransitionContext = { hasPrd?: boolean; brief?: SixAnswers };
+
+{ from: 'inbox',  to: 'design',  trigger: 'evaluate', guard: 'brief' },
+```
+
+```ts
+// assertGuards（同一个函数，两道门各说各的）
+if (t.guard === 'brief') {
+  const refusal = evaluateLock(ctx.brief ?? {});
+  if (refusal !== null) throw new AppError('missing_brief', refusal);
+}
+```
+
+**为什么在变迁上、不在生成器上：立项是一个动作，材料是这个动作的产物。** 只把门装进
+生成器，挡住的是「不许出材料」，而「没有六问的需求照样能立项」会从别的入口漏过去：
+MCP 的 `requirement_start_design`、直接交回一份材料（`uemaster/attach.ts` 走的也是这条
+迁移）、将来的批量导入。装在那条边上，全部入口一次覆盖。
+
+- 判据与那句话只有一处：`src/core/requirements/brief.ts`（零依赖，只 import 标签表
+  `requirements/fields.ts`，所以状态机可以安全 import 它）。三个消费者：状态机
+  `assertGuards`、生成前 `startGeneration`、读模型 `read/detail.ts`——**同一个字符串**。
+- `ctx.brief` 传的是刚 `for update` 锁回来的那一行（`Locked` 新增 `context` /
+  `problem` / `outcome` 三列）：点名的是库里真实缺的那几格，不是调用方嘴上说的。
+  忘记传 → 三格全空 → 拒绝（fail-closed，与 prd 门同一条规矩）。
+- 生成前那道六问门**留着**（`startGeneration`）：不然一次点击会先烧 2–5 分钟模型调用，
+  再由 attach 的迁移失败回滚——而这句话在点下去那一秒就已经成立。
+- 存量：只有 `state = 'design'` 会被迁移动；`review` 及之后一个字不碰（第四节）。
+
+## 四、两句话（逐字，各说各的事）
+
+**六问门**（`brief.ts` 的 `lockMessage`；状态机抛的错误原文、生成前的拒绝理由、抽屉
+按钮旁边那行提示都是它）：
+
+```
+还差三条没填：谁在什么情况下用、现在怎么做/哪不好、做成什么样算成功。
+补完才能评估——评估要拿这三问立项、按这三问出材料，缺了只能靠编。
+```
+
+缺一条 →「还差一条没填：做成什么样算成功。补完才能评估——…」（数词跟条数走）。
+**只说能做到的事**：补这三问就在同一个页面的 `?edit=1` 后面。这句话解释的正是门为什么
+在变迁上——「评估要拿这三问立项」。
+
+**阶段门**（`gate.ts` 的 `evaluateStageLock`，只有非收集状态才有）：
+
+```
+v1 只在收集阶段生成评估材料。这条需求现在在「待设计」——想用这个能力，请在收集里新建一条。
+```
+
+删掉了原来的「或先把它退回收集」——**那是空头支票**：`TRANSITIONS` 里没有
+「待设计 → 收集」这条边，照着做会撞一句「不能从「待设计」直接到「收集」」。也不提
+「去补六问」：那是另一道门的事，补完仍然不能生成，写进一句话会让人以为是同一个门槛。
+
+界面这一侧：抽屉「参考」段评估那一行按钮禁用 + 那句理由（`needsDescription`，与服务端
+逐字相同）；**收集阶段**给「去补」链接（`/?open=<id>&edit=1`），非收集状态不给——
+六问能原地补，阶段不能。
+
+## 五、存量回退：实测 42 行，幂等
+
+`scripts/migrate-brief-to-inbox.ts`（`npm run db:brief`，默认 dry-run，`--apply` 才写库）。
+判据不是 SQL 里另抄一遍，而是把候选行读回来用 `brief.ts` 的 `missingRequired` 过滤。
+
+**执行结果（演示库，真跑）**：
+
+```
+待设计（核心三条不齐）命中：42 条（已退回收集）
+  PAN-1 · PAN-2 · PAN-56 · PAN-79 · PAN-98 · PAN-101 · PAN-131 · PAN-191 · PAN-216 ·
+  PAN-264 · PAN-318 · PAN-350 · PAN-417 · PAN-483 · PAN-722 · PAN-726 · PAN-732 ·
+  PAN-738 · PAN-739 · PAN-740 · PAN-743 · PAN-747 · PAN-748 · PAN-757 · PAN-761 ·
+  PAN-770 · PAN-775 · PAN-776 · PAN-778 · PAN-779 · PAN-788 · PAN-791 · PAN-792 ·
+  PAN-794 · PAN-797 · PAN-798 · PAN-801 · PAN-802 · PAN-806 · PAN-808 · PAN-814 · PAN-816
+待设计 111 → 69 · 收集 244 → 286
+```
+
+| 状态 | 前 | 后 | 差 |
+|---|---|---|---|
+| 收集 inbox | 244 | 286 | **+42** |
+| 待设计 design | 111 | 69 | **−42** |
+| 待评审 review | 2 | 2 | 0 |
+| 待排期 queue | 17 | 17 | 0 |
+| 待开发 ready | 1 | 1 | 0 |
+| 开发中 dev | 1 | 1 | 0 |
+| 测试中 test | 3 | 3 | 0 |
+| 已上线 live | 265 | 265 | 0 |
+| 已拒绝 rejected | 72 | 72 | 0 |
+| 已搁置 shelved | 98 | 98 | 0 |
+
+**幂等证明**（同一条命令连跑第二次）：
+
+```
+待设计（核心三条不齐）命中：0 条（已退回收集）
+待设计 69 → 69 · 收集 286 → 286     ← 十个状态的差全是 0
+```
+
+机制：候选只取 `state = 'design'`，而该动的行第一次就都成了 `inbox`；`update` 还带
+`and state = 'design'`（并发 / 重复执行的第二只手拿 0 行，于是既不写事件也不退行）。
+空库不报错：`before` / `after` 都是空表、`moved = 0`。
+
+**事件**：每条被移动的行一条 `requirement.state_changed`，`actor = 'system'`，实际 42 条：
+
+```json
+{"from":"design","to":"inbox","reason":"六问核心三条不齐，v1 立项前必须先补",
+ "batch":"2026-11-10-brief-to-inbox"}
+```
+
+`batch` 是 0028 那条口令（「批量操作不该刷屏」）：一次命令移动 42 行，逐条进通知会让
+超管收到 42 条一样的东西；带上它，`read/notify.ts` 的 `notBatch` 把它们挡在 feed / 红点 /
+企微之外，审计记录照旧在时间轴上（`detail.ts` 的 `describe` 认这个类型，中文是
+「状态变更：待设计 → 收集」+ 原因）。`EVENT_CLASS` 归 `change`。
+
+**可撤销**（一条 SQL，不留痕；事件行会留着当审计）：
+
+```sql
+update requirements r set state = 'design', state_entered_at = now()
+ where r.id in (select requirement_id from events
+                 where type = 'requirement.state_changed'
+                   and payload::jsonb ->> 'batch' = '2026-11-10-brief-to-inbox');
+```
+
+## 六、五条 mutation（把判据改坏，用例就红；逐条真跑过）
+
+| 改法 | 哪条用例红 |
+|---|---|
+| 摘掉表上的 `guard: 'brief'` | `表：门挂在变迁上 > inbox → design 那一条带 guard: brief` 等 **9** 条 |
+| `assertGuards` 只在三条**全空**时才拒 | `缺 context / problem / outcome：各拒一次且点名`、`三条全空 → 三条都点名` 等 **6** 条 |
+| 迁移把「非 inbox」全退回（`state <> 'inbox'`） | `dry-run 报出 2 条`、`--apply 那 2 条退回`、`第二次跑命中 0 行` **3** 条 |
+| 迁移候选把 `inbox` 也算进来 | `幂等 > 第二次跑命中 0 行` **1** 条 |
+| 阶段门把「或先把它退回收集」加回去 | `「退回收集」在任何一句话里都不再出现`、`一字不差…` **2** 条 |
+
+## 七、计数
+
+- `npx vitest run`：**1815 → 1838**（新增 23：`tests/brief-guard.test.ts` 15 条 +
+  `tests/brief-backfill.test.ts` 8 条；`3 skipped` 不变）。
+- 另有 **30 处旧夹具**补上了核心三问（`tests/helpers/brief.ts` 的 `BRIEF`）：
+  它们测的是排期 / 时钟 / 通知 / 权限，而新的门会让它们停在立项那一步。
+  **不是为了凑绿**：`type-optional` 里那条指纹用例把 problem/outcome 显式留空，
+  因为它比的是「指纹认得哪十格」。
+- `npx tsc --noEmit` 干净；`npm run build` 通过（6 条路由与之前一致）。
+- `requirements` 总数 **815 → 815**（只改 `state`，没有增删行；软删 1 行没动）。
+
+## 八、这一轮留下的坑（照实写）
+
+1. **42 条退回之后，收集列从 244 涨到 286**：这些人现在要在收集里补三问才能立项。
+   抽屉会明确写出缺哪几格并给「去补」，但**没有通知他们**——那批事件的 `batch` 让它们
+   不进 feed（否则是 42 条一样的打扰）。要不要单独发一次「请补六问」的推送，是下一版
+   的事（那需要一条新的事件类型与一次主动扇出）。
+2. **`design` 里仍可能有六问齐但质量很差的行**：门只判「非空」，判不了「写得对不对」。
+   材料里那两条待确认（`待需求方确认` / `待研发确认`）是这件事的兜底。
+3. **六问只在立项 / 生成这两处被要求**：评审、走查两条链路（v1 里还关着）不以六问为前提；
+   若要把同一道门套过去，改的是 `guard` 表，不是再抄一句判据。
+4. **恢复路径是 SQL**：没有界面能把这 42 条放回待设计（`restore` 那条边只从 `shelved`
+   出来）。这与 0021 那次回退同一形状：系统批量做的口径修订，反向操作是运维动作。

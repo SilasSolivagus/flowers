@@ -8,6 +8,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:test:setup": "tsx scripts/db-test-setup.ts",
     "db:anchor": "tsx scripts/migrate-line-anchor.ts",
+    "db:brief": "tsx scripts/migrate-brief-to-inbox.ts",
     "demo": "tsx scripts/demo.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
