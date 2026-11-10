@@ -1,7 +1,7 @@
 'use client';
 
 import { useActionState, useEffect, useState } from 'react';
-import { changePasswordAction, lookupWecomAction, saveNotifyChannelAction, type ActionResult } from '../actions';
+import { changePasswordAction, saveNotifyChannelAction, type ActionResult } from '../actions';
 import {
   LEVEL_LABEL, type Channel, type Level, type NotifyPrefs,
 } from '../../src/core/notify/prefs';
@@ -19,23 +19,20 @@ import {
  *    把两格塞进一个表单，第二行的失败会把第一行已经存好的值一起退回去。
  * 2. **乐观更新 + 失败回滚**。点一下立刻就是选中的样子（这是一个 20ms 的本地偏好，
  *    不该等一次 RSC 往返才动），失败时退回原值并显示服务层那句中文。
- * 3. **「查一下」只在需要时出现**：`wecom !== 'off'` 且还没对上 userid。
- *    它查的是「你的名字在企微通讯录里是谁」，命中后显示那个**显示名**——带部门
- *    前缀（`产品经理-吕品`）是企微的事实，不是错误。
+ * 3. **绑定与机器人不在这里**（2026-11-10）：原来这一块还带一行「还没对上企微账号」+
+ *    「查一下」，那是**超管替人绑**那条路留下的痕迹。现在本人有自己的一条带引导的路
+ *    （`WecomBinding.tsx`：贴 userid → 验证 → 状态），「查一下」作为「我不知道自己的
+ *    userid，按名字查一下」的入口活在那条路的输入框旁边。这一块只留**档位**——它回答
+ *    的是「要不要被打断」，而绑定回答的是「发给谁」，两件事。
  */
 const IDLE: ActionResult = { ok: true };
 
 const LEVEL_ORDER: Level[] = ['all', 'key', 'off'];
 
-export function NotifyChannels({
-  prefs, wecomUserId,
-}: { prefs: NotifyPrefs; wecomUserId: string | null }) {
+export function NotifyChannels({ prefs }: { prefs: NotifyPrefs }) {
   const [state, setState] = useState<NotifyPrefs>(prefs);
   const [busy, setBusy] = useState<Channel | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [linked, setLinked] = useState<string | null>(wecomUserId === null ? null : '');
-  const [linkedName, setLinkedName] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
 
   const pick = async (channel: Channel, level: Level): Promise<void> => {
     if (state[channel] === level || busy !== null) return;
@@ -60,24 +57,6 @@ export function NotifyChannels({
     }
   };
 
-  const check = async (): Promise<void> => {
-    setChecking(true);
-    setError(null);
-    try {
-      const result = await lookupWecomAction();
-      if (result.ok) {
-        setLinked('linked');
-        setLinkedName(result.name);
-      } else {
-        setError(result.message);
-      }
-    } catch {
-      setError('查询没有送达');
-    } finally {
-      setChecking(false);
-    }
-  };
-
   return (
     <>
       <ChannelRow
@@ -94,22 +73,6 @@ export function NotifyChannels({
         busy={busy === 'wecom'}
         onPick={pick}
       />
-      {state.wecom !== 'off' && linked === null && (
-        <div className="i">
-          <div className="l"><b>还没对上企微账号</b></div>
-          <div className="v gen-actions">
-            <button className="btn ghost sm" type="button" disabled={checking} onClick={() => void check()}>
-              查一下
-            </button>
-          </div>
-        </div>
-      )}
-      {state.wecom !== 'off' && linked !== null && linkedName !== null && (
-        <div className="i">
-          <div className="l"><b>企微账号</b></div>
-          <div className="v">{linkedName}</div>
-        </div>
-      )}
       {error !== null && (
         <div className="i gen-detail">
           <div className="gen-msg bad">{error}</div>

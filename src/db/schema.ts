@@ -102,6 +102,18 @@ export const members = pgTable('members', {
    * `notify_deliveries.error`。
    */
   wecomLookupAt: timestamp('wecom_lookup_at', { withTimezone: true }),
+  /**
+   * 这个人自己的群机器人 webhook（2026-11-10）。null = 没有，走共用的那条（CLI + userid）。
+   *
+   * 为什么允许每人一条：共用的机器人是**部署**的身份，消息从它发出去，收件人栏里
+   * 永远是同一个名字；而一个组想用自己的机器人做分流（不同组进不同的群）时，
+   * 只能改代码。存这一列之后，「谁的消息发到哪」变成一个人的属性。
+   *
+   * 存的是完整 URL（含 key），因为它就是要被 `POST` 的那串地址；界面上**永远只显示
+   * 掩码**（`maskWebhook`：域名路径照给，`key` 只留末 4 位）——一条 webhook 等于一个
+   * 可以往群里发消息的凭证，整串回显一次就多一个能把它读走的地方。
+   */
+  wecomWebhook: text('wecom_webhook'),
   deactivatedAt: timestamp('deactivated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({

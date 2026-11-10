@@ -127,6 +127,14 @@ export type Member = {
    */
   wecomUserId?: string | null;
   /**
+   * 这个人自己的群机器人 webhook（2026-11-10）。null / 缺省 = 走共用的那条。
+   *
+   * 与 `wecomUserId` 同一条可选理由：权限结论不依赖它，只有推送会读。**它带着 key**，
+   * 所以它只允许在服务端流动：不进页面视图（视图里是 `maskWebhook` 的掩码），
+   * 不进事件、不进日志。
+   */
+  wecomWebhook?: string | null;
+  /**
    * 会话纪元（`members.session_epoch`）。票据里带一份、这里读一份，对不上就是「这张
    * 凭证签的时候你还有权限」。可选的理由同上：权限结论不依赖它，只有会话校验读它。
    */

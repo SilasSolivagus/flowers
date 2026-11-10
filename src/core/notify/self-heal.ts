@@ -83,6 +83,8 @@ type MemberRow = {
   name: string;
   notify_prefs: string | null;
   wecom_userid: string | null;
+  /** 自己的机器人（2026-11-10）：有它就与通讯录无关，不该被报「没绑账号」。 */
+  wecom_webhook: string | null;
 };
 
 /**
@@ -155,7 +157,7 @@ export async function checkWecomBindings(db: Db, now: Date): Promise<BindingAler
   const day = shanghaiDayOf(now.toISOString());
   if (day === null) throw new AppError('invalid', '时钟时间不合法');
   const rows = await db.execute<MemberRow>(sql`
-    select id, name, notify_prefs, wecom_userid
+    select id, name, notify_prefs, wecom_userid, wecom_webhook
       from members
      where deactivated_at is null
      order by name, id`);
@@ -167,7 +169,24 @@ export async function checkWecomBindings(db: Db, now: Date): Promise<BindingAler
     // 「读不懂」变成「不检查」。
     if (prefsOf(row.notify_prefs).wecom === 'off') continue;
 
+    /**
+     * 有自己的机器人的人**不看 userid**（2026-11-10）：他的通知不走通讯录那条路，
+     * 没有 userid 也不影响他收到东西。把这类人报成「没绑账号」会让超管去修一个
+     * 不存在的问题——而一条错误的提醒比没有提醒更坏（下一次真的坏了就没人信了）。
+     *
+     * 仍然检查 `failedStreak`：自己的机器人也可能坏（地址过期、群解散、key 被重置），
+     * 而那正是这一项要发现的东西。
+     */
+    const ownWebhook = typeof row.wecom_webhook === 'string' ? row.wecom_webhook.trim() : '';
     const userid = typeof row.wecom_userid === 'string' ? row.wecom_userid.trim() : '';
+    if (ownWebhook !== '') {
+      const streak = await failedStreak(db, row.id);
+      if (streak >= FAILED_STREAK) {
+        candidates.push({ memberId: row.id, memberName: row.name, reason: 'failing', streak });
+      }
+      continue;
+    }
+
     if (userid === '') {
       candidates.push({ memberId: row.id, memberName: row.name, reason: 'missing', streak: 0 });
       continue;

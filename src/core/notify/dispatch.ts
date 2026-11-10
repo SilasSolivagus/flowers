@@ -7,7 +7,7 @@ import { pendingDeliveries, type DeliveryCandidate } from '../read/notify.js';
 import { prefsOf, type Level } from './prefs.js';
 import { checkWecomBindings, type BindingAlert } from './self-heal.js';
 import {
-  lookupUserid, messageOf, resolveUserid, sendMarkdown,
+  lookupUserid, messageOf, resolveUserid, sendMarkdown, sendWebhook,
   type Runner, type WecomFail,
 } from './wecom.js';
 
@@ -84,10 +84,12 @@ export type DispatchOptions = {
   /** 覆盖默认的每人每轮上限（用例用它把 N 调小，脚本用 `--limit` 暴露）。 */
   perMemberLimit?: number;
 
-  // ── 下面三个只给用例注入用（默认走真实 CLI + 真实时钟）──
+  // ── 下面几个只给用例注入用（默认走真实 CLI / 真实 fetch + 真实时钟）──
   run?: Runner;
   bin?: string | null;
   timeoutMs?: number;
+  /** 测「自己的机器人」那条路时替换 `fetch`（不打真企微）。 */
+  webhookFetch?: typeof fetch;
 };
 
 const CHANNEL = 'wecom' as const;
@@ -100,6 +102,8 @@ type MemberRow = {
   line: string | null;
   notify_prefs: string | null;
   wecom_userid: string | null;
+  /** 这个人自己的机器人（2026-11-10）。非空 = 他的通知走这里，不走共用机器人。 */
+  wecom_webhook: string | null;
 };
 
 function toMember(row: MemberRow): Member {
@@ -111,6 +115,7 @@ function toMember(row: MemberRow): Member {
     deactivatedAt: null,
     notifyPrefs: row.notify_prefs,
     wecomUserId: row.wecom_userid,
+    wecomWebhook: row.wecom_webhook,
   };
 }
 
@@ -182,7 +187,7 @@ export async function dispatchWecom(
   const perMemberLimit = clampLimit(opts.perMemberLimit);
 
   const rows = await database.execute<MemberRow>(sql`
-    select id, name, role, line, notify_prefs, wecom_userid
+    select id, name, role, line, notify_prefs, wecom_userid, wecom_webhook
       from members
      where deactivated_at is null
      order by name, id`);
@@ -204,6 +209,48 @@ export async function dispatchWecom(
       channel: CHANNEL, limit: perMemberLimit,
     });
     if (candidates.length === 0) {
+      summary.members.push(run);
+      continue;
+    }
+
+    /**
+     * 这个人有自己的机器人（2026-11-10）→ 他的通知直接 POST 到那条 webhook，
+     * **不再解析 userid**、也不经过共用机器人的授权。
+     *
+     * 为什么是「替代」而不是「两路都发」：一个人同时收到两条一模一样的消息是噪音，
+     * 而「哪条算数」没有答案。他自己的机器人一旦设置，就是他选的收件人；共用那条路
+     * 留着给他撤掉之后用（库里那一列清掉即回退）。
+     *
+     * 失败与共用那条同命：记 `failed`，下一轮就地重试（`record` 的 upsert）。区别只在
+     * 一句话——`sendWebhook` 的错误里已经抹掉了 key。
+     */
+    const ownWebhook = typeof member.wecomWebhook === 'string' ? member.wecomWebhook.trim() : '';
+    if (ownWebhook !== '') {
+      for (const candidate of candidates) {
+        const content = messageOf(candidate.headline, candidate.sentence);
+        if (dryRun) {
+          run.planned += 1;
+          summary.planned += 1;
+          run.messages.push({ ...preview(candidate, content), status: 'planned' });
+          continue;
+        }
+        const sent = await sendWebhook(ownWebhook, content, { fetchImpl: opts.webhookFetch });
+        if (sent.ok) {
+          const written = await record(database, member.id, candidate.eventSeq, 'sent', null);
+          if (written) {
+            run.sent += 1;
+            summary.sent += 1;
+            run.messages.push({ ...preview(candidate, content), status: 'sent' });
+          } else {
+            run.messages.push({ ...preview(candidate, content), status: 'skipped' });
+          }
+          continue;
+        }
+        await record(database, member.id, candidate.eventSeq, 'failed', sent.message);
+        run.failed += 1;
+        summary.failed += 1;
+        run.messages.push({ ...preview(candidate, content), status: 'failed' });
+      }
       summary.members.push(run);
       continue;
     }

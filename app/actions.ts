@@ -31,8 +31,8 @@ import { createRequirement } from '../src/core/requirements/create';
 import { reassignOwner } from '../src/core/requirements/assign';
 import { claimRequirement } from '../src/core/requirements/claim';
 import {
-  createMember, deactivateMember, lookupWecomAccount, resetPassword,
-  saveNotifyChannels, updateMember,
+  bindWecomUserid, createMember, deactivateMember, lookupWecomAccount, resetPassword,
+  saveMemberWebhook, saveNotifyChannels, testMemberWebhook, updateMember,
 } from '../src/core/members/manage';
 import { logout } from '../src/core/auth/login';
 import {
@@ -1027,15 +1027,88 @@ export async function saveNotifyChannelAction(formData: FormData): Promise<Actio
  * 失败原因由这一句返回给按钮显示。
  */
 export async function lookupWecomAction(): Promise<
-  { ok: true; name: string; cached: boolean } | { ok: false; message: string }
+  { ok: true; name: string; userid: string; cached: boolean } | { ok: false; message: string }
 > {
   const actor = await currentMember();
   const result = await lookupWecomAccount(db, actor, {});
   if (result.ok) {
     revalidatePath('/settings');
-    return { ok: true, name: result.name, cached: result.cached };
+    // `userid` 一起回去（2026-11-10）：按钮的新用途是**填空**——按名字查到的人，
+    // 把它的 userid 填进「绑定企微」那个输入框，再按「验证」走同一条本人绑定的路。
+    // 它不是秘密（就是这个人自己的账号），与「不回显 webhook」是两件事。
+    return { ok: true, name: result.name, userid: result.userid, cached: result.cached };
   }
   return { ok: false, message: result.message };
+}
+
+/**
+ * 「绑定企微」的验证（2026-11-10，设置 · 我的）。
+ *
+ * 一个动作做三件事：贴了 userid 就**真去通讯录查一次**（查不到不落库，只把「试过」
+ * 记下来，界面因此显示「验证失败」）；传空串 = 解绑；成功才写 `wecom_userid`。
+ * 权限与落库都在 `bindWecomUserid`（自己改自己；超管可以替别人改，与通知档位同一条口径）。
+ */
+export async function bindWecomAction(formData: FormData): Promise<
+  { ok: true; userid: string; name: string; cleared: boolean } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    const result = await bindWecomUserid(db, actor, {
+      memberId: field(formData, 'memberId') === '' ? null : field(formData, 'memberId'),
+      userid: field(formData, 'userid'),
+    });
+    if (!result.ok) return result;
+    revalidatePath('/settings');
+    return result;
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/**
+ * 存/清「我自己的机器人」（2026-11-10）。
+ *
+ * 返回值里只有**掩码**（`saveMemberWebhook` 保证）：整串 webhook 等于一个能往群里发
+ * 消息的凭证，进一次响应体就多一个能把它抄走的地方。空串 = 清掉，回到共用机器人。
+ */
+export async function saveWebhookAction(formData: FormData): Promise<
+  { ok: true; masked: string | null; cleared: boolean } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    const result = await saveMemberWebhook(db, actor, {
+      memberId: field(formData, 'memberId') === '' ? null : field(formData, 'memberId'),
+      webhook: field(formData, 'webhook'),
+    });
+    if (!result.ok) return result;
+    revalidatePath('/settings');
+    return result;
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/**
+ * 「测试」那一条 webhook（2026-11-10）：**真的发一条**，不发不知道通不通。
+ *
+ * 测的是**框里那一条**（用户可能刚粘进来、还没保存），没传才测库里那条——测库里那条
+ * 等于替他确认了一个他没在看的地址。不 revalidate：测试不改库，除非用户接着按保存。
+ */
+export async function testWebhookAction(formData: FormData): Promise<
+  { ok: true; message: string } | { ok: false; message: string }
+> {
+  const actor = await currentMember();
+  try {
+    return await testMemberWebhook(db, actor, {
+      memberId: field(formData, 'memberId') === '' ? null : field(formData, 'memberId'),
+      webhook: field(formData, 'webhook'),
+    });
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
 }
 
 /**

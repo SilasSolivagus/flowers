@@ -281,6 +281,13 @@
       "when": 1794116000000,
       "tag": "0037_member_initial_password",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794118000000,
+      "tag": "0038_member_wecom_webhook",
+      "breakpoints": true
     }
   ]
 }

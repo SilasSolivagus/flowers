@@ -385,3 +385,238 @@ function positive(value: number | undefined, fallback: number): number {
     ? Math.floor(value)
     : fallback;
 }
+
+// ─── 2026-11-10：绑定自己的 userid / 用自己的机器人 ──────────────────────────
+
+/**
+ * 用户贴进来的 userid 的形状。
+ *
+ * 企微的 userid 是管理员在通讯录里定的账号名（`fangchao`、`lvpin` 这种），字符集是
+ * 字母数字加 `_ . - @`，长度不超过 64。这里**只拦「肯定不是」的形态**（空白、长度、
+ * 奇怪字符）——真正的判据是下面那次通讯录查询，形状检查只是为了让一个粘贴错了的东西
+ * （例如整段「企业微信 → 我」的界面文字）在发请求之前就说清楚。
+ */
+const USERID_SHAPE = /^[A-Za-z0-9_.@-]{1,64}$/;
+
+/** userid 形状不对时的那句话（说清该贴什么，而不是「格式错误」）。 */
+export const MSG_USERID_SHAPE = 'userid 只能有字母、数字与 _ . - @，最长 64 个字符；'
+  + '它通常就是你的工号/英文名（企业微信 → 我 → 资料页）';
+
+/**
+ * 按 **userid** 去通讯录里查一个人（「验证」那一步）。
+ *
+ * 为什么要问一次通讯录，而不是「贴进来就存」：`wecom_userid` 是**发消息的收件人**，
+ * 存错一个字，这个人的通知就会静默地发给别人（或者发给一个不存在的人）。通讯录是
+ * 唯一能回答「这个 userid 是不是真有一个人」的地方。
+ *
+ * 匹配是**逐字相等**：`search` 收的是关键词，命中一串包含它的名字是常态，而这一条
+ * 要的不是「像」，是「就是」。命中不到就说「没有」——不猜、不取第一个。
+ */
+export async function lookupUseridExact(
+  userid: string, opts: LookupOptions = {},
+): Promise<{ ok: true; user: WecomUser } | WecomFail> {
+  const wanted = userid.trim();
+  if (wanted === '') return fail('no_match', '先把 userid 贴进来');
+  if (!USERID_SHAPE.test(wanted)) return fail('bad_output', MSG_USERID_SHAPE);
+
+  const timeoutMs = positive(opts.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const run = opts.run ?? defaultRunner;
+
+  let bin = opts.bin ?? null;
+  if (bin === null) {
+    const resolved = await resolveCli();
+    if (!resolved.ok) return fail('bad_config', resolved.message);
+    bin = resolved.bin;
+  }
+
+  const result = await run(bin, searchArgv(wanted), timeoutMs);
+  const broken = processFailure(bin, result, timeoutMs);
+  if (broken !== null) return broken;
+
+  const response = parseResponse(result.stdout);
+  if (response === null) {
+    const combined = `${result.stderr}\n${result.stdout}`;
+    if (looksUnauthorized(combined)) return fail('unauthorized', MSG_UNAUTHORIZED);
+    return fail('bad_output', `wecom-cli 的通讯录输出不是 JSON：${tail(combined) || '（什么都没打印）'}`);
+  }
+  const record = response as Record<string, unknown>;
+  const errcode = errcodeOf(response);
+  if (errcode !== null && errcode !== 0) {
+    const errmsg = typeof record.errmsg === 'string' ? redact(record.errmsg) : '';
+    if ([40001, 40014, 42001, 41001, 48001].includes(errcode)) {
+      return fail('unauthorized', MSG_UNAUTHORIZED);
+    }
+    return fail('errcode', `企业微信接口报错 ${errcode}：${errmsg || '（没有给 errmsg）'}`);
+  }
+  if (!Array.isArray(record.users)) {
+    return fail('bad_output', `wecom-cli 的通讯录响应里没有 users：${tail(result.stdout)}`);
+  }
+
+  const hit = usersOf(record).find((user) => user.userid === wanted);
+  if (hit === undefined) {
+    return fail(
+      'no_match',
+      `企微通讯录里没有 userid 为「${wanted}」的人。核对工号/英文名（企业微信 → 我 → 资料页），`
+      + '或让管理员在企微后台「通讯录」里确认这个账号',
+    );
+  }
+  return { ok: true, user: hit };
+}
+
+/** 绑定结果的三种状态（设置页那一行要显示的那个词）。 */
+export type BindingState = 'bound' | 'unbound' | 'failed';
+
+/**
+ * 这一行该显示成哪种状态。
+ *
+ * 算出来的，不是存出来的（迁移 0038 的注释里写了为什么）：
+ * - `wecom_userid` 非空 → 已绑定；
+ * - 空、但 `wecom_lookup_at` 有过值 → 上次验证失败（那一列是「试过」的唯一记号，
+ *   成功与失败都写它，见 `resolveUserid`）；
+ * - 两个都空 → 从没绑过。
+ */
+export function bindingStateOf(
+  member: { wecomUserId?: string | null }, lastLookupAt: Date | string | null,
+): BindingState {
+  const userid = typeof member.wecomUserId === 'string' ? member.wecomUserId.trim() : '';
+  if (userid !== '') return 'bound';
+  return lastLookupAt === null ? 'unbound' : 'failed';
+}
+
+/** 三种状态的中文（界面那一行的 pill 用它，报告里也用——一处措辞）。 */
+export const BINDING_LABEL: Record<BindingState, string> = {
+  bound: '已绑定',
+  unbound: '未绑定',
+  failed: '验证失败',
+};
+
+/**
+ * webhook 的掩码：域名与路径照给，`key` 只留末 4 位。
+ *
+ * 为什么不是整串：一条 webhook 等于「可以往那个群里发消息」的凭证。整串回显一次，
+ * 就多一个能把它抄走的地方（截图、投屏、别人站在背后）。末 4 位够认出「这是哪一条」，
+ * 又不足以拿去用——与 `keyTail` 对模型 key 的处理是同一条规矩。
+ */
+export function maskWebhook(url: string | null | undefined): string | null {
+  const text = url?.trim() ?? '';
+  if (text === '') return null;
+  const keyAt = text.indexOf('key=');
+  if (keyAt < 0) return '已设置';
+  const head = text.slice(0, keyAt + 4);
+  const key = text.slice(keyAt + 4);
+  return key.length <= 4 ? `${head}****` : `${head}****${key.slice(-4)}`;
+}
+
+/** webhook 的判据：必须是企微群机器人的那个地址（别把任意 URL 当成收件人）。 */
+const WEBHOOK_HOST = 'qyapi.weixin.qq.com';
+const WEBHOOK_PATH = '/cgi-bin/webhook/send';
+
+export type WebhookCheck = { ok: true; url: string } | WecomFail;
+
+/**
+ * 校验并归一一条 webhook。
+ *
+ * 四条：https、主机就是 `qyapi.weixin.qq.com`、路径是 `/cgi-bin/webhook/send`、
+ * `key` 非空。为什么这么窄：这一列会被 `POST` 出去，允许任意 URL 就等于允许成员让
+ * 服务器替他请求任意地址（一个内网探测的口子）。企微的机器人只在这一个主机上，
+ * 收窄它不损失任何真实用法。
+ *
+ * **不改写入库的值**（除了去空白）：URL 里可能有我们不该重排的 query 顺序；
+ * 校验只回答「能不能用」。
+ */
+export function checkWebhook(raw: unknown): WebhookCheck {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (text === '') return fail('bad_config', 'webhook 是空的');
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return fail('bad_config', '这不是一个完整的地址（要 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…）');
+  }
+  if (parsed.protocol !== 'https:') return fail('bad_config', 'webhook 必须是 https 地址');
+  if (parsed.hostname !== WEBHOOK_HOST) {
+    return fail('bad_config', `webhook 的主机必须是 ${WEBHOOK_HOST}（群机器人 → 复制 Webhook 地址）`);
+  }
+  if (parsed.pathname !== WEBHOOK_PATH) {
+    return fail('bad_config', `webhook 的路径必须是 ${WEBHOOK_PATH}`);
+  }
+  const key = parsed.searchParams.get('key')?.trim() ?? '';
+  if (key === '') return fail('bad_config', 'webhook 里没有 key（复制地址时把 key= 那一段一起复制）');
+  return { ok: true, url: text };
+}
+
+/** 一条 webhook 消息的预算：15 秒。比 CLI 那条路短——它是一次普通的 HTTPS POST。 */
+export const WEBHOOK_TIMEOUT_MS = 15_000;
+
+/** 群机器人的正文上限是 4096 字节（企微文档）；超了会被服务端拒。留 200 字节余量。 */
+const WEBHOOK_MAX_BYTES = 3900;
+
+/**
+ * 往一个人的机器人发一条 markdown。
+ *
+ * 与 `sendMarkdown`（CLI 那条路）是并联的两条：**同一份正文**、**同一套失败码**，
+ * 差别只在传输——这条是一次 HTTPS POST，不需要 `wecom-cli`、不需要通讯录、不需要
+ * 授权。所以一个人的机器人坏了，最多是这个人收不到，不会牵连别人。
+ *
+ * 成功信号是 `errcode === 0`（企微的 webhook 在有业务错误时也是 **HTTP 200**）。
+ * 失败时把 `errmsg` 原文带出来（`invalid webhook url` / `rate limited` 这类话是唯一
+ * 能搜到答案的线索），并把 URL 里的 key 抹掉——错误信息会进 `notify_deliveries.error`
+ * 与界面。
+ */
+export async function sendWebhook(
+  webhook: string,
+  content: string,
+  opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<{ ok: true } | WecomFail> {
+  const checked = checkWebhook(webhook);
+  if (!checked.ok) return checked;
+
+  const timeoutMs = positive(opts.timeoutMs, WEBHOOK_TIMEOUT_MS);
+  const doFetch = opts.fetchImpl ?? fetch;
+  const body = JSON.stringify({
+    msgtype: 'markdown',
+    markdown: { content: clipBytes(content, WEBHOOK_MAX_BYTES) },
+  });
+
+  try {
+    const response = await doFetch(checked.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return fail('cli_failed', `机器人的接口回了 HTTP ${response.status}：${tail(text) || '（没有正文）'}`);
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      return fail('bad_output', `机器人的接口回了非 JSON：${tail(text)}`);
+    }
+    const record = typeof payload === 'object' && payload !== null
+      ? payload as Record<string, unknown>
+      : {};
+    const errcode = errcodeOf(record);
+    if (errcode === 0) return { ok: true };
+    const errmsg = typeof record.errmsg === 'string' ? redact(record.errmsg) : '';
+    return fail('errcode', `企业微信机器人报错 ${errcode ?? '?'}：${errmsg || '（没有给 errmsg）'}`);
+  } catch (error) {
+    const name = error instanceof Error ? error.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      return fail('timeout', `发到机器人超时：等了 ${Math.round(timeoutMs / 1000)} 秒没回`);
+    }
+    const message = error instanceof Error && error.message !== '' ? error.message : String(error);
+    return fail('cli_failed', `发到机器人失败：${redact(message)}`);
+  }
+}
+
+/** 按**字节**截断（中文一个字 3 字节，按字符数截会超）。 */
+function clipBytes(text: string, max: number): string {
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes <= max) return text;
+  let out = text;
+  while (Buffer.byteLength(out, 'utf8') > max - 1) out = out.slice(0, -1);
+  return `${out}…`;
+}

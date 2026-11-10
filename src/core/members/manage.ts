@@ -14,7 +14,9 @@ import {
   CHANNELS, CHANNEL_LABEL, isLevel, prefsJson, prefsOf,
   type Level, type NotifyPrefs,
 } from '../notify/prefs.js';
-import { resolveUserid } from '../notify/wecom.js';
+import {
+  checkWebhook, lookupUseridExact, maskWebhook, messageOf, resolveUserid, sendWebhook,
+} from '../notify/wecom.js';
 
 /**
  * 成员管理（P4-04）：建人 / 改人 / 停用 / 重置密码。**只有超管**。
@@ -388,6 +390,143 @@ export async function lookupWecomAccount(
   return resolved.ok
     ? { ok: true, name: resolved.name, userid: resolved.userid, cached: resolved.cached }
     : { ok: false, code: resolved.code, message: resolved.message };
+}
+
+// ─── 2026-11-10：成员自己绑 userid / 自己的机器人 ──────────────────────────
+
+/** 谁的绑定：自己，或者（超管）某个成员。与 `saveNotifyChannels` 同一条权限口径。 */
+async function targetOf(
+  db: Db, actor: string, raw: Record<string, unknown>,
+): Promise<Member> {
+  const me = await requireActor(db, actor);
+  const wantedId = raw.memberId === undefined || raw.memberId === null
+    ? me.id
+    : parseId(String(raw.memberId), MEMBER_NOT_FOUND);
+  if (wantedId !== me.id) await assertCan(db, actor, NO_REQUIREMENT, 'manageMembers');
+  const target = await memberById(db, wantedId);
+  if (target === null) throw new AppError('not_found', MEMBER_NOT_FOUND);
+  if (target.deactivatedAt !== null) throw new AppError('invalid', '这个人已停用');
+  return target;
+}
+
+export type BindResult =
+  | { ok: true; userid: string; name: string; cleared: boolean }
+  | { ok: false; message: string };
+
+/**
+ * 把一个成员自己贴进来的 userid **验一次**、验过了才落库（设置 · 我的 →「绑定企微」）。
+ *
+ * 与老的「查一下」（`lookupWecomAccount`，按**名字**去通讯录里猜一个人）分工不同：
+ * - 「查一下」回答「我叫这个名字，通讯录里对应谁」——它属于**管理员**替人绑定那条路；
+ * - 这里回答「我贴的这个 userid 是不是真有一个人」——它属于**本人**绑定这条路。
+ *
+ * 为什么本人这条路必须存在：名字匹配的边界是「同名多命中就报错」（`pickUser`），
+ * 而新人入职、改名、同名这几件事都常常同时发生；把一个**确定的账号名**贴进来是
+ * 唯一不需要猜的绑定方式。
+ *
+ * 三种结果都要落库（与 `resolveUserid` 同一条口径）：成功写 `wecom_userid` +
+ * `wecom_lookup_at`；失败**只写** `wecom_lookup_at`——那一列是「试过」的唯一记号，
+ * 界面据此显示「验证失败」而不是「未绑定」（两者的下一步不一样：一个去改 userid，
+ * 一个去绑）。
+ *
+ * 空串 = 解绑（`cleared: true`）：把 userid 清掉，但**保留** `wecom_lookup_at`？
+ * 不保留——解绑是「我不要绑了」，不是「我试过但失败了」。所以两列一起清空，
+ * 界面回到「未绑定」。
+ */
+export async function bindWecomUserid(
+  db: Db, actor: string, raw: unknown,
+): Promise<BindResult> {
+  const input = requirePlainObject(raw);
+  const target = await targetOf(db, actor, input);
+  const typed = asText(input.userid)?.trim() ?? '';
+
+  if (typed === '') {
+    await db.execute(sql`
+      update members set wecom_userid = null, wecom_lookup_at = null where id = ${target.id}`);
+    return { ok: true, userid: '', name: target.name, cleared: true };
+  }
+
+  const found = await lookupUseridExact(typed);
+  if (!found.ok) {
+    await db.execute(sql`
+      update members set wecom_lookup_at = now() where id = ${target.id}`);
+    return { ok: false, message: found.message };
+  }
+
+  await db.execute(sql`
+    update members
+       set wecom_userid = ${found.user.userid}, wecom_lookup_at = now()
+     where id = ${target.id}`);
+  return { ok: true, userid: found.user.userid, name: found.user.name, cleared: false };
+}
+
+export type WebhookSaveResult =
+  | { ok: true; masked: string | null; cleared: boolean }
+  | { ok: false; message: string };
+
+/**
+ * 存/清「我自己的机器人」（设置 · 我的 →「用自己的机器人」）。
+ *
+ * 校验在 `checkWebhook`（https、主机、路径、key 非空——收窄到企微那一个主机，是因为
+ * 这一列会被服务器 `POST` 出去；允许任意 URL 等于给成员开一个内网探测的口子）。
+ *
+ * 返回值里只给**掩码**：这个函数的结果会原样进响应体，而整串 webhook 等于一个能往
+ * 群里发消息的凭证。空串 = 清掉（回到共用机器人）。
+ */
+export async function saveMemberWebhook(
+  db: Db, actor: string, raw: unknown,
+): Promise<WebhookSaveResult> {
+  const input = requirePlainObject(raw);
+  const target = await targetOf(db, actor, input);
+  const typed = asText(input.webhook)?.trim() ?? '';
+
+  if (typed === '') {
+    await db.execute(sql`update members set wecom_webhook = null where id = ${target.id}`);
+    return { ok: true, masked: null, cleared: true };
+  }
+
+  const checked = checkWebhook(typed);
+  if (!checked.ok) return { ok: false, message: checked.message };
+
+  await db.execute(sql`
+    update members set wecom_webhook = ${checked.url} where id = ${target.id}`);
+  return { ok: true, masked: maskWebhook(checked.url), cleared: false };
+}
+
+export type WebhookTestResult =
+  | { ok: true; message: string }
+  | { ok: false; message: string };
+
+/**
+ * 「测试」那个按钮：**真的往这条 webhook 发一条**，不发不知道通不通。
+ *
+ * 发的是固定的一句、不带任何需求内容：这一条测试不该把任何一条需求标题送到一个
+ * 还没被信任的地址上。
+ *
+ * 测的是**框里那一条**（传 `webhook` 就用它），没传才用库里存着的。为什么这么定：
+ * 用户粘进来一条地址、还没点保存就点「测试」，测的必须是他眼前那条；测库里那条
+ * 等于替他确认了一个他没在看的地址。
+ *
+ * 失败时那一句话原样返回（`invalid webhook url` / `rate limited` 这类是唯一能搜到
+ * 答案的线索），但**已经抹掉 key**（`sendWebhook` 里做的）。
+ */
+export async function testMemberWebhook(
+  db: Db, actor: string, raw: unknown,
+): Promise<WebhookTestResult> {
+  const input = requirePlainObject(raw);
+  const target = await targetOf(db, actor, input);
+  const typed = asText(input.webhook)?.trim() ?? '';
+
+  const stored = typeof target.wecomWebhook === 'string' ? target.wecomWebhook.trim() : '';
+  const candidate = typed === '' ? stored : typed;
+  if (candidate === '') return { ok: false, message: '还没有 webhook：先把地址贴进来' };
+
+  const sent = await sendWebhook(candidate, messageOf('机器人测试', '这条是 flowers 的测试消息'));
+  if (!sent.ok) return { ok: false, message: sent.message };
+  return {
+    ok: true,
+    message: `已发出（发到 ${maskWebhook(candidate) ?? '这条地址'}）——群里有这条消息就算通了`,
+  };
 }
 
 /** 设置页给「成员」那一栏用：角色中文名 + 条线中文名。 */

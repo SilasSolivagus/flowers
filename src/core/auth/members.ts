@@ -21,6 +21,7 @@ type Row = {
   deactivated_at: Date | string | null;
   notify_prefs: string | null;
   wecom_userid: string | null;
+  wecom_webhook: string | null;
   session_epoch: Date | string;
 };
 
@@ -36,6 +37,7 @@ function toMember(row: Row): Member {
       : (row.deactivated_at instanceof Date ? row.deactivated_at : new Date(row.deactivated_at)),
     notifyPrefs: row.notify_prefs,
     wecomUserId: row.wecom_userid,
+    wecomWebhook: row.wecom_webhook,
     sessionEpoch: row.session_epoch instanceof Date ? row.session_epoch : new Date(row.session_epoch),
   };
 }
@@ -48,7 +50,8 @@ export async function memberByName(exec: Exec, name: string): Promise<Member | n
   const trimmed = name.trim();
   if (trimmed === '') return null;
   const res = await exec.execute<Row>(sql`
-    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid,
+           wecom_webhook, session_epoch
       from members
      where name = ${trimmed}
      order by id
@@ -71,7 +74,8 @@ export async function memberByEmail(exec: Exec, email: string): Promise<Member |
   const wanted = email.trim().toLowerCase();
   if (wanted === '') return null;
   const res = await exec.execute<Row>(sql`
-    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid,
+           wecom_webhook, session_epoch
       from members
      where lower(email) = ${wanted}
      limit 1`);
@@ -82,7 +86,8 @@ export async function memberByEmail(exec: Exec, email: string): Promise<Member |
 /** 按 id 取一行（含已停用的）。转交、成员管理都用它。 */
 export async function memberById(exec: Exec, memberId: string): Promise<Member | null> {
   const res = await exec.execute<Row>(sql`
-    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid,
+           wecom_webhook, session_epoch
       from members where id = ${memberId} limit 1`);
   const row = res.rows[0];
   return row === undefined ? null : toMember(row);
@@ -105,7 +110,8 @@ export async function activeMemberByName(exec: Exec, name: string): Promise<Memb
  */
 export async function firstProductOwner(exec: Exec): Promise<Member | null> {
   const res = await exec.execute<Row>(sql`
-    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid,
+           wecom_webhook, session_epoch
       from members
      where role = 'product_owner' and deactivated_at is null
      order by created_at, id
@@ -121,7 +127,8 @@ export async function loadMembers(
 ): Promise<Member[]> {
   const where = opts.includeDeactivated === true ? sql`` : sql`where deactivated_at is null`;
   const res = await exec.execute<Row>(sql`
-    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid, session_epoch
+    select id, name, email, role, line, deactivated_at, notify_prefs, wecom_userid,
+           wecom_webhook, session_epoch
       from members ${where}
      order by name, id`);
   return res.rows.map(toMember);

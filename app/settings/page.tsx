@@ -10,6 +10,7 @@ import { can, NO_REQUIREMENT } from '../../src/core/auth/roles';
 import { DEFAULT_MEMBER_PASSWORD } from '../../src/core/auth/password';
 import { DEFAULT_PREFS, prefsOf } from '../../src/core/read/notify';
 import { memberAdminView } from '../../src/core/read/member-admin';
+import { wecomBindingView, type WecomBindingView } from '../../src/core/read/wecom-binding';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
 import type { GeneratorView, MemberKeyView } from '../../src/core/uemaster/candidates';
 import {
@@ -22,6 +23,7 @@ import { McpRow, type McpTokenRow } from './McpRow';
 import { MemberKeyRow } from './MemberKeyRow';
 import { MemberAdmin } from './MemberAdmin';
 import { NotifyChannels, PasswordRow } from './MeSecurity';
+import { WecomBinding } from './WecomBinding';
 import { endpointFromHeaders } from './mcp-endpoint';
 import './settings.css';
 import { Shell } from '../components/Shell';
@@ -90,6 +92,12 @@ function shanghaiDay(at: Date): string {
 /** 名册里没有这个人时，他那三行的「原值」：全空（是「没填过」，不是错误）。 */
 const EMPTY_PARTS: MemberProviderParts = { baseUrl: null, apiKey: null, model: null };
 
+/** 名册里没有这个人时的绑定视图：全空（是「还没绑」，不是错误）。 */
+const EMPTY_BINDING: WecomBindingView = {
+  state: 'unbound', stateLabel: '未绑定', userid: null,
+  webhook: null, webhookSet: false, lastLookupDay: null,
+};
+
 export default async function SettingsPage({
   searchParams,
 }: {
@@ -129,6 +137,12 @@ export default async function SettingsPage({
     headers(),
   ]);
   const memberKey = memberKeyView(parts, resolved);
+  // 企微那两行（绑定状态 + 自己的机器人）要从 `wecom_lookup_at` 与 `wecom_webhook` 算，
+  // 而 `Member` 上没有那两列（它们是通知的事实，不是权限的事实）。名册里没有这个人时
+  // 给一张「未绑定」的空视图：页面不该为一行不存在的成员白屏。
+  const wecomBinding = self === null
+    ? EMPTY_BINDING
+    : await wecomBindingView(self.id);
   const endpoint = endpointFromHeaders(new Headers(requestHeaders));
   const tokenRows: McpTokenRow[] = tokens.map((token) => ({
     id: token.id,
@@ -162,6 +176,7 @@ export default async function SettingsPage({
               self={self}
               members={members}
               memberKey={memberKey}
+              wecomBinding={wecomBinding}
               endpoint={endpoint}
               tokens={tokenRows}
             />
@@ -202,12 +217,13 @@ export default async function SettingsPage({
  * `src/core/notify/` 里，这一层不复制任何一条。
  */
 function MePanel({
-  actor, self, members, memberKey, endpoint, tokens,
+  actor, self, members, memberKey, wecomBinding, endpoint, tokens,
 }: {
   actor: string;
   self: Member | null;
   members: Member[];
   memberKey: MemberKeyView;
+  wecomBinding: WecomBindingView;
   endpoint: string;
   tokens: McpTokenRow[];
 }) {
@@ -217,8 +233,6 @@ function MePanel({
   // 两个频道的档位。`prefsOf` 对 null / 老形状 / 认不出的值一律回落 `key`
   // （见 src/core/notify/prefs.ts），所以这里不需要再判默认值——默认值的唯一一份在那里。
   const notifyPrefs = mine === null ? DEFAULT_PREFS : prefsOf(mine.notifyPrefs);
-  // 「还没对上企微账号」那一行的判据就是这一格。
-  const wecomUserId = mine?.wecomUserId ?? null;
 
   return (
     <>
@@ -250,7 +264,10 @@ function MePanel({
       {mine !== null && (
         <section className="sg" id="notify">
           <div className="h">通知</div>
-          <NotifyChannels prefs={notifyPrefs} wecomUserId={wecomUserId} />
+          {/* 两件事分开：上面两行是「要不要被打断」（档位），下面两行是「发给谁」
+              （绑定 / 机器人）。合成一块会让人以为关掉档位就是把账号解绑了。 */}
+          <NotifyChannels prefs={notifyPrefs} />
+          <WecomBinding view={wecomBinding} />
         </section>
       )}
     </>
