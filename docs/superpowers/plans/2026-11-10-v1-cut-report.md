@@ -276,3 +276,137 @@ const read = readFragments(reply.text, ids, {
    `error` 也带进轮询，而它在跑的时候是半句话）。
 3. **秒表是客户端算的**：两端钟差十几秒时，第一帧的数字可能和进度卡（它也这么算）一致
    但和真耗时差一点。硬超时 10 分钟之后由 `GIVE_UP_MS` 收口，不受影响。
+
+---
+
+# 十四、孤儿作业、停止 / 重试、六问必填（2026-11-10 第二遍）
+
+> 起因：owner 现场踩到 —— 抽屉里「评估材料 · 正在生成页面片段 **1:29:12** · 第 2 次尝试」
+> 转了 90 分钟，**停不下来、也重试不了**。库里那条 `uemaster_jobs` 是 `running`，
+> 而跑它的 detached worker 在 dev server 重启时被带走了：没有任何进程会再写那一行，
+> 也没有任何地方会注意到。当时只能手工 `UPDATE 1` 收掉。产品不该需要人来做这件事。
+
+## 一、机制：pid + 心跳 + 年龄上限，三档（不是三选一）
+
+判据都在 `src/core/uemaster/liveness.ts`，**顺序就是优先级**：
+
+| 档 | 判据 | 阈值 | 为什么是它 |
+|---|---|---|---|
+| 1 | `worker_pid` 不在（`process.kill(pid, 0)` → `ESRCH`） | 立刻 | 一条作业 = 一个一次性 worker，作业 id 不复用。pid 没了 = **确定没有下文**，不是「未知」。读成「未知、继续等」正是那次事故：一条永远不变的行被包装成一件还在进行的事。 |
+| 2 | `heartbeat_at` 过期 | **90 秒**（6 × 15s 心跳） | pid 可能为空（0035 之前的老行、spawn 之后 pid 还没写回的一瞬），也可能被系统回收给了别的进程。心跳是唯一能说「它刚刚还在动」的证据。留 6 倍余量：一次慢模型调用不该被误杀。 |
+| 3 | 绝对年龄 | **15 分钟**（`created_at`） | worker 自己 10 分钟硬超时；15 分钟还没收口的，要么挂在不可中断的调用里，要么心跳根本没写成。**没有任何一条作业值得让界面永远转下去。** |
+
+- 写：`startGeneration` 在 spawn 之后记 `worker_pid`（`where status='running'`，防 worker
+  已经自尽）；`runJob` 自己也写一次 pid，并每 15 秒打一次心跳（`setInterval` +
+  `unref()`，`finally` 里清掉）。
+- 读（**修事故的就是这一处**）：`jobStatus`（抽屉每 2 秒问一次）、`readDetail`（打开抽屉
+  的第一帧）、`listRunningJobs`（右下角进度卡）三处先各收一次。写侧已经死了，能注意到
+  这件事的只剩「有人来看」。
+- 收掉时写的那句话（用户读的，逐字）：
+  「生成进程已退出（服务已重启或被终止），本次没有产出；可以直接重试」
+  （心跳那一档：「生成进程 90 秒没有回报（可能卡住了），本次没有产出；可以直接重试」；
+  年龄上限：「生成超过 15 分钟没有结果，本次已作废；可以直接重试」。）
+- 只作用于 `status = 'running'`：done / failed / canceled 是历史，一个字都不改
+  （`where status = 'running'` 同时让回收幂等）。
+
+## 二、两个新动作（授权沿用「谁能生成，谁就能停 / 重试」）
+
+`app/actions.ts` 的 `generateAction` 只做一件事解身份：`currentMember()`；没有任何状态 /
+角色的门（抽屉另有一道 `can('edit')` 把按钮藏在「别人的需求只读」后面）。所以：
+
+- `stopGenerationAction(jobId)` → `cancelJob`（`src/core/uemaster/control.ts`）：
+  **先改库、后杀进程**。`update ... set status='canceled', error='已手动停止' where id=?
+  and status='running'`；改到了才 `kill(-pid, SIGTERM)` + `kill(pid, SIGTERM)`
+  （杀**进程组**：只杀父进程会留下还在写产物的 tsx 子进程）。顺序反过来，worker 会抢
+  先写 failed，于是用户按的是「停止」、看到的是一句「生成失败」。`canceled` 是**自己的
+  状态**，不折成 failed：人停的和程序坏的不是一件事，「失败率」这种数字要说得清。
+  按晚了一步（作业已结束）返回 `canceled: false`，不弹错误。
+- `retryGenerationAction(jobId)` → `retryJob`：从**库里**取需求与阶段（界面只交一个作业
+  id），然后走 `startGeneration` —— 与「按下生成」同一条服务，六问 / PRD / 生成器 / 防重
+  一条不少。旧行一行不动（新 id，历史留着）。
+
+## 三、六问没填，不许生成（owner 的裁定，可被推翻）
+
+必填：`context` 谁在什么情况下用 / `problem` 现在怎么做哪不好 / `outcome` 做成什么样算成功。
+不必填：`surfaces` / `edgeCases` / `outOfScope`（收集阶段本来常常没有，材料已经把「没写」
+当待确认项列出来）。理由：**前三问缺任何一条，材料只能编**。
+
+- 判据只有一处：`src/core/uemaster/gate.ts`（`evaluateLock` / `lockMessage`）。
+- 服务端是唯一真相：`startGeneration`（`stage === 'evaluate'`）在防重之后、生成器探测
+  之前抛 `description_incomplete`，作业一行不落、worker 一个不甩、模型一次不问。
+- 界面只是提前告知：读模型把**同一个字符串**放进 `DetailRef.needsDescription`，抽屉那一行
+  按钮禁用 + 那行理由 + 一个进「编辑」（`/?open=<id>&edit=1`）的「去补」。
+- 消息形状（逐字）：「还差三条没填：谁在什么情况下用、现在怎么做/哪不好、做成什么样算成功。
+  先补完再生成——否则材料只能靠编。」（缺一条 → 「还差一条没填：…」）
+- 已有的材料不受影响：产物链接、版本、新鲜度照旧；只有新的一次生成被拦下。
+
+## 四、现场验证（对着演示库，不是截图）
+
+`.tmpwork/live-verify.ts`（跑完把自己插的行删干净）。provider 指到一个「接了请求就永远
+不回话」的本地口，所以作业真的在跑、且不烧 token、不写产物。
+
+**① 孤儿自愈 —— 一次读就够了**（`PAN-813`，插了一条 pid 已死的 running，90 分钟前开的）：
+
+```
+读之前：status=running error=null worker_pid=39679 finished_at=null
+jobStatus 返回：status=failed error="生成进程已退出（服务已重启或被终止），本次没有产出；可以直接重试"
+读之后：status=failed error="生成进程已退出（服务已重启或被终止），本次没有产出；可以直接重试"
+        worker_pid=39679 finished_at=set
+```
+
+**② 停止（真的入队一次）**：
+
+```
+停止之前：status=running error=null worker_pid=39680 finished_at=null
+worker 起来了：pid=39680 活着=true
+停止返回：{"canceled":true}
+停止之后：status=canceled error="已手动停止" worker_pid=39680 finished_at=set  worker 活着=false
+```
+
+**③ 重试（旧行一字不动）**：
+
+```
+重试 → 新作业 85548e00（旧 95dc48a7）
+旧行：status=canceled error="已手动停止" worker_pid=39680 finished_at=set
+旧行确实没变：true
+新行：status=running error=null worker_pid=39681 finished_at=null
+```
+
+收尾：三条验证作业行删掉；`requirements = 815`（跑前跑后一样，没有 reseed）。
+注：任务书写的是 814，这一轮接手时库里已经是 815（不是我加的，跑前跑后都 815）。
+
+## 五、十条 mutation（把判据改坏，用例就红）
+
+| 改法 | 哪条用例红 |
+|---|---|
+| `stallReasonOf` 去掉死 pid 那一档 | `pid 不在 → 生成进程已退出` + `死 pid 的 running：一次 jobStatus 读取…` |
+| 去掉心跳过期那一档 | `pid 活着、心跳过期 → 卡住` + `pid 为空、心跳过期 → 卡住` |
+| 去掉 15 分钟年龄上限 | `pid 活着…但已经 15 分钟` + `15 分钟年龄上限 → failed` |
+| `jobStatus` 不调 `healStaleJobs` | `死 pid 的 running：一次 jobStatus 读取…`（读侧自愈整条消失） |
+| 停止写 `failed` 而不是 `canceled` | 3 条（停止 / 老行 / 停止后的 worker 收尾） |
+| 停止只改库、不杀进程 | `行 → canceled + 「已手动停止」，worker 进程组真的被杀掉`（3.4 秒等到超时） |
+| 重试返回**旧** id | `新作业是新 id；旧的失败行一行都不动` + `被停止的作业也能重试` |
+| `evaluateLock` 恒返回 null | 服务层三条（全空 / 每条各一次 / 绕过界面） |
+| `startGeneration` 不查六问 | 服务层三条（同上） |
+| 读模型不给 `needsDescription` | `绕过界面…同一句话` + `按钮先禁用…` 两处 |
+
+## 六、计数（跑前 → 跑后）
+
+`npx vitest run`：**1754 → 1797**（新增 43：孤儿 17 + 停止/重试 9 + 六问 12 + 禁用态 UI 5）。
+`3 skipped` 不变。`npx tsc --noEmit` 干净；`npm run build` 通过
+（`✓ Compiled successfully`，6 条路由与之前一致）。`requirements = 815 → 815`。
+
+## 七、这一轮留下的坑（照实写）
+
+1. **重试会立刻再撞上同一件事**：如果 worker 每次都挂在同一个地方，重试只是再跑一遍。
+   阈值（90 秒 / 15 分钟）是判「死了没有」，不是判「为什么死」——真正的病因在
+   `uemaster_job_attempts` 的那几行里，界面上的「详情」读的就是它。
+2. **pid 被回收给别的进程**时会误判「活着」：这一档由心跳与年龄上限兜住（最多多活 90 秒
+   / 15 分钟），不会永久卡住。要更准就得用 pidfd / 进程启动时间比对，跨平台成本不值这一档。
+3. **停止是 SIGTERM，不是 SIGKILL**：CLI 若不理会 SIGTERM，进程会多活一会儿（行已经是
+   canceled，用户看到的状态是对的）。真要硬杀得等下一版；先给信号是「让它有机会写日志」。
+4. **`STALE_RUNNING_MS`（11 分钟）现在只是历史常量**：判据搬到了 `liveness.ts` 的三档，
+   这个常量还导出着（`start.ts` 的注释解释了它现在只对应「超时后一分钟」这一档）。
+5. **六问必填只作用于「评估」**：评审的输入是 PRD 本身，走查是 PRD + 代码镜像，两条都不以
+   六问为前提（v1 里这两条也还没开放）。若 owner 要把同一道门套到评审上，改的是
+   `startGeneration` 里那个 `stage === 'evaluate'` 判断。

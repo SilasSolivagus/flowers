@@ -551,8 +551,10 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
 
   it('一条生成器都没有：startGeneration 直接拒绝，作业一行都不落', async () => {
     process.env.PATH = await pathWith([]);
+    // 六问必填那三问（2026-11-10）：不填的话先撞的描述检查，测不到生成器这条。
     const r = await createRequirement(db, '吕品', {
       title: '没有生成器', type: 'feature', requester: '孙建宏',
+      context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
     });
     const error = await startGeneration(db, '吕品', {
       requirementId: r.id, stage: 'evaluate',
@@ -570,6 +572,7 @@ describe('整条路：stdout 生成器也走得通（runJob）', () => {
     process.env.PATH = await pathWith(['claude', 'dsh']);
     const r = await createRequirement(db, '吕品', {
       title: '没选生成器', type: 'feature', requester: '孙建宏',
+      context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
     });
     const error = await startGeneration(db, '吕品', {
       requirementId: r.id, stage: 'evaluate',

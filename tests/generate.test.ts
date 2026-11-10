@@ -7,6 +7,7 @@ import { submitReview } from '../src/core/requirements/submit-review.js';
 import { AppError } from '../src/core/errors.js';
 import { artifactUrlIn } from '../src/core/uemaster/generator.js';
 import { jobStatus, runJob, startGeneration } from '../src/core/uemaster/start.js';
+import { ORPHAN_TOO_OLD } from '../src/core/uemaster/liveness.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 import { REPO_ROOT, artifactExists, cleanArtifacts, writeArtifact } from './helpers/files.js';
 
@@ -59,10 +60,17 @@ async function requirementState(id: string): Promise<string> {
   return res.rows[0]!.state;
 }
 
-/** 一条收集里的需求（没有 PRD、类型齐全）：评估这条路可以跑。 */
+/**
+ * 一条收集里的需求（没有 PRD、类型齐全）：评估这条路可以跑。
+ *
+ * 2026-11-10 起六问里那三问**必填**（`uemaster/gate.ts`）：没有它们，评估生成会被
+ * 服务层拒掉（「还差三条没填：…」）。这几条用例测的是生成管线，所以这里把三问填上
+ * ——把「缺描述」这件事留给 `generate-gate.test.ts` 专门钉。
+ */
 async function inbox() {
   return createRequirement(db, '吕品', {
     title: 'S3 协议支持', type: 'feature', requester: '孙建宏',
+    context: '运营在后台手工给客户开权限时', problem: '每次都要点七个页面，容易漏', outcome: '一次点击开完，漏配为 0',
   });
 }
 
@@ -268,7 +276,9 @@ describe('startGeneration（服务层）', () => {
 
     const old = await jobRow(stale);
     expect(old.status).toBe('failed');
-    expect(old.error).toBe('生成超时：后台进程没有回报');
+    // 2026-11-10 起判据在 `liveness.ts`：这行没有 pid、没有心跳、20 分钟前开的，
+    // 于是被**年龄上限**那一档收掉（15 分钟），原因就是这一句。
+    expect(old.error).toBe(ORPHAN_TOO_OLD);
     expect((await jobRow(jobId)).status).toBe('running');
   });
 

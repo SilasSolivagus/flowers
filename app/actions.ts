@@ -17,6 +17,7 @@ import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal';
 import { jobStatus, startGeneration, type JobView } from '../src/core/uemaster/start';
+import { cancelJob, retryJob } from '../src/core/uemaster/control';
 import { testGenerator, TEST_TIMEOUT_MS } from '../src/core/uemaster/generator';
 import { generatorCommand, saveGeneratorCommand, writeTest } from '../src/core/uemaster/settings';
 import { testLabel, type GeneratorTest } from '../src/core/uemaster/candidates';
@@ -159,6 +160,54 @@ export async function generateAction(formData: FormData): Promise<StartGeneratio
  */
 export async function generationStatusAction(jobId: string): Promise<JobView | null> {
   return jobStatus(db, jobId);
+}
+
+/**
+ * 停止一次正在跑的生成（2026-11-10）。
+ *
+ * 授权与 `generateAction` **同一条**：`currentMember()` 解出身份，服务层不做更细的门
+ * （能按下生成的人，必须能把他自己按下去的那一次停掉；见 `control.ts` 文件头）。
+ * 界面那一层另有一道 `can('edit')`：别人的需求只读，那行里根本没有这个按钮。
+ *
+ * 返回值三态而不是两态：`canceled: false` 是「你按晚了一步，它已经结束了」——那不是
+ * 失败，不该弹一条错误。界面据此只刷新一次。
+ */
+export type StopGenerationResult =
+  | { ok: true; canceled: boolean }
+  | { ok: false; message: string };
+
+export async function stopGenerationAction(jobId: string): Promise<StopGenerationResult> {
+  await currentMember();
+  try {
+    const { canceled } = await cancelJob(db, jobId);
+    // 停完要刷：那一行从「生成中」变回「生成」，右下角的进度卡也该少一条。
+    revalidatePath('/');
+    return { ok: true, canceled };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
+}
+
+/**
+ * 重试：为同一条需求的同一个阶段**新开**一次（2026-11-10）。
+ *
+ * 旧行（失败 / 被停止的那一次）一行都不动：它是历史，带着自己那句原因。新的作业是
+ * 另一个 id，走的是「按下生成」同一条服务（六问 / PRD / 生成器 / 防重一条不少）。
+ *
+ * 返回 `jobId`（与 `generateAction` 同一个形状）：界面换到新的那一行上继续轮询，
+ * 而不是留着旧的失败提示。
+ */
+export async function retryGenerationAction(jobId: string): Promise<StartGenerationResult> {
+  const actor = await currentMember();
+  try {
+    const result = await retryJob(db, actor, jobId);
+    revalidatePath('/');
+    return { ok: true, jobId: result.jobId };
+  } catch (error) {
+    if (error instanceof AppError) return { ok: false, message: error.message };
+    throw error;
+  }
 }
 
 /** 评估：inbox → design。 */

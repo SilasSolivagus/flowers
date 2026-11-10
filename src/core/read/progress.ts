@@ -3,6 +3,7 @@ import { db } from '../../db/client.js';
 import type { Stage } from '../uemaster/packs.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
 import { IDLE_PHASE_LABEL, PHASE_LABEL } from '../uemaster/phases.js';
+import { healStaleJobs } from '../uemaster/liveness.js';
 
 /**
  * 生成进度（P4-02）：界面上那张角落卡片的数据源。
@@ -84,6 +85,12 @@ type Row = {
  * 让「还有一个在跑」这件事可能被藏起来。
  */
 export async function listRunningJobs(): Promise<JobProgress[]> {
+  /**
+   * 先收孤儿（2026-11-10）。这张卡片的口径是「现在在跑什么」，而一条 pid 已经不在的
+   * 作业既不在跑、也永远不会结束：不收它，右下角那张卡会永远显示同一条需求在生成，
+   * 用户点进去看到的却是「生成失败」——两处说的不是同一件事。
+   */
+  await healStaleJobs(db);
   const res = await db.execute<Row>(sql`
     select j.id as job_id, j.requirement_id, j.stage, j.created_at,
            r.number, r.title,

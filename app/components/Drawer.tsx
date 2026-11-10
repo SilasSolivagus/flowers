@@ -123,6 +123,7 @@ export function RefRow({
               present={item.present}
               fresh={item.freshness === 'fresh'}
               versions={item.versions}
+              needsDescription={item.needsDescription}
             />
             <AttachForm id={id} number={number} stage={item.stage} />
           </>

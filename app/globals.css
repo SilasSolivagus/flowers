@@ -306,6 +306,15 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 .row3 .run .tm{font-family:var(--f-mono);color:var(--c-text-2);
               font-variant-numeric:tabular-nums;text-align:right}
 .row3 .run .at{color:var(--c-text-4)}
+/* 新增（2026-11-10）：跑着的时候那一行旁边多一个「停止」。
+   为什么把它和 `.run` 包进一个 flex（`.gen-run`）：`.run` 自己是 inline-grid，
+   再把按钮塞进去会让它变成第三列、并被 `white-space:nowrap` 拉着一起不换行；
+   两者是**同级**的两件事（现在怎么样 / 我能做什么），所以它们是同一格里的两个
+   flex 项，间距与大按钮之间那 8px 一致。
+   停止用 `.btn.gen` 的尺寸（22px 高、caption 字）而不是主场按钮的 32px：
+   它挂在一条正在读的状态行旁边，不该比那一行更抢眼。 */
+.row3 .gen-run{display:inline-flex;align-items:center;gap:8px}
+.row3 .stop{color:var(--c-text-2)}
 /* 新增（P2.13）：终端失败的浮层。位置在底部中间——抽屉占着右边 560px，
    右下角会被它盖住；居中之后它落在抽屉左边，读得到又不挡动作条。
    颜色只取 token（没有一个字面色值）：边框用 --c-line-strong，左边那条竖线用负向色，

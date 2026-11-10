@@ -6,6 +6,8 @@ import {
   can, lineLabelOf, type Ability, type Member, type RequirementFacts,
 } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
+import { evaluateLock } from '../uemaster/gate.js';
+import { healStaleJobs } from '../uemaster/liveness.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
 import { STATE_LABEL, type State } from '../state-machine.js';
 import { fingerprintOfRow, freshnessOf, type Freshness } from '../requirements/fingerprint.js';
@@ -142,6 +144,17 @@ export type DetailRef = {
     /** 走到第几次尝试（0 = 一次都没有；界面只在 > 1 时显示）。 */
     attempt: number;
   } | null;
+  /**
+   * 这一行现在**不能**生成的理由（2026-11-10，六问裁定）；`null` = 可以生成。
+   *
+   * 只有「评估材料」这一行可能非空：评审的输入是 PRD 本身，走查的输入是 PRD + 代码
+   * 镜像，两条都不以六问为前提。
+   *
+   * 为什么这一句话要从服务端来、而不是让抽屉自己数空格：它同时是 `startGeneration`
+   * 抛出的错误原文（判据在 `uemaster/gate.ts` 一处）。客户端自己拼一句，迟早会变成
+   * 「按钮还能点、点了才被拒」。所以读模型把**同一句话**发下来，界面只负责画。
+   */
+  needsDescription: string | null;
 };
 
 /**
@@ -554,6 +567,12 @@ async function artifactRef(
   artifact: ArtifactRef | undefined,
   running: RunningJob | null,
   currentHash: string,
+  /**
+   * 这一行的「不能生成」理由（六问裁定，2026-11-10）。**由调用方按 stage 决定给不给**：
+   * 只有评估材料以六问为前提，评审 / 走查两行永远是 null（它们的输入不是六问）。
+   * 由调用方算一次再传下来，而不是这里再算一遍：三行共用的判断不该有三份。
+   */
+  needsDescription: string | null,
 ): Promise<DetailRef> {
   const generation = running === null ? null : {
     id: running.id,
@@ -567,7 +586,7 @@ async function artifactRef(
     // `filePresent: false`：库里没有行，也就不可能有「这一行的文件」。
     return {
       stage, label, url: null, at: null, atLabel: null, present: false,
-      filePresent: false, freshness: 'unknown', versions: 0, generation,
+      filePresent: false, freshness: 'unknown', versions: 0, generation, needsDescription,
     };
   }
   const at = artifact.at.toISOString();
@@ -576,7 +595,7 @@ async function artifactRef(
     filePresent: await filePresentOf(artifact.url),
     freshness: freshnessOf(artifact.inputHash, currentHash),
     versions: artifact.versions,
-    generation,
+    generation, needsDescription,
   };
 }
 
@@ -739,6 +758,14 @@ export async function getRequirementDetail(
    * 成功会变成产物链接（`listArtifacts` 已经给了），失败是行内一次性的提示。
    * `distinct on (stage)` 与 `listArtifacts` 同一个口径：一个 stage 只认最近一次。
    */
+  /**
+   * 先收孤儿（2026-11-10），与 `jobStatus` / `listRunningJobs` 同一句、同一份判据。
+   *
+   * 为什么服务端渲染也要收：抽屉的第一帧就是服务端画的。不收的话，一个 pid 已经不在的
+   * 作业会让首帧画出一行「正在读 PRD · 00:00」+ 一个秒表，而它永远不会动——用户要先盯
+   * 两秒（第一次轮询）才看到真相。收掉之后首帧直接是「生成 / 重新生成」，没有那一帧假象。
+   */
+  await healStaleJobs(db, { requirementId: id });
   const runningJobs = await db.execute<{
     id: string; stage: string; created_at: string; phase: string | null; attempt: number;
   }>(sql`
@@ -820,10 +847,16 @@ export async function getRequirementDetail(
       outOfScope: row.out_of_scope,
     },
     // 三行并发 stat：一次请求只多三个 `stat(2)`，而串行写会让抽屉多等两个来回。
+    //
+    // 2026-11-10「六问没填，不许生成」：理由算在**这里**、只算一次，交给评估那一行。
+    // 评审 / 走查拿到的是 null——它们的输入不是六问，把同一句话挂在它们身上是错的。
     refs: await Promise.all([
-      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'), running.get('evaluate') ?? null, currentHash),
-      artifactRef('review', '评审材料', artifacts.get('review'), running.get('review') ?? null, currentHash),
-      artifactRef('inspect', '走查材料', artifacts.get('inspect'), running.get('inspect') ?? null, currentHash),
+      artifactRef('evaluate', '评估材料', artifacts.get('evaluate'),
+        running.get('evaluate') ?? null, currentHash, evaluateLock(row)),
+      artifactRef('review', '评审材料', artifacts.get('review'),
+        running.get('review') ?? null, currentHash, null),
+      artifactRef('inspect', '走查材料', artifacts.get('inspect'),
+        running.get('inspect') ?? null, currentHash, null),
     ]),
     review,
     events: eventRes.rows.map((e) => ({

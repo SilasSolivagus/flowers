@@ -260,6 +260,13 @@
       "when": 1794110000000,
       "tag": "0034_repo_coverage_generated",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794112000000,
+      "tag": "0035_job_liveness",
+      "breakpoints": true
     }
   ]
 }

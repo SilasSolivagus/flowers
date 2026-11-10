@@ -51,7 +51,7 @@ function ref(filePresent: boolean | null, url = URL): DetailRef {
     filePresent,
     freshness: 'fresh',
     versions: 1,
-    generation: null,
+    generation: null, needsDescription: null,
   };
 }
 
@@ -114,7 +114,7 @@ describe('参考段：文件不在了就不再画链接', () => {
   it('没有产物行时既没有链接也没有「丢失」：那一行是「生成」入口', () => {
     const out = html({
       stage: 'inspect', label: '走查材料', url: null, at: null, atLabel: null,
-      present: false, filePresent: false, freshness: 'unknown', versions: 0, generation: null,
+      present: false, filePresent: false, freshness: 'unknown', versions: 0, generation: null, needsDescription: null,
     });
     expect(out).not.toContain('href="/uemaster/');
     expect(out).not.toContain('文件已丢失');

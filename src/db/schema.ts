@@ -376,21 +376,44 @@ export const uemasterArtifacts = pgTable('uemaster_artifacts', {
  *   必须留着（error 里是用户要读的原因），不能因为「没产物」就被删掉。
  *
  * 行只增不改语义：一次生成一行。`finished_at` 为空就是还在跑（或进程被杀了，
- * 由下一次 `startGeneration` 的陈旧回收把它收成 failed）。
+ * 由 `uemaster/liveness.ts` 的孤儿回收把它收成 failed——2026-11-10 起不再等
+ * 下一次 `startGeneration`：读侧就会自愈）。
+ *
+ * ## 2026-11-10：`worker_pid` / `heartbeat_at` / `canceled`
+ *
+ * 事故形状：dev server 重启把 detached worker 带走了，库里留下一条 running 行，
+ * 抽屉里「正在生成页面片段 1:29:12」转了 90 分钟，谁都停不下来。两个新列就是
+ * 「这条作业还有没有人在替它干活」的证据：
+ *
+ * - `worker_pid`：谁在跑。`process.kill(pid, 0)` 能回答「它还活着吗」，而 pid 死了
+ *   意味着**再没有任何进程会写这一行**——这不是「未知」，是确定的死。
+ * - `heartbeat_at`：最后一次「我还活着」的时刻。pid 可空（老行、spawn 竞态），
+ *   心跳是那一格的补位；也是「活着但卡住」的唯一线索。
+ * - `canceled`：用户按了「停止」。它必须是一个**自己的状态**，不能折成 failed：
+ *   用户停的和程序失败的，界面上是两句不同的话，历史里也不该混。
  */
 export const uemasterJobs = pgTable('uemaster_jobs', {
   id: uuid('id').primaryKey().defaultRandom(),
   requirementId: uuid('requirement_id').notNull().references(() => requirements.id),
   stage: text('stage').notNull(),            // evaluate | review | inspect
-  status: text('status').notNull(),          // running | done | failed
+  status: text('status').notNull(),          // running | done | failed | canceled
   error: text('error'),                      // 失败原因原文（CLI 的 stderr 尾巴）
   artifactId: uuid('artifact_id').references(() => uemasterArtifacts.id),
+  /**
+   * 跑这条作业的 worker 进程号（可空：老行、或 spawn 之后还没写回的那一瞬）。
+   *
+   * 为什么记 pid 而不是只靠时间：时间只会说「它跑了很久」，pid 说的是「没有人在跑」。
+   * 前者只能等一个阈值，后者是立刻可判的事实。
+   */
+  workerPid: integer('worker_pid'),
+  /** worker 最后一次报到（`running` 时每 15 秒一次）。见 `uemaster/liveness.ts`。 */
+  heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   finishedAt: timestamp('finished_at', { withTimezone: true }),
 }, (t) => ({
   statusCheck: check(
     'uemaster_jobs_status_check',
-    sql`${t.status} in ('running', 'done', 'failed')`,
+    sql`${t.status} in ('running', 'done', 'failed', 'canceled')`,
   ),
   stageCheck: check(
     'uemaster_jobs_stage_check',

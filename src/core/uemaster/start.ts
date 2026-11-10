@@ -13,6 +13,10 @@ import { attachArtifact } from './attach.js';
 import { readAttempts } from './attempts.js';
 import type { AttemptPhase, AttemptView } from './trace.js';
 import { composeEvaluation } from './compose.js';
+import { evaluateLock } from './gate.js';
+import {
+  HEARTBEAT_INTERVAL_MS, healStaleJobs, stallReasonOf,
+} from './liveness.js';
 import { loadKnownSurfaces } from './surfaces.js';
 import { REVIEW_NEEDS_PRD, reviewRequirement } from './review.js';
 import { inspect as inspectMaterial } from './inspect.js';
@@ -46,6 +50,12 @@ export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
  * worker 自己会在超时那一刻把作业收成 failed（`runJob` 的硬超时）；这一条守的是
  * **进程被 kill / 机器重启**那种连 worker 都不在的情况。不设它，一条僵死的 running
  * 行会把那个阶段永久锁住——用户看到「正在生成中」，而其实什么都没在跑。
+ *
+ * 2026-11-10 起这一条**不再是唯一的判据**，也不再只在 `startGeneration` 里生效：
+ * 死亡判据搬到了 `liveness.ts`（pid 不在 / 心跳过期 / 15 分钟年龄上限），并且挂在
+ * 读侧——一次打开抽屉就会把死行收掉，不必等下一次按按钮。这里保留这个常量只为
+ * 「年龄」那一档还认得它（`STALE_RUNNING_MS` 是 11 分钟，比 `MAX_JOB_AGE_MS` 的
+ * 15 分钟更早；两档都保留是因为前者是「超时之后一分钟」，后者是「怎么都该结束了」）。
  */
 export const STALE_RUNNING_MS = DEFAULT_TIMEOUT_MS + 60 * 1000;
 
@@ -98,7 +108,13 @@ function parseStage(value: unknown): Stage {
   return stage;
 }
 
-export type JobStatus = 'running' | 'done' | 'failed';
+/**
+ * 作业的三种结局（2026-11-10 起多一档 `canceled`）。
+ *
+ * `canceled` 是**用户按了「停止」**，不是失败：界面上那句是「已手动停止」，不是
+ * 「生成失败：…」。它必须是一个自己的状态，否则「失败率」这种数字从此说不清。
+ */
+export type JobStatus = 'running' | 'done' | 'failed' | 'canceled';
 
 export type JobView = {
   id: string;
@@ -165,8 +181,10 @@ async function doneJob(db: Db, jobId: string, artifactId: string): Promise<void>
  * 库里那条 `uemaster_jobs_running_unique` 部分唯一索引是并发兜底（绕过服务层的人
  * 也撞得回来）。
  *
- * 陈旧回收放在「拒绝」之前：一条超过 `STALE_RUNNING_MS` 的 running 是死进程留下的，
- * 把它收成 failed 再放行，用户不必等下一次重启。
+ * 陈旧回收放在「拒绝」之前：一条 running 是死进程留下的，把它收成 failed 再放行，
+ * 用户不必等下一次重启。判据从 2026-11-10 起是 `liveness.ts` 那三档（pid 不在 /
+ * 心跳过期 / 15 分钟年龄上限）——**同一条判据**也挂在读侧，所以这里碰到死行的机会
+ * 已经很小；留着它是为了让「按生成」这条路自己也是自洽的（不依赖有没有人先看过抽屉）。
  */
 export async function startGeneration(
   db: Db,
@@ -178,8 +196,10 @@ export async function startGeneration(
   const stage = parseStage(input.stage);
 
   const jobId = await db.transaction(async (tx) => {
-    const found = await tx.execute<{ id: string; prd_url: string | null }>(
-      sql`select id, prd_url from requirements
+    const found = await tx.execute<{
+      id: string; prd_url: string | null;
+      context: string | null; problem: string | null; outcome: string | null;
+    }>(sql`select id, prd_url, context, problem, outcome from requirements
            where id = ${requirementId} and deleted_at is null for update`);
     if (!found.rows[0]) throw new AppError('not_found', '需求不存在');
 
@@ -198,8 +218,10 @@ export async function startGeneration(
       throw new AppError('prd_missing_url', REVIEW_NEEDS_PRD);
     }
 
-    const running = await tx.execute<{ id: string; created_at: Date }>(sql`
-      select id, created_at
+    const running = await tx.execute<{
+      id: string; created_at: Date; worker_pid: number | null; heartbeat_at: Date | null;
+    }>(sql`
+      select id, created_at, worker_pid, heartbeat_at
         from uemaster_jobs
        where requirement_id = ${requirementId} and stage = ${stage} and status = 'running'
        order by created_at desc, id desc
@@ -207,14 +229,38 @@ export async function startGeneration(
     const current = running.rows[0];
 
     if (current) {
-      const age = Date.now() - new Date(current.created_at).getTime();
-      if (age < STALE_RUNNING_MS) {
+      // 三档判据与读侧同一份（`liveness.ts`）：pid 不在立刻收、心跳过期收、太老收。
+      const reason = stallReasonOf({
+        workerPid: current.worker_pid === null ? null : Number(current.worker_pid),
+        heartbeatAt: current.heartbeat_at === null ? null : new Date(current.heartbeat_at).getTime(),
+        createdAt: new Date(current.created_at).getTime(),
+      }, Date.now());
+      if (reason === null) {
         throw new AppError('generation_running', '这个阶段正在生成中，等这次结束再试');
       }
       await tx.execute(sql`
         update uemaster_jobs
-           set status = 'failed', error = '生成超时：后台进程没有回报', finished_at = now()
+           set status = 'failed', error = ${reason}, finished_at = now()
          where id = ${current.id} and status = 'running'`);
+    }
+
+    /**
+     * 六问没填，不许生成（2026-11-10 owner 的裁定）。判据在 `gate.ts`，**这一处是
+     * 唯一的真相**：界面把同一句话提前画在按钮旁边（按钮禁用），而一个绕过界面的
+     * POST 仍然撞在这里。
+     *
+     * 位置三条理由：
+     * - 放在防重之后：那个阶段已经在跑时，「正在生成中」才是这次点击的直接结果；
+     * - 放在生成器探测之前：缺描述是**用户自己**能补的，缺生成器常常要管理员；
+     *   先让他看见自己能做的那一步；
+     * - 放在落作业之前：一次被拒的点击不留作业行、不甩 worker、不烧一次模型调用。
+     *
+     * 只作用于 `evaluate`：评审的输入是 PRD 本身、走查的输入是 PRD + 代码镜像，两条都
+     * 不以六问为前提（v1 里这两条本来也还没开放）。
+     */
+    if (stage === 'evaluate') {
+      const lock = evaluateLock(found.rows[0]);
+      if (lock !== null) throw new AppError('description_incomplete', lock);
     }
 
     // 生成器在不在？放在**防重之后**：用户先要知道「这个阶段已经在跑了」，而不是
@@ -250,7 +296,14 @@ export async function startGeneration(
   });
 
   try {
-    spawnWorker(db, jobId, actor);
+    const pid = spawnWorker(db, jobId, actor);
+    // 把「谁在跑」记下来（2026-11-10）。`where status = 'running'` 是必须的：
+    // worker 有可能在这个 update 之前就把自己收尾了（stub 生成器跑完只要几十毫秒），
+    // 那时一行 done/failed 不该被改回一个 pid。
+    //
+    // 写不进去（库抖一下）也不抛出：worker 自己启动后会把 pid 再写一次，而且心跳
+    // 从不依赖这一行——回收判据有两档后备（心跳、年龄上限）。
+    await recordWorkerPid(db, jobId, pid);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await failJob(db, jobId, message);
@@ -261,18 +314,43 @@ export async function startGeneration(
 }
 
 /**
+ * 记下「这条作业由哪个进程在跑」。
+ *
+ * 为什么要单独一个函数、并且**两处都写**（这里 spawn 之后写一次，worker 启动后自己
+ * 再写一次）：spawn 到 worker 真正跑起来之间有一段时间（tsx 冷启动，实测 200–800ms），
+ * 这段时间里作业是 running 而「谁在跑」还空着。谁先写到就算谁的，`coalesce` 保证
+ * 后写的不会把先写的抹成一个不同的值（两处写的是同一个 pid）。
+ */
+async function recordWorkerPid(db: Db, jobId: string, pid: number | undefined): Promise<void> {
+  if (pid === undefined) return;
+  try {
+    await db.execute(sql`
+      update uemaster_jobs
+         set worker_pid = coalesce(worker_pid, ${pid}), heartbeat_at = now()
+       where id = ${jobId} and status = 'running'`);
+  } catch {
+    // 见调用处：这一格不是主路径，写不进去有另外两档判据兜着。
+  }
+}
+
+/**
  * 把 worker 甩出去：detached + 三路 ignore + unref。
  *
  * 三个 flag 各自解决一件事：
  * - `detached: true`：worker 自成一个会话/进程组，请求结束（甚至 Next 重启）不会把它带走。
+ *   **它同时是「停止」能用的前提**：进程组长（pgid = 自己的 pid）才收得到
+ *   `kill(-pid)`，那一条把 tsx 与它拉起的子进程一起杀掉（见 `control.ts`）。
  * - `stdio: 'ignore'`：它的输出没有读者。让管道连着父进程，父进程一退出就会 EPIPE。
  * - `unref()`：父进程的事件循环不再为它保活——请求该多快返回就多快返回。
  *
  * 为什么用 `node + tsx` 跑 `.ts` 而不是编译出一份 `.js`：仓库里没有「worker 单独构建」
  * 这一步（`next build` 只产出 Next 的 bundle），而 tsx 已经是 devDependency、被
  * `npm run seed` / `demo` 天天用。找不到 tsx 时**不静默**：抛中文错误，作业收成 failed。
+ *
+ * 返回子进程 pid（2026-11-10 起调用方要把它记进作业行）：没有它，回收判据只剩时间，
+ * 而时间说不出「没有人在跑」。
  */
-function spawnWorker(db: Db, jobId: string, actor: string): void {
+function spawnWorker(db: Db, jobId: string, actor: string): number | undefined {
   const tsx = path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   if (!existsSync(tsx)) {
     throw new Error('后台执行器不可用：找不到 node_modules/tsx');
@@ -289,6 +367,7 @@ function spawnWorker(db: Db, jobId: string, actor: string): void {
     void failJob(db, jobId, '生成进程没能启动');
   });
   child.unref();
+  return child.pid;
 }
 
 /**
@@ -363,6 +442,29 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
     await failJob(db, jobId, BAD_STAGE);
     return;
   }
+
+  /**
+   * 从这一刻起，这条作业有主人了（2026-11-10）：`worker_pid` 写上自己，`heartbeat_at`
+   * 每 15 秒报到一次。
+   *
+   * 为什么 worker **自己**也写一次 pid：`startGeneration` 那一次写发生在 spawn 之后，
+   * 而 tsx 冷启动要几百毫秒——这段时间里作业是 running 而「谁在跑」空着。谁先写到
+   * 就是谁（`coalesce` 保证两处写同一个值时幂等）。
+   *
+   * 为什么心跳挂在 `setInterval` 而不是每次 await 之后打一下：这条函数里最长的一段
+   * 是**一次**模型调用（几分钟），中间没有我们可以插入的位置；而「还在动」这件事只能
+   * 由一个独立的定时器说。`unref()` 让它不拖着进程退出——作业结束就该走。
+   *
+   * 心跳失败**吞掉**：库抖一下不该让一次跑了两分钟的生成作废（下一次心跳会补上，
+   * 而且即使全丢，读侧还有 pid 与年龄上限两档）。
+   */
+  await recordWorkerPid(db, jobId, process.pid);
+  const beat = setInterval(() => {
+    void db.execute(sql`
+      update uemaster_jobs set heartbeat_at = now()
+       where id = ${jobId} and status = 'running'`).catch(() => undefined);
+  }, HEARTBEAT_INTERVAL_MS);
+  beat.unref?.();
 
   try {
     if (job.prd_url === null && job.stage !== 'evaluate') {
@@ -509,6 +611,11 @@ export async function runJob(db: Db, jobId: string, opts: RunJobOptions = {}): P
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await failJob(db, jobId, message);
+  } finally {
+    // 心跳必须在所有出口停掉（成功、失败、提前 return 都走 finally）：一个还在滴答的
+    // 定时器会让「这条作业已经结束」与「它还在报到」同时为真——那正是回收判据最怕的
+    // 自相矛盾。
+    clearInterval(beat);
   }
 }
 
@@ -522,6 +629,19 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 export async function jobStatus(db: Db, jobId: string): Promise<JobView | null> {
   if (!UUID.test(jobId)) return null;
+  /**
+   * 先收一次孤儿（2026-11-10）：**这一行就是修事故的那一处**。
+   *
+   * 抽屉每 2 秒问一次这条作业，而「问」是那条死行唯一的可疑之处——没有进程会替它
+   * 写 done / failed。于是收回来的地方只能是读：这一句之后，一个 pid 已经不在的作业
+   * 会以 `failed` + 「生成进程已退出（服务已重启或被终止），本次没有产出；可以直接重试」
+   * 返回，抽屉那一行立刻从秒表变成一个失败 + 重试。
+   *
+   * 放在 `select` 之前而不是之后：下面那条查询（含两个子查询）只该读一次确定的行；
+   * 先收再读，用户看到的就是收完之后的状态，不会出现「这一帧还在跑、下一帧失败了」
+   * 这种两帧之间什么都没发生的跳变。
+   */
+  await healStaleJobs(db, { jobId });
   const res = await db.execute<{
     id: string; stage: Stage; status: JobStatus; error: string | null;
     url: string | null; created_at: string; finished_at: string | null;

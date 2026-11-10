@@ -66,9 +66,17 @@ async function caught(p: Promise<unknown>): Promise<AppError> {
 }
 
 /** 一条**没有** PRD 链接的需求。 */
+/**
+ * 一条**没有 PRD** 的需求。
+ *
+ * 2026-11-10 起多填了三格六问（context / problem / outcome）：这一组盯的是「PRD 链接」
+ * 那一道门，而评估生成还有另一道门（六问必填，`uemaster/gate.ts`）。不填的话，
+ * 「评估材料不受 PRD 规则约束」那条用例会先撞上六问，测不到它要测的东西。
+ */
 async function bare() {
   return createRequirement(db, '吕品', {
     title: '没有 PRD 的需求', type: 'feature', requester: '孙建宏',
+    context: '运营在后台开权限时', problem: '要跳七个页面', outcome: '一次点完',
   });
 }
 
