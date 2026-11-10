@@ -107,6 +107,13 @@
 .pw-once{display:flex;align-items:center;gap:12px;min-width:0}
 .pw-once b{font:500 var(--t-caption) var(--f-sans);color:var(--c-text-3);flex:0 0 auto}
 .pw-once code{font:400 var(--t-body-s) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:4px 8px;border-radius:var(--r-xs);user-select:all;overflow-wrap:anywhere}
+/* 改的入口跟着密码一起出现（2026-11-10）：一条大家都知道的初始密码，必须当场说清
+   在哪里能换掉它，否则「统一密码」就会一直是那一条。 */
+.pw-hint{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-4)}
+
+/* 新增成员表单里那行「初始密码」：与 .mk-f 的标签同一档字，但不成一格输入框。 */
+.mk-note{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.mk-note code{font:400 var(--t-caption) var(--f-mono);color:var(--c-text-1);background:var(--c-surface-2);padding:2px 6px;border-radius:var(--r-xs);user-select:all}
 
 /* 通知频道那两行的三档分段控件（P4-07）。
    三格连成一条，不是三个独立开关：它是一个「选哪个」的问题，选中态靠

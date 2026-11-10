@@ -274,6 +274,13 @@
       "when": 1794114000000,
       "tag": "0036_artifact_content_lost",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794116000000,
+      "tag": "0037_member_initial_password",
+      "breakpoints": true
     }
   ]
 }

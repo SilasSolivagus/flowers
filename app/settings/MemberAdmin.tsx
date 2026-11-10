@@ -17,8 +17,10 @@ import { LINE_LABEL, lineLabel } from './roles';
  * 1. **列表**：名字 / 角色 / 条线 / 状态（在用 / 已停用）/ 负责需求数。已停用的人也
  *    出现在列表里——历史行还指着他，删掉一行不会让那条审计线消失。
  * 2. **新增**：名字 + 邮箱 + 角色 + 条线。邮箱是**登录名**（P4-08），不填这个人就登不
- *    进来；初始口令由服务端生成，**只显示这一次**（`createMember` 的返回值），之后库里
- *    只有 scrypt 串。
+ *    进来；初始密码是**团队统一的那一条**（2026-11-10 起，由服务端作为 prop 传进来，
+ *    这一层不 import 任何带 `node:crypto` 的模块）。它出现在两个地方：表单上先写清
+ *    「新成员会拿到哪一条」，建完之后再回显一次——两个地方都带**改的入口**
+ *    （「我的」→「密码」），因为一条大家都知道的密码必须有一条明确的改法。
  * 3. **改**：角色 / 条线 / 停用 / 重置口令（同样只显示一次）。停用还占着需求的负责人时，
  *    服务层会拒绝并说「这个人还负责 N 条需求，先转交」——那句话原文显示在行下，
  *    旁边就是「转交」：选一个人，一次把他名下全部需求转过去（逐条走 `reassignOwner`，
@@ -36,7 +38,7 @@ function roleOptions(): Role[] {
 }
 
 /** 新增成员：一行入口，展开三格。 */
-function NewMemberRow() {
+function NewMemberRow({ defaultPassword }: { defaultPassword: string }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
@@ -137,6 +139,11 @@ function NewMemberRow() {
               </select>
             </label>
           )}
+          {/* 初始密码先写在**建之前**：建完才告诉人「他拿到的是一条公共密码」太晚，
+              那时人已经准备把它发出去了。 */}
+          <div className="mk-note">
+            初始密码：<code>{defaultPassword}</code>（统一的一条；他可以在「我的 → 密码」里自己改）
+          </div>
           <div className="mk-acts">
             <button className="btn sm primary" type="button" disabled={busy} onClick={() => void create()}>
               新增
@@ -152,7 +159,10 @@ function NewMemberRow() {
       )}
       {password !== null && (
         <div className="i gen-detail">
-          <div className="pw-once"><b>初始口令</b><code>{password}</code></div>
+          <div className="pw-once">
+            <b>初始密码</b><code>{password}</code>
+            <span className="pw-hint">他登录后可以在「我的 → 密码」里自己改</span>
+          </div>
         </div>
       )}
     </>
@@ -376,11 +386,19 @@ function MemberRow({ row, rows }: { row: MemberAdminRow; rows: MemberAdminRow[] 
   );
 }
 
-export function MemberAdmin({ rows }: { rows: MemberAdminRow[] }) {
+/**
+ * `defaultPassword` 由服务端页面传进来（`DEFAULT_MEMBER_PASSWORD`）：这一层是
+ * `'use client'`，直接 import `src/core/auth/password.ts` 会把 `node:crypto` 拖进
+ * 浏览器包。值本身不是秘密（它就是「统一的那一条」），秘密的是**没有第二份字面量**。
+ */
+export function MemberAdmin({ rows, defaultPassword }: {
+  rows: MemberAdminRow[];
+  defaultPassword: string;
+}) {
   return (
     <section className="sg">
       <div className="h">成员</div>
-      <NewMemberRow />
+      <NewMemberRow defaultPassword={defaultPassword} />
       {rows.map((row) => <MemberRow key={row.id} row={row} rows={rows} />)}
     </section>
   );

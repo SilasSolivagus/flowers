@@ -7,6 +7,7 @@ import { listTokens } from '../../mcp/tokens';
 import { BOARD_STATES } from '../../src/core/read/board';
 import { currentMember, listMembers, type Member } from '../../src/core/read/member';
 import { can, NO_REQUIREMENT } from '../../src/core/auth/roles';
+import { DEFAULT_MEMBER_PASSWORD } from '../../src/core/auth/password';
 import { DEFAULT_PREFS, prefsOf } from '../../src/core/read/notify';
 import { memberAdminView } from '../../src/core/read/member-admin';
 import { STATE_LABEL, type State } from '../../src/core/state-machine';
@@ -170,7 +171,9 @@ export default async function SettingsPage({
               {/* 平台模型：超管那一页唯一一个可写的平台级配置。它原来在「项目」栏里，
                   「项目」删掉之后并到这里——同一个页面里既管人、也管这台机器用什么模型。 */}
               <GeneratorRow view={generator} />
-              <MemberAdmin rows={memberRows ?? []} />
+              {/* 初始密码从服务端读一次、作为值传下去：客户端组件不许 import
+                  `auth/password.ts`（它带 node:crypto），而「统一的那一条」只该有一个来源。 */}
+              <MemberAdmin rows={memberRows ?? []} defaultPassword={DEFAULT_MEMBER_PASSWORD} />
             </>
           )}
       </div>

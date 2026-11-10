@@ -49,7 +49,7 @@ import { shanghaiDayOf, startOfShanghaiDay, tick } from '../src/core/clock/tick.
 import { assertNoMigratedRequirements, assertSafeToReset, resetDb } from '../src/db/reset.js';
 import { getBoard } from '../src/core/read/board.js';
 import { listReleases } from '../src/core/read/version.js';
-import { generatePassword, setPassword } from '../src/core/auth/password.js';
+import { DEFAULT_MEMBER_PASSWORD, setPassword } from '../src/core/auth/password.js';
 import { seedPeople } from '../tests/helpers/db.js';
 
 // ─── 小工具 ──────────────────────────────────────────────────────────────────
@@ -241,27 +241,27 @@ async function main() {
   log(`成员 ${people.length} 人：${people.map((p) => `${p.name}(${p.email})/${p.role}${p.line ? `/${p.line}` : ''}`).join('、')}`);
 
   /**
-   * 初始口令（P4-04）：**只在这里打印一次**，库里只有 scrypt 串。
+   * 初始密码（P4-04 起，2026-11-10 改口径）。
    *
-   * 为什么种子负责发口令：登录已经不可能「凭名字就进」，第一次打开页面的人必须有一个
-   * 能用的口令。生成随机的、每人一个，比所有人共用一个 `123456` 好得多——后者一旦
-   * 泄露，泄露的是整个部署；而且它会被当成「默认密码」，永远没人改。
+   * 原来每人一条随机串、只在这一屏打印一次。owner 的裁定是**统一一条**（原先的随机
+   * 口令要人念给人，念错一个字符就进不去，而谁都拿不回明文）。所以现在七个人都用
+   * `DEFAULT_MEMBER_PASSWORD`——这与迁移 `0037`、以及设置页「新增成员」的默认值是
+   * **同一个常量**，三处没有第二份字面量。
    *
-   * 这一屏要被人抄走（或者至少贴进密码管理器），所以排版按「邮箱 + 口令」一行一个，
-   * 字符表里没有 `0O1lI`（见 password.ts 的 ALPHABET）。
+   * **明文不再打印**：它已经是团队共识的那一条，再往终端里写一遍只是把它多留一份
+   * 在 shell 历史 / CI 日志里。这一屏只印「谁、用哪个邮箱登」。
    *
-   * P4-08 起登录名是**邮箱**（`<拼音>@123pan.com`，来自企微通讯录），所以这一行印的是
-   * 邮箱而不是名字：让 owner 抄下来的是**能用来登录的东西**。名字仍然在后面那列，
-   * 因为界面上、事件流里认的是名字——两列都要在，才不会有人以为登录也填名字。
+   * P4-08 起登录名是**邮箱**（`<拼音>@123pan.com`，来自企微通讯录），所以这一列印的是
+   * 邮箱而不是名字：能用来登录的是它。名字仍然在前面那列，因为界面上、事件流里认的是
+   * 名字——两列都要在，才不会有人以为登录也填名字。
    */
-  head('初始口令（只显示这一次，库里只有 scrypt 串）');
+  head('初始密码：团队统一的那一条（见 src/core/auth/password.ts 的 DEFAULT_MEMBER_PASSWORD）');
   for (const person of people) {
-    const password = generatePassword();
-    await setPassword(db, person.id, password);
-    log(`${padTo(person.name, 8)}${padTo(person.email, 26)}${padTo(person.role, 20)}${password}`);
+    await setPassword(db, person.id, DEFAULT_MEMBER_PASSWORD);
+    log(`${padTo(person.name, 8)}${padTo(person.email, 26)}${padTo(person.role, 20)}登录后可自己改`);
   }
   log('');
-  log('把这七行抄下来（登录用第二列那个邮箱）。丢了只能在设置页让超管重置（或重跑种子）。');
+  log('登录名就是第二列那个邮箱。改密码的入口在「我的 → 密码」。');
 
   // P1 没有 releases 服务（版本只有建表和排期时的一次读取），所以这两行只能落 SQL。
   const releaseRows = await db.execute<{ id: string; name: string }>(sql`

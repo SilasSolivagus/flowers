@@ -6,7 +6,9 @@ import { assertCan, requireActor } from '../auth/guard.js';
 import {
   isLine, isRole, NO_REQUIREMENT, ROLE_LABEL, type Line, type Member, type Role,
 } from '../auth/roles.js';
-import { assertPassword, generatePassword, hashPassword, setPassword } from '../auth/password.js';
+import {
+  assertPassword, DEFAULT_MEMBER_PASSWORD, generatePassword, hashPassword, setPassword,
+} from '../auth/password.js';
 import { requirePlainObject, asText, parseId } from '../validate.js';
 import {
   CHANNELS, CHANNEL_LABEL, isLevel, prefsJson, prefsOf,
@@ -30,8 +32,10 @@ import { resolveUserid } from '../notify/wecom.js';
  * 3. **条线是人的属性**。PM 也有条线（`line`），条线负责人必须有与自己角色对应的
  *    条线。超管没有条线。这三条在 `normalize` 里逐条校验——它们不是权限（权限只看
  *    role，见 roles.ts），而是「这个人在组织里的位置」，界面按它筛人。
- * 4. **口令只出现一次**。`createMember` 不传口令时生成一个、随返回值给出一次；
- *    `resetPassword` 同理。库里只有 scrypt 串，之后再也拿不回明文。
+ * 4. **口令只出现一次**。`createMember` 不传口令时用团队统一的那条（2026-11-10 起，
+ *    见 `DEFAULT_MEMBER_PASSWORD`）、随返回值给出一次；`resetPassword` 仍然随机生成
+ *    一条并只回显一次——「重置」是给忘了口令的人换一条新的，不该把它换回一个人人都
+ *    知道的值。库里只有 scrypt 串，之后再也拿不回明文。
  */
 
 const BAD_NAME = '名字不能为空';
@@ -92,7 +96,7 @@ export type CreateMemberInput = {
   email: string;
   role: Role;
   line: Line | null;
-  /** 不给就生成一个（返回值里带一次，之后就再也拿不到）。 */
+  /** 不给就用团队统一的初始口令（`DEFAULT_MEMBER_PASSWORD`，见 `password.ts`）。 */
   password?: string | null;
 };
 
@@ -129,8 +133,10 @@ export async function createMember(
     if (Number(taken.rows[0]?.n ?? 0) > 0) throw new AppError('conflict', DUPLICATE_EMAIL);
   }
 
+  // 不传口令 = 用团队统一的那一条（2026-11-10）。仍然**走一遍** `assertPassword`，
+  // 让「默认值」与「人手填的值」过同一道长度校验——否则默认值将来被改短时会静默绕过。
   const password = input.password === undefined || input.password === null
-    ? generatePassword()
+    ? assertPassword(DEFAULT_MEMBER_PASSWORD)
     : assertPassword(input.password);
   const hash = await hashPassword(password);
 
