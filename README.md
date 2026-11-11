@@ -87,8 +87,10 @@ inbox 收集 → design 待设计 → review 待评审 → queue 待排期 → r
 
 打印版（按用户故事地图组织，A4 横版一页）：
 
-- [普通 PM：从登录到接上自己的 agent](docs/pdf/flowers-从登录到接上agent-PM.pdf)
-- [条线负责人：从登录到接上自己的 agent](docs/pdf/flowers-从登录到接上agent-条线负责人.pdf)
+**分步手册**（按「第一步…第二步…」写的，可直接打印）：
+
+- [使用手册 · 普通 PM](docs/pdf/flowers-手册-PM.pdf)（[Markdown](docs/手册-PM.md)）
+- [使用手册 · 条线负责人](docs/pdf/flowers-手册-条线负责人.pdf)（[Markdown](docs/手册-条线负责人.md)）
 
 ---
 
