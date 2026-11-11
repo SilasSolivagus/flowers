@@ -146,6 +146,14 @@ function processFailure(bin: string, run: RunResult, timeoutMs: number): WecomFa
   }
   if (run.exitCode !== 0) {
     if (looksUnauthorized(combined)) return fail('unauthorized', MSG_UNAUTHORIZED);
+    /**
+     * 853008（2026-11-11）：**不是 userid 错了**，而是企微的规矩——机器人只能给「最近和
+     * 它说过话」的成员发消息。第一次用之前，那个人要先在企微里点开这个机器人发一句话。
+     * 原来这里把整段 JSON 原样吐出去，看起来像配置错误；换成一句能照着做的中文。
+     */
+    if (combined.includes('853008')) {
+      return fail('cli_failed', '这个成员还没和机器人说过话：请他在企微里打开「产品设计部经理-房超（老妖）」发任意一句话，之后推送就能到达。');
+    }
     const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
     const text = tail(run.stderr) || tail(run.stdout) || '（stderr 与 stdout 都是空的）';
     return fail('cli_failed', `${bin} 调用失败（${code}）：${text}`);
