@@ -291,8 +291,17 @@ function legalSentence(draft: Draft): string {
 }
 
 /** 描述尾部：权限 + 合法状态。两条都从声明里算，不手写。 */
+/**
+ * 工具说明的收尾（2026-11-11 加第三句）。
+ *
+ * 第三句是**给执行方式指路**：MCP 这一层说清「能不能做、为什么不能」，真正落地建议用
+ * 技能包里的脚本直接打 REST（`/api/v1/*`）——一个 tool call 的往返 + 二十几条描述
+ * 全进上下文，比二十行脚本贵得多。地址取 `FLOWERS_PUBLIC_URL`，没配就写相对路径。
+ */
 function trailer(draft: Draft): string {
-  return `权限：${scopeLabel(draft.scope)}。${legalSentence(draft)}`;
+  const base = (process.env.FLOWERS_PUBLIC_URL ?? '').replace(/\/+$/, '');
+  return `权限：${scopeLabel(draft.scope)}。${legalSentence(draft)}`
+    + `执行方式：技能包 ${base || ''}/api/v1/skills/flowers-ops（脚本直调 /api/v1/*，本回复只说明规则）。`;
 }
 
 function tool(draft: Draft): ToolDef {
@@ -963,8 +972,16 @@ function succeeded(blocks: string[]): CallToolResult {
 }
 
 /** 失败的结果：`isError: true` + 那句中文。内容与成功同形，客户端不需要第二种解析。 */
-function failed(message: string): CallToolResult {
-  return { content: [{ type: 'text', text: message }], isError: true };
+function failed(message: string, code?: string): CallToolResult {
+  // 第二段是给 `/api/v1` 那层读的机器码：MCP 客户端只看第一段中文，REST 要按 code 决定
+  // 403 / 404 / 409。不带 code 时保持原来的一行——工具错误与协议错误是两件事。
+  return {
+    content: [{ type: 'text', text: message }],
+    // 机器码放 `_meta`，**不进正文**：MCP 客户端读的是那句中文，而正文一旦多出一段
+    // JSON，既有的「错误原文逐字相等」用例会全部红掉（也确实是把话说脏了）。
+    ...(code === undefined ? {} : { _meta: { code } }),
+    isError: true,
+  };
 }
 
 /**
@@ -991,7 +1008,9 @@ export async function runTool(
   try {
     return succeeded(await def.call(identity, args));
   } catch (error) {
-    if (error instanceof AppError) return failed(error.message);
+    // code 一起交回去（2026-11-11）：REST 面要按它决定 HTTP 状态（403 / 404 / 409）。
+    // MCP 客户端读的是第一段中文，多出来的第二段是给 `/api/v1` 那层看的。
+    if (error instanceof AppError) return failed(error.message, error.code);
     console.error('[flowers-mcp] 未预期错误：', error);
     throw error;
   }
