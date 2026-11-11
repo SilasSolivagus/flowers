@@ -46,6 +46,7 @@ node flowers.mjs assign 380 --member <uuid>  # 转交（条线负责人只能转
 node flowers.mjs action 380 start-design     # 状态动作，见下表
 node flowers.mjs action 380 submit-review --json '{"prdUrl":"https://…"}'
 node flowers.mjs attach 380 evaluate --url /uemaster/PAN-380/evaluate-v001.html
+node flowers.mjs upload 380 evaluate --file ./evaluate.html   # 本地生成好的 HTML 直接传
 node flowers.mjs plan 380 evaluate           # 取 UEmaster 任务包（不含状态变更）
 node flowers.mjs members                     # 成员与 UUID
 node flowers.mjs releases                    # 版本与 UUID

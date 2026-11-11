@@ -5,6 +5,8 @@ import path from 'node:path';
 import { db } from '../db/client.js';
 import { authenticate } from '../../mcp/tokens.js';
 import { runTool, toolByName } from '../../mcp/tools.js';
+import { AppError } from '../core/errors.js';
+import { uploadArtifact } from '../core/uemaster/upload.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
@@ -128,6 +130,11 @@ const ROUTES: Route[] = [
     pattern: '/requirements/:id/plan',
     tool: 'uemaster_plan',
     args: ({ params, body }) => ({ ...body, requirementId: params.id }),
+  },
+  {
+    method: 'POST',
+    pattern: '/requirements/:id/artifacts/upload',
+    args: () => ({}),
   },
   {
     method: 'POST',
@@ -290,6 +297,27 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   }
 
   const { route, params } = matched;
+
+  // 上传口（2026-11-11）：multipart 单独处理——它没有 JSON body，也不能过工具的 zod 层。
+  if (pathname.endsWith('/artifacts/upload') && request.method === 'POST') {
+    const form = await request.formData().catch(() => null);
+    const file = form?.get('file');
+    const stage = String(form?.get('stage') ?? '');
+    if (!(file instanceof File)) return json({ error: 'invalid_file', message: '要带一个 file 字段（.html）' }, 400);
+    try {
+      const got = await uploadArtifact(db, auth.identity.member, {
+        requirementId: params.id!, stage, fileName: file.name,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+      });
+      return json(got);
+    } catch (error) {
+      if (error instanceof AppError) {
+        return json({ error: error.code, message: error.message }, STATUS_BY_CODE[error.code] ?? 400);
+      }
+      throw error;
+    }
+  }
+
   const body = await readJsonBody(request);
   const args = route.args?.({ params, query: url.searchParams, body }) ?? {};
   // 动作别名：/actions/* 那条路由把工具名藏在参数里。

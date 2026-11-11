@@ -92,6 +92,20 @@ switch (command) {
     await call('POST', `/api/v1/requirements/${id}/artifacts`, { stage: positional[1], url: flags.url });
     break;
   }
+  case 'upload': {
+    if (!id || !positional[1] || !flags.file) die('用法：upload <UUID> <evaluate|review|inspect> --file ./x.html');
+    if (TOKEN === '') die('请先设置 FLOWERS_TOKEN');
+    const bytes = readFileSync(flags.file);
+    const form = new FormData();
+    form.set('stage', positional[1]);
+    form.set('file', new Blob([bytes], { type: 'text/html' }), flags.file.split('/').pop());
+    const res = await fetch(`${API}/api/v1/requirements/${id}/artifacts/upload`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: form,
+    });
+    console.log(JSON.stringify(await res.json(), null, 2));
+    if (!res.ok) process.exit(1);
+    break;
+  }
   case 'plan': {
     if (!id || !positional[1]) die('用法：plan <UUID> <evaluate|review|inspect>');
     await call('POST', `/api/v1/requirements/${id}/plan`, { stage: positional[1] });
