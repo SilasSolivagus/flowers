@@ -120,7 +120,13 @@ async function main(): Promise<void> {
       await db.transaction(async (tx) => {
         await recordEvent(tx, {
           requirementId: row.id, actor: 'system', type: 'requirement.created',
-          payload: { importedFrom: '企微汇总表 kvf2dh', row: item.row.num, batch: 'sheet-queue-import-20261111' },
+          payload: {
+            importedFrom: '企微汇总表 kvf2dh',
+            row: item.row.num,
+            // batch 让这条事件不进通知（`read/notify.ts` 的 notBatch）：一次导入 8 条，
+            // 每条都推给负责人就是刷屏。
+            batch: 'sheet-queue-import-20261111',
+          },
         });
         await recordEvent(tx, {
           requirementId: row.id, actor: 'system', type: 'requirement.review_passed',

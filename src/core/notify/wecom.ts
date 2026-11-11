@@ -292,6 +292,15 @@ export const SEND_TIMEOUT_MS = 30_000;
  * 于是把个人机器人接到一个群之后（李嘉那种用法），群里看到的是一串没有主语的搁置通知
  * ——「谁动的、什么时候动的」全靠猜。两个频道说同一件事，就不该只在一个频道里署名。
  */
+/**
+ * 私聊里不发 HTML：`<font color="…">` 在企微单聊 markdown 里有效，但个人机器人常常被
+ * 接到第三方群桥（2026-11-11 李嘉那次），那边会把标签原样显示出来——读者看到的是
+ * `<font color="comment">系统 · 11-11 10:50</font>` 这种噪音。私聊不需要颜色，剥掉。
+ */
+function stripTags(text: string): string {
+  return text.replace(/<\/?font[^>]*>/g, '');
+}
+
 export function messageOf(
   headline: string,
   sentence: string,
@@ -302,7 +311,7 @@ export function messageOf(
     const actor = meta.actor === 'system' ? '系统' : meta.actor;
     lines.push(`<font color="comment">${actor} · ${meta.timeText(meta.at)}</font>`);
   }
-  return stripWrappers(redact(lines.join('\n')));
+  return stripWrappers(stripTags(redact(lines.join('\n'))));
 }
 
 export type SendOptions = {

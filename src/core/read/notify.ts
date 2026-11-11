@@ -151,8 +151,11 @@ function clip(text: string, max = 30): string {
  */
 export function sentenceOf(type: string, payload: Payload): string {
   switch (type) {
-    case 'requirement.created':
+    case 'requirement.created': {
+      const imported = text(payload, 'importedFrom');
+      if (imported !== null) return `从「${imported}」导入`;
       return '进入收集，等提出人补必填';
+    }
     case 'requirement.evaluated':
       return '进入待设计，等负责人出正式 PRD';
     case 'requirement.review_requested':
@@ -179,10 +182,32 @@ export function sentenceOf(type: string, payload: Payload): string {
       const to = text(payload, 'to');
       return to ? `负责人改成 ${to}` : '换了负责人';
     }
-    default:
-      return '有新的流转';
+    /**
+     * 状态变更（2026-11-11）：原来落到 `default` 的一句「有新的流转」——谁、从哪到哪
+     * 全没有，读者只能去页面里翻。带上 from → to 的中文名，一句话就能自己判断要不要管。
+     * 导入类事件（payload 里带 `importedFrom`）另说一句，免得看起来像有人在动手。
+     */
+    case 'requirement.state_changed': {
+      const from = text(payload, 'from');
+      const to = text(payload, 'to');
+      const fromLabel = from === null ? '—' : (STATE_TEXT[from] ?? from);
+      const toLabel = to === null ? '—' : (STATE_TEXT[to] ?? to);
+      return `${fromLabel} → ${toLabel}`;
+    }
+    case 'requirement.rescheduled':
+      return '改了排期（版本 / 提测日 / 承诺完成日）';
+    default: {
+      const imported = text(payload, 'importedFrom');
+      return imported === null ? '有新的流转' : `从「${imported}」导入`;
+    }
   }
 }
+
+/** 状态键 → 中文（与群播报用的是同一张表；那两张表不能各写一份）。 */
+const STATE_TEXT: Record<string, string> = {
+  inbox: '收集', design: '待设计', review: '待评审', queue: '待排期', ready: '待开发',
+  dev: '开发中', test: '测试中', live: '已上线', rejected: '已拒绝', shelved: '已搁置',
+};
 
 /** 那一行开头的身份：`PAN-12「导出任务队列」`。企微消息的第一行加粗就是它。 */
 export function keyOf(number: number, title: string): string {
