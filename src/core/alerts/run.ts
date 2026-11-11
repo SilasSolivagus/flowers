@@ -158,16 +158,60 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
     return res.rows.map((row) => row.label).filter((label) => label.trim() !== '').slice(0, 3);
   };
 
+  /**
+   * 每个告警要 @ 谁（2026-11-11 owner：群里必须 @ 到人）。
+   *
+   * 名单 = 样本里那几条的负责人 + 他们条线的负责人（同一行里 `role` 为条线负责人的成员）。
+   * 没有 wecom_userid 的人不进名单——企微 @ 需要 userid，@ 一个名字是空动作。
+   */
+  const mentionRows = async (query: ReturnType<typeof sql>): Promise<Array<{
+    userid: string; name: string; lead: boolean;
+  }>> => {
+    const res = await db.execute<{ userid: string; name: string; lead: boolean }>(query);
+    const seen = new Map<string, { userid: string; name: string; lead: boolean }>();
+    for (const row of res.rows) if (!seen.has(row.userid)) seen.set(row.userid, row);
+    return [...seen.values()].slice(0, 5);
+  };
+
+  const OWNER_AND_LEAD = sql`
+    select distinct u.wecom_userid as userid, u.name as name,
+           (u.role in ('feature_reviewer','commercial_reviewer')) as lead
+      from requirements r
+      join members o on o.id = r.owner_member_id
+      join members u on u.id = o.id
+                      or (u.role in ('feature_reviewer','commercial_reviewer') and u.line = o.line)
+     where r.deleted_at is null and u.wecom_userid is not null and u.wecom_userid <> ''`;
+
+  const mentions: Record<string, Array<{ userid: string; name: string; lead: boolean }>> = {
+    queue_backlog: await mentionRows(sql`${OWNER_AND_LEAD} and r.state = 'queue'`),
+    stuck: await mentionRows(sql`${OWNER_AND_LEAD}
+      and ((r.state = 'review' and r.state_entered_at < now() - interval '5 days')
+        or (r.state = 'queue' and r.state_entered_at < now() - interval '5 days')
+        or (r.state = 'dev' and r.state_entered_at < now() - interval '10 days'))`),
+    inbox_overdue: await mentionRows(sql`${OWNER_AND_LEAD}
+      and r.state = 'inbox' and r.state_entered_at < now() - interval '14 days'`),
+    release_late: await mentionRows(sql`${OWNER_AND_LEAD} and r.release_id is not null
+      and r.state not in ('live','rejected','shelved') and r.commit_due_at < now()`),
+    release_untested: await mentionRows(sql`${OWNER_AND_LEAD}
+      and r.release_id is not null and r.state = 'ready'`),
+    personal_failed: await mentionRows(sql`
+      select distinct u.wecom_userid as userid, u.name as name, false as lead
+        from notify_deliveries d join members u on u.id = d.member_id
+       where d.channel = 'wecom' and d.status = 'failed'
+         and d.created_at > now() - interval '2 hours'
+         and u.wecom_userid is not null`),
+  };
+
   const samples: Record<string, string[]> = {
     queue_backlog: await sample(sql`
       select 'PAN-' || number || ' ' || left(title, 18) || coalesce(' · ' || m.name, ' · 未指派')
-             || ' · ' || extract(day from now() - state_entered_at)::int || ' 天' as label
+             || ' · ' || ${SAMPLE_AGE} as label
         from requirements r left join members m on m.id = r.owner_member_id
        where r.deleted_at is null and r.state = 'queue'
-       order by state_entered_at asc limit 3`),
+       order by coalesce(r.state_entered_at, now()) asc limit 3`),
     stuck: await sample(sql`
       select 'PAN-' || number || ' ' || left(title, 18) || ' · ' || coalesce(m.name, '未指派')
-             || ' · ' || extract(day from now() - state_entered_at)::int || ' 天' as label
+             || ' · ' || ${SAMPLE_AGE} as label
         from requirements r left join members m on m.id = r.owner_member_id
        where r.deleted_at is null
          and ((state = 'review' and state_entered_at < now() - interval '5 days')
@@ -221,7 +265,7 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
   };
 
   return {
-    samples,
+    samples, mentions,
     groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateStatus,
     personalFailedRecent, queueBacklog, stuck, inboxOverdue,
     lateReleases, untestedNearRelease, unboundMembers, duplicateTitles,
@@ -255,6 +299,24 @@ async function probeGate(): Promise<number | null> {
   }
 }
 
+/**
+ * 样本里的「多久了」：**从事件表回溯**最后一次进入当前状态的时刻。
+ *
+ * 迁移把 `state_entered_at` 一律刷成切换那天，直接用它算会得到「208 天」这种假数字。
+ * 事件里有「进入这个状态」的记录，取最后一次即可；没有记录（迁移来的）就退回
+ * `state_entered_at`，并在文案里说「自迁移起」。
+ */
+const SAMPLE_AGE = sql`(
+  select case
+    when last.at is null then '自迁移起 ' || greatest(extract(day from now() - r.state_entered_at)::int, 0) || ' 天'
+    when now() - last.at < interval '1 day' then '刚进来'
+    else extract(day from now() - last.at)::int || ' 天'
+  end
+  from (select (select max(e.at) from events e
+                 where e.requirement_id = r.id
+                   and e.payload::jsonb ->> 'to' = r.state) as at) last
+)`;
+
 function webhookBase(): string {
   return (process.env.FLOWERS_PUBLIC_URL ?? '').replace(/\/+$/, '');
 }
@@ -266,7 +328,38 @@ function webhookBase(): string {
  * 现在固定四段：**级别 → 现在多少 → 具体哪几条 → 下一步（带链接）**，最后一行说明
  * 多久再提醒。不是越长越好：例子最多 3 条，其余说「等」。
  */
-export function renderAlert(alert: Alert, base: string): string {
+/**
+ * 带 @ 的文本消息。`send` 是注入的那条通道（测试里是假的），所以这里只拼请求体，
+ * 真正的 POST 仍走 `sendWebhook`——它认 markdown；text 需要另一条路径。
+ */
+async function sendTextWithMentions(
+  webhook: string,
+  text: string,
+  userids: string[],
+  _send: (webhook: string, text: string) => Promise<{ ok: boolean; message?: string }>,
+): Promise<{ ok: boolean; message?: string }> {
+  const response = await fetch(webhook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      msgtype: 'text',
+      text: { content: text, mentioned_list: userids },
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) return { ok: false, message: `HTTP ${response.status}` };
+  const payload = (await response.json().catch(() => ({}))) as { errcode?: number; errmsg?: string };
+  if (payload.errcode !== undefined && payload.errcode !== 0) {
+    return { ok: false, message: `errcode ${payload.errcode}：${payload.errmsg ?? ''}` };
+  }
+  return { ok: true };
+}
+
+export function renderAlert(
+  alert: Alert,
+  base: string,
+  targets: Array<{ userid: string; name: string; lead: boolean }> = [],
+): string {
   const lines = [
     `**[告警 · ${LEVEL_LABEL[alert.level]}] ${alert.title}**`,
     `现在：${alert.detail}`,
@@ -275,6 +368,13 @@ export function renderAlert(alert: Alert, base: string): string {
     lines.push('具体是：');
     for (const sample of alert.samples) lines.push(`· ${sample}`);
     if (alert.samples.length === 3) lines.push('· ……其余不逐条列');
+  }
+  if (targets.length > 0) {
+    const leads = targets.filter((t) => t.lead).map((t) => t.name);
+    lines.push(`相关人：${targets.map((t) => `@${t.name}`).join(' ')}`);
+    if (leads.length > 0) {
+      lines.push(`其中 ${leads.join('、')} 是条线负责人，请安排人处理（派活 / 改排期 / 搁置）。`);
+    }
   }
   lines.push(`下一步：${alert.nextStep}`);
   if (base !== '') lines.push(base + alert.link);
@@ -321,7 +421,25 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       run.failed.push(`${alert.key}：没有可用的群机器人地址`);
       continue;
     }
-    const text = renderAlert(alert, webhookBase());
+    const targets = snapshot.mentions?.[alert.key] ?? [];
+    const mentioned = targets.filter((t) => t.userid.trim() !== '');
+    const text = renderAlert(alert, webhookBase(), mentioned);
+
+    /**
+     * 有要 @ 的人 → 用 **text** 消息（企微只有 text 支持 mentioned_list；markdown 不行），
+     * 没有要 @ 的人 → 仍用 markdown（能加粗、能点链接）。
+     * 这是企微的能力边界，不是我们偷懒。
+     */
+    if (mentioned.length > 0) {
+      const res = await sendTextWithMentions(webhook, text, mentioned.map((t) => t.userid), send);
+      if (res.ok) {
+        await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());
+        run.sent.push(alert.key);
+      } else {
+        run.failed.push(`${alert.key}：${res.message ?? '发送失败'}`);
+      }
+      continue;
+    }
     const result = await send(webhook, text);
     if (result.ok) {
       await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());

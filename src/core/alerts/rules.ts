@@ -39,6 +39,8 @@ export const LEVEL_LABEL: Record<AlertLevel, string> = {
 export type Snapshot = {
   /** 每条告警要举的例子（key 与 Alert.key 对应，最多 3 条）。 */
   samples: Record<string, string[]>;
+  /** 每个告警要 @ 的人（userid + 是不是条线负责人）。空 = 不 @。 */
+  mentions?: Record<string, Array<{ userid: string; name: string; lead: boolean }>>;
   /** 个人推送：近 2 小时失败条数（P1）。 */
   personalFailedRecent: number;
   /** 待排期积压条数。 */
