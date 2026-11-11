@@ -1475,6 +1475,7 @@ export function missingProviderText(): string {
   const absent = ENV_KEYS.filter((key) => (process.env[key] ?? '').trim() === '');
   const names = absent.length > 0 ? absent.join('、') : ENV_KEYS.join('、');
   return `未配置模型接口：${names} 没有设置，库里也没有完整的「接口地址 + API Key + 模型名」。`
+    + '平台统一模型只对超管本人开放——请到「设置 · 我的 → 模型」填自己的接口地址、API Key 与模型名。';
     + '在「设置」里填这三格，或用这三个环境变量注入之后再试。';
 }
 

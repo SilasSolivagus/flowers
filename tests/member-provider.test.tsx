@@ -147,23 +147,23 @@ describe('P2.12 成员作用域的三格', () => {
     expect((await resolveProvider('房超'))?.scope).toBe('platform');
   });
 
-  it('只填了一格：整层作废、退回平台那一份——不拼半份', async () => {
+  it('只填了一格：整层作废——不拼半份，也不退到平台（平台只给超管）', async () => {
     const id = await idOf('吕品');
     await saveProviderSettings(db, PLATFORM);
     // 只填了 key（地址与模型留空）：这不是一份能发请求的配置。
     await saveMemberProviderSettings(db, id, { apiKey: 'sk-half-000000' });
 
     expect(await memberProviderSettings(db, id)).toBeNull();
-    expect(await resolveProviderConfig('吕品')).toEqual(PLATFORM);
-    // 关键的一格：地址必须是平台的，而不是他自己的（那样等于把他的 key 发到别处）。
-    expect((await resolveProviderConfig('吕品'))?.baseUrl).toBe(PLATFORM.baseUrl);
+    // 2026-11-11：平台那三格只服务超管本人，PM 半份配置 = 没有配置。
+    expect(await resolveProviderConfig('吕品')).toBeNull();
   });
 
-  it('一格都没填：退回平台那一份', async () => {
+  it('一格都没填：PM 拿不到平台那份；超管才拿得到', async () => {
     const id = await idOf('吕品');
     await saveProviderSettings(db, PLATFORM);
     expect(await memberProviderSettings(db, id)).toBeNull();
-    expect(await resolveProviderConfig('吕品')).toEqual(PLATFORM);
+    expect(await resolveProviderConfig('吕品')).toBeNull();
+    expect(await resolveProviderConfig('房超')).toEqual(PLATFORM);
   });
 
   it('两层都没有：null（「还没配」，不是错误）', async () => {
@@ -188,11 +188,11 @@ describe('P2.12 成员作用域的三格', () => {
     }
   });
 
-  it('名册里没有这个人：静默跳过成员那一层，退回平台', async () => {
+  it('名册里没有这个人：两层都不给（身份不明不动别人的 key）', async () => {
     const id = await idOf('吕品');
     await saveMemberProviderSettings(db, id, OWN);
     await saveProviderSettings(db, PLATFORM);
-    expect(await resolveProviderConfig('查无此人')).toEqual(PLATFORM);
+    expect(await resolveProviderConfig('查无此人')).toBeNull();
   });
 
   it('resolveStrategy 问的是这次生成的那个人', async () => {
@@ -216,13 +216,13 @@ describe('P2.12 成员作用域的三格', () => {
     expect((await resolveStrategy('吕品')).kind).toBe('provider');
   });
 
-  it('删掉地址与模型（空串）等于清掉这一份，退回平台', async () => {
+  it('删掉地址与模型（空串）等于清掉这一份；PM 因此拿不到任何配置', async () => {
     const id = await idOf('吕品');
     await saveProviderSettings(db, PLATFORM);
     await saveMemberProviderSettings(db, id, OWN);
     await saveMemberProviderSettings(db, id, { baseUrl: '', model: '' });
     expect(await memberProviderSettings(db, id)).toBeNull();
-    expect(await resolveProviderConfig('吕品')).toEqual(PLATFORM);
+    expect(await resolveProviderConfig('吕品')).toBeNull();
   });
 
   it('保存时去掉首尾空白，并在超长时拒绝（不写坏已有的一格）', async () => {

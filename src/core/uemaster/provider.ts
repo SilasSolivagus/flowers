@@ -1,3 +1,5 @@
+import { sql } from 'drizzle-orm';
+
 import { db as appDb } from '../../db/client.js';
 import { memberIdByName } from '../read/member.js';
 import { memberProviderSettings } from './member-provider.js';
@@ -392,6 +394,21 @@ export async function resolveProvider(actor?: string): Promise<ProviderResolutio
     }
   }
 
+  /**
+   * 平台三格**只服务超管本人**（2026-11-11 owner 的口径：只有超管能用他那把 key）。
+   *
+   * 之前是所有人在没配自己 key 时都退到这一层，等于全组花超管的额度、而用量记不到人头上。
+   * 现在：actor 不是超管 → 这一层直接不参与，函数返回 null，调用方如实报「未配置模型」。
+   * 传了 actor 但查不到那个人（离职/手改 cookie）同样不给——身份不明就不该动别人的 key。
+   * 不传 actor（脚本、worker 兜底、平台自检）仍然可以拿平台三格：那是我在给自己跑。
+   */
+  if (actor === undefined) {
+    const platform = await providerSettings(appDb);
+    return platform === null ? null : { config: platform, scope: 'platform' };
+  }
+  const actorRole = await appDb.execute<{ role: string }>(
+    sql`select role from members where name = ${actor} limit 1`);
+  if (actorRole.rows[0]?.role !== 'product_owner') return null;
   const platform = await providerSettings(appDb);
   return platform === null ? null : { config: platform, scope: 'platform' };
 }
