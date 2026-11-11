@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
+import { findDuplicates } from './duplicates.js';
 import { AppError, withPgErrors } from '../errors.js';
 import { requirePlainObject } from '../validate.js';
 import { assertCan, requireActor } from '../auth/guard.js';
@@ -257,6 +258,11 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
       // 时间轴要回答的是「建的时候填了没有」，不是「大概率算哪一类」。
       payload: { number, title: input.title, type, source },
     });
-    return { id: row.id, number, state: row.state as 'inbox' };
+    // 建完之后附一句「像它的那几条」（2026-11-11）：不拦，只让人/agent 看见。
+    const duplicates = await findDuplicates(db, input.title);
+    return {
+      id: row.id, number, state: row.state as 'inbox',
+      ...(duplicates.length === 0 ? {} : { duplicates }),
+    };
   }));
 }
