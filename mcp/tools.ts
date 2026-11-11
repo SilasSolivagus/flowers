@@ -970,7 +970,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: 'requirement_reopen',
     title: '退回待开发（开发中 → 待开发）',
     scope: 'write',
-    action: null,
+    action: 'reopen',
     inputSchema: terminalReasonInput,
     purpose: '开发中发现接错了 / 方案变了，把需求退回「待开发」重新排期，原因必填。'
       + '与 requirement_bounce 不同：那是「测试没过」，这是「还没真正开始」。'

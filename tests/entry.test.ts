@@ -285,9 +285,11 @@ describe('updateRequirement', () => {
     expect(events.rows).toHaveLength(0);
   });
 
-  it('type / requester / state 一律报 not_editable（不静默丢弃）', async () => {
+  it('requester / state 报 not_editable；type 从 2026-11-11 起可以改', async () => {
     const req = await makeDescribed();
-    for (const [key, label] of [['type', '类型'], ['requester', '提出人'], ['state', '状态']] as const) {
+    // 类型已开放（B6）：能改，且写一条事件。
+    await updateRequirement(db, '吕品', { requirementId: req.id, type: 'commercial' });
+    for (const [key, label] of [['requester', '提出人'], ['state', '状态']] as const) {
       const err = await error(updateRequirement(db, '吕品', {
         requirementId: req.id, title: '改个标题', [key]: key === 'type' ? 'commercial' : 'x',
       }));
@@ -297,7 +299,8 @@ describe('updateRequirement', () => {
     // 一个字都没写进去
     const detail = await getRequirementDetail(req.id);
     expect(detail!.title).toBe('分享页搜索');
-    expect(detail!.info.type).toBe('feature');
+    // 类型这一格上面已经改成 commercial 了；这里确认「被拒那两个字段一个字都没动」。
+    expect(detail!.info.type).toBe('commercial');
     expect(detail!.info.requester).toBe('王妍');
   });
 
