@@ -41,6 +41,7 @@ const LABEL: Record<DetailAction, string> = {
   reject: '拒绝',
   shelve: '搁置',
   rollback: '回滚',
+  reopen: '退回待开发',
   restore: '恢复',
 };
 
@@ -75,6 +76,7 @@ const FIELDS: Record<DetailAction, Field[]> = {
   shelve: [{ name: 'reason', label: '原因', kind: 'text' }],
   // 回滚的原因必填：三个月后翻事件流，「为什么撤回」只有这一句话能回答。
   rollback: [{ name: 'reason', label: '原因', kind: 'text' }],
+  reopen: [{ name: 'reason', label: '原因', kind: 'text' }],
   restore: [],
 };
 

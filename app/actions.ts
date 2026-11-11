@@ -13,6 +13,7 @@ import { submitReview } from '../src/core/requirements/submit-review';
 import { reviewPass, reviewReject } from '../src/core/requirements/review';
 import { schedule } from '../src/core/requirements/schedule';
 import { reschedule } from '../src/core/requirements/reschedule';
+import { reopenRequirement } from '../src/core/requirements/reopen';
 import { bounce } from '../src/core/requirements/bounce';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
@@ -287,6 +288,13 @@ export async function rejectAction(formData: FormData): Promise<ActionResult> {
   return run((actor) => rejectRequirement(db, actor, { requirementId, reason }));
 }
 
+/** 退回待开发（2026-11-11）：dev → ready，原因必填。 */
+export async function reopenAction(formData: FormData): Promise<ActionResult> {
+  const requirementId = field(formData, 'id');
+  const reason = field(formData, 'reason');
+  return run((actor) => reopenRequirement(db, actor, { requirementId, reason }));
+}
+
 /** 搁置：任何非终态 → shelved。原因必填。 */
 export async function shelveAction(formData: FormData): Promise<ActionResult> {
   const requirementId = field(formData, 'id');
@@ -322,6 +330,7 @@ const ACTIONS: Record<DetailAction, (formData: FormData) => Promise<ActionResult
   shelve: shelveAction,
   restore: restoreAction,
   rollback: rollbackAction,
+  reopen: reopenAction,
 };
 
 /**
