@@ -87,8 +87,8 @@ inbox 收集 → design 待设计 → review 待评审 → queue 待排期 → r
 
 打印版（按用户故事地图组织，A4 横版一页）：
 
-- [普通 PM 的故事地图](docs/pdf/flowers-用户故事地图-PM.pdf)
-- [条线负责人的故事地图](docs/pdf/flowers-用户故事地图-条线负责人.pdf)
+- [普通 PM：从登录到接上自己的 agent](docs/pdf/flowers-从登录到接上agent-PM.pdf)
+- [条线负责人：从登录到接上自己的 agent](docs/pdf/flowers-从登录到接上agent-条线负责人.pdf)
 
 ---
 
