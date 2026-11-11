@@ -83,16 +83,15 @@ export function ReleasePlan({
         </table>
       )}
 
-      {candidates.length === 0 ? (
-        <p className="muted">待排期里没有可以加进来的需求（要有正式 PRD）。</p>
-      ) : (
-        <AddForm
-          releaseId={releaseId}
-          windowStart={windowStart}
-          releaseDate={releaseDate}
-          candidates={candidates}
-        />
-      )}
+      {/* 候选为空时**也把表单画出来**（2026-11-11 的第二次修正）：
+          上一版直接把整块藏掉，页面上只剩一句灰字，owner 找不到「添加需求」在哪。
+          现在表单一直在，只是下拉没得选、按钮禁用，并在旁边说清为什么。 */}
+      <AddForm
+        releaseId={releaseId}
+        windowStart={windowStart}
+        releaseDate={releaseDate}
+        candidates={candidates}
+      />
     </section>
   );
 }
@@ -155,8 +154,11 @@ function AddForm({
           name="id"
           value={selected}
           onChange={(event) => setSelected(event.target.value)}
+          disabled={candidates.length === 0}
         >
-          {candidates.map((c) => (
+          {candidates.length === 0 ? (
+            <option value="">（待排期里没有可加的需求）</option>
+          ) : candidates.map((c) => (
             <option key={c.id} value={c.id}>
               PAN-{c.number} {c.title}
             </option>
@@ -171,9 +173,16 @@ function AddForm({
         <span>承诺完成日</span>
         <input type="date" name="commitDueAt" defaultValue={releaseDate} required />
       </label>
-      <button className="btn sm primary" type="submit" disabled={pending || selected === ''}>
+      <button
+        className="btn sm primary"
+        type="submit"
+        disabled={pending || selected === '' || candidates.length === 0}
+      >
         {pending ? '加入中…' : '加入本版本'}
       </button>
+      {candidates.length === 0 && (
+        <span className="muted">待排期里没有可加的需求：需求要先进「待排期」并且有正式 PRD。</span>
+      )}
       {!state.ok && <span className="dfail" role="alert">{state.message}</span>}
     </form>
   );

@@ -112,6 +112,23 @@ export default async function ReleasesPage({
         )}
       </div>
       {current !== null && (
+        <ReleasePlan
+          releaseId={current.id}
+          windowStart={current.windowStart.slice(0, 10)}
+          releaseDate={current.releaseDate.slice(0, 10)}
+          items={current.requirements.map((item) => ({
+            id: item.id,
+            number: item.number,
+            title: item.title,
+            stateLabel: item.stateLabel,
+            commitTestAt: item.commitTestAt,
+            commitDueAt: item.commitDueAt,
+          }))}
+          candidates={releasable}
+        />
+      )}
+
+      {current !== null && (
         <div className="vver">
           <section className="panel">
             <div className="ph">甘特</div>
@@ -151,23 +168,6 @@ export default async function ReleasesPage({
             </section>
           </div>
         </div>
-      )}
-
-      {current !== null && (
-        <ReleasePlan
-          releaseId={current.id}
-          windowStart={current.windowStart.slice(0, 10)}
-          releaseDate={current.releaseDate.slice(0, 10)}
-          items={current.requirements.map((item) => ({
-            id: item.id,
-            number: item.number,
-            title: item.title,
-            stateLabel: item.stateLabel,
-            commitTestAt: item.commitTestAt,
-            commitDueAt: item.commitDueAt,
-          }))}
-          candidates={releasable}
-        />
       )}
 
       {creating && (
