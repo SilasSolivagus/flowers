@@ -45,7 +45,9 @@ export async function mintMcpTokenAction(formData: FormData): Promise<MintResult
     if (memberId === null) throw new AppError('member_unknown', `当前成员「${actor}」不在名册上`);
 
     const scopes = field(formData, 'scopes');
-    if (!isScope(scopes)) throw new AppError('invalid', '权限只能是 read、write、admin 之一');
+    // 只有两级（read ⊂ write），**没有 admin**——这里原来写着「read、write、admin」，
+    // 而 `SCOPES` 里根本没有 admin，照着填会得到一句「参数不合法」却不知道错在哪。
+    if (!isScope(scopes)) throw new AppError('invalid', '权限只能是 read、write 之一');
 
     const minted = await mintToken(db, { memberId, label: field(formData, 'label'), scopes });
     return {
