@@ -5,6 +5,7 @@ import { tick } from '../clock/tick.js';
 import type { Skipped } from '../clock/skips.js';
 import { pendingDeliveries, type DeliveryCandidate } from '../read/notify.js';
 import { prefsOf, type Level } from './prefs.js';
+import { eventTimeText } from './group.js';
 import { checkWecomBindings, type BindingAlert } from './self-heal.js';
 import {
   lookupUserid, messageOf, resolveUserid, sendMarkdown, sendWebhook,
@@ -227,7 +228,9 @@ export async function dispatchWecom(
     const ownWebhook = typeof member.wecomWebhook === 'string' ? member.wecomWebhook.trim() : '';
     if (ownWebhook !== '') {
       for (const candidate of candidates) {
-        const content = messageOf(candidate.headline, candidate.sentence);
+        const content = messageOf(candidate.headline, candidate.sentence, {
+          actor: candidate.actor, at: candidate.at, timeText: eventTimeText,
+        });
         if (dryRun) {
           run.planned += 1;
           summary.planned += 1;
@@ -269,7 +272,9 @@ export async function dispatchWecom(
     }
 
     for (const candidate of candidates) {
-      const content = messageOf(candidate.headline, candidate.sentence);
+      const content = messageOf(candidate.headline, candidate.sentence, {
+        actor: candidate.actor, at: candidate.at, timeText: eventTimeText,
+      });
       if (dryRun) {
         run.planned += 1;
         summary.planned += 1;

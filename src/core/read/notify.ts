@@ -400,6 +400,8 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
 type NoticeRow = {
   seq: number;
   at: string | Date;
+  /** 谁动的（2026-11-11：私聊消息也要写清「谁 · 什么时候」）。 */
+  actor: string;
   type: string;
   /** 成员级提醒（`member.*`）没有需求可挂；`release.*` 也是这一类。 */
   requirement_id: string | null;
@@ -447,7 +449,7 @@ export async function notificationsFor(
 ): Promise<Notice[]> {
   const limit = limitOf(opts.limit);
   const res = await db.execute<NoticeRow>(sql`
-    select e.seq, e.at, e.type, e.requirement_id, e.payload,
+    select e.seq, e.at, e.actor, e.type, e.requirement_id, e.payload,
            r.number, r.title,
            coalesce(nr.last_seq, 0) as last_seq
       ${EVENTS_FROM}
@@ -462,6 +464,7 @@ export async function notificationsFor(
     return {
       eventSeq: Number(row.seq),
       at: asIso(row.at),
+      actor: typeof row.actor === 'string' ? row.actor : '',
       type: row.type,
       requirementId: row.requirement_id,
       number,
@@ -501,6 +504,8 @@ export type DeliveryCandidate = {
   headline: string;
   /** 第二行：一句话说清发生了什么、要他做什么。 */
   sentence: string;
+  /** 谁动的（2026-11-11）：私聊消息的末行要写「谁 · 什么时候」。 */
+  actor: string;
 };
 
 export async function pendingDeliveries(
@@ -510,7 +515,7 @@ export async function pendingDeliveries(
 ): Promise<DeliveryCandidate[]> {
   const limit = limitOf(opts.limit);
   const res = await db.execute<NoticeRow>(sql`
-    select e.seq, e.at, e.type, e.requirement_id, e.payload,
+    select e.seq, e.at, e.actor, e.type, e.requirement_id, e.payload,
            r.number, r.title,
            0 as last_seq
       ${EVENTS_FROM}
@@ -539,6 +544,7 @@ export async function pendingDeliveries(
     return {
       eventSeq: Number(row.seq),
       at: asIso(row.at),
+      actor: typeof row.actor === 'string' ? row.actor : '',
       type: row.type,
       cls: classOf(row.type),
       requirementId: row.requirement_id,

@@ -277,8 +277,24 @@ export const SEND_TIMEOUT_MS = 30_000;
  * `redact` + `stripWrappers` 是两道闸：标题和原因都是**人写进库里的文本**，
  * 而这条消息会离开这台机器。包装字段（如果有人在标题里贴了一段）不许跟着走。
  */
-export function messageOf(headline: string, sentence: string): string {
-  return stripWrappers(redact(`**${headline}**\n${sentence}。`));
+/**
+ * 一条私聊消息 = 抬头 + 一句话 + 「谁 · 什么时候」。
+ *
+ * 末行是 2026-11-11 加的：群里的播报一直带着 `吕品 · 11-10 18:40`，私聊却只写「发生了什么」，
+ * 于是把个人机器人接到一个群之后（李嘉那种用法），群里看到的是一串没有主语的搁置通知
+ * ——「谁动的、什么时候动的」全靠猜。两个频道说同一件事，就不该只在一个频道里署名。
+ */
+export function messageOf(
+  headline: string,
+  sentence: string,
+  meta?: { actor: string; at: string; timeText: (raw: string) => string },
+): string {
+  const lines = [`**${headline}**`, `${sentence}。`];
+  if (meta && meta.timeText(meta.at) !== '') {
+    const actor = meta.actor === 'system' ? '系统' : meta.actor;
+    lines.push(`<font color="comment">${actor} · ${meta.timeText(meta.at)}</font>`);
+  }
+  return stripWrappers(redact(lines.join('\n')));
 }
 
 export type SendOptions = {
