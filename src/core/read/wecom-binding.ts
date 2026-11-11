@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import {
-  BINDING_LABEL, bindingStateOf, maskWebhook, type BindingState,
+  BINDING_LABEL, NEED_INIT_HINT, bindingStateOf, looksUninitialized, maskWebhook,
+  type BindingState,
 } from '../notify/wecom.js';
 
 /**
@@ -23,8 +24,10 @@ import {
  */
 export type WecomBindingView = {
   state: BindingState;
-  /** 那一行 pill 的字（`已绑定` / `未绑定` / `验证失败`）。 */
+  /** 那一行 pill 的字（`已绑定` / `已绑定 · 未激活` / `未绑定` / `验证失败`）。 */
   stateLabel: string;
+  /** 未激活时那句可照做的说明；其余状态是 null。 */
+  hint: string | null;
   /** 绑着的 userid（没绑是 null）。 */
   userid: string | null;
   /** 自己的机器人：**掩码**后的地址；没设是 null。 */
@@ -59,18 +62,30 @@ export async function wecomBindingView(memberId: string): Promise<WecomBindingVi
   const row = res.rows[0];
   if (row === undefined) {
     return {
-      state: 'unbound', stateLabel: BINDING_LABEL.unbound, userid: null,
+      state: 'unbound', stateLabel: BINDING_LABEL.unbound, userid: null, hint: null,
       webhook: null, webhookSet: false, lastLookupDay: null,
     };
   }
   const userid = typeof row.wecom_userid === 'string' && row.wecom_userid.trim() !== ''
     ? row.wecom_userid.trim()
     : null;
-  const state = bindingStateOf({ wecomUserId: userid }, row.wecom_lookup_at);
+  let state = bindingStateOf({ wecomUserId: userid }, row.wecom_lookup_at);
+  // 已绑定但一条没发出去过、最近一次还是 853008 → 未激活（见 `BindingState`）。
+  if (state === 'bound') {
+    const last = await db.execute<{ status: string; error: string | null }>(sql`
+      select status, error from notify_deliveries
+       where member_id = ${memberId} and channel = 'wecom'
+       order by created_at desc limit 1`);
+    const latest = last.rows[0];
+    if (latest !== undefined && latest.status === 'failed' && looksUninitialized(latest.error)) {
+      state = 'need_init';
+    }
+  }
   const webhookSet = typeof row.wecom_webhook === 'string' && row.wecom_webhook.trim() !== '';
   return {
     state,
     stateLabel: BINDING_LABEL[state],
+    hint: state === 'need_init' ? NEED_INIT_HINT : null,
     userid,
     webhook: maskWebhook(row.wecom_webhook),
     webhookSet,

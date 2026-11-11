@@ -96,7 +96,9 @@ describe('绑定状态是算出来的（三种，各有各的下一步）', () =
     expect(bindingStateOf({ wecomUserId: null }, null)).toBe('unbound');
     expect(bindingStateOf({ wecomUserId: null }, new Date('2026-11-10T00:00:00Z'))).toBe('failed');
     // 三个词就是界面上那三个 pill 的字。
-    expect(BINDING_LABEL).toEqual({ bound: '已绑定', unbound: '未绑定', failed: '验证失败' });
+    expect(BINDING_LABEL).toEqual({
+      bound: '已绑定', need_init: '已绑定 · 未激活', unbound: '未绑定', failed: '验证失败',
+    });
   });
 });
 

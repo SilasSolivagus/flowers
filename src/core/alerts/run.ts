@@ -92,7 +92,56 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
 
   const gateStatus = deps.probeGate ? await deps.probeGate() : await probeGate();
 
-  return { groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateStatus };
+  const personalFailedRecent = await countSince(sql`
+    select count(*)::int as n from notify_deliveries
+     where channel = 'wecom' and status = 'failed'
+       and created_at > now() - interval '2 hours'`);
+
+  const queueBacklog = await countSince(sql`
+    select count(*)::int as n from requirements
+     where deleted_at is null and state = 'queue'`);
+
+  const stuckRes = await db.execute<{ review: number; queue: number; dev: number }>(sql`
+    select
+      count(*) filter (where state = 'review' and state_entered_at < now() - interval '5 days')::int as review,
+      count(*) filter (where state = 'queue' and state_entered_at < now() - interval '5 days')::int as queue,
+      count(*) filter (where state = 'dev' and state_entered_at < now() - interval '10 days')::int as dev
+      from requirements where deleted_at is null`);
+  const stuck = stuckRes.rows[0] ?? { review: 0, queue: 0, dev: 0 };
+
+  const inboxOverdue = await countSince(sql`
+    select count(*)::int as n from requirements
+     where deleted_at is null and state = 'inbox' and state_entered_at < now() - interval '14 days'`);
+
+  const lateReleases = Number((await db.execute<{ n: number }>(sql`
+    select count(distinct release_id)::int as n from requirements
+     where deleted_at is null and release_id is not null
+       and state not in ('live', 'rejected', 'shelved')
+       and commit_due_at < now()`)).rows[0]?.n ?? 0);
+
+  const untestedNearRelease = await countSince(sql`
+    select count(*)::int as n from requirements r
+      join releases v on v.id = r.release_id
+     where r.deleted_at is null and r.state = 'ready'
+       and v.release_date between now() and now() + interval '3 days'`);
+
+  const unboundMembers = await countSince(sql`
+    select count(*)::int as n from members
+     where deactivated_at is null
+       and coalesce(nullif(btrim(wecom_userid), ''), nullif(btrim(wecom_webhook), '')) is null`);
+
+  const duplicateTitles = Number((await db.execute<{ n: number }>(sql`
+    select count(*)::int as n from (
+      select regexp_replace(lower(title), '[^一-龥a-z0-9]', '', 'g') key, count(*) c
+        from requirements where deleted_at is null
+       group by 1 having count(*) > 1
+    ) d`)).rows[0]?.n ?? 0);
+
+  return {
+    groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateStatus,
+    personalFailedRecent, queueBacklog, stuck, inboxOverdue,
+    lateReleases, untestedNearRelease, unboundMembers, duplicateTitles,
+  };
 }
 
 /** `wecom-cli auth show` 里出现 authorized 即视为可用；命令不存在也算不可用。 */

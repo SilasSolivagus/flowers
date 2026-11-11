@@ -152,7 +152,13 @@ function processFailure(bin: string, run: RunResult, timeoutMs: number): WecomFa
      * 原来这里把整段 JSON 原样吐出去，看起来像配置错误；换成一句能照着做的中文。
      */
     if (combined.includes('853008')) {
-      return fail('cli_failed', '这个成员还没和机器人说过话：请他在企微里打开「产品设计部经理-房超（老妖）」发任意一句话，之后推送就能到达。');
+      // 2026-11-11 实测：这个 aibot 是**个人机器人**，别人根本点不开（企微提示
+      // 「该机器人仅 …个人使用，你无法与它聊天」）。所以「让他先发一句话」是错的指引。
+      return fail(
+        'cli_failed',
+        '这台机器人是个人机器人，只能给本人发消息，其他成员无法与它对话。'
+          + '要让这个人收到推送，请改用「用自己的机器人」（群机器人 webhook），或由管理员配置企业应用消息。',
+      );
     }
     const code = run.exitCode === null ? '被信号终止' : `退出码 ${run.exitCode}`;
     const text = tail(run.stderr) || tail(run.stdout) || '（stderr 与 stdout 都是空的）';
@@ -496,8 +502,15 @@ export async function lookupUseridExact(
   return { ok: true, user: hit };
 }
 
-/** 绑定结果的三种状态（设置页那一行要显示的那个词）。 */
-export type BindingState = 'bound' | 'unbound' | 'failed';
+/**
+ * 绑定结果的四种状态（设置页那一行要显示的那个词）。
+ *
+ * `need_init`（2026-11-11）：userid 已绑定，但**一条都没发出去过**，最近一次失败是
+ * 企微 853008「当前会话不是机器人的最近会话」——意思是这个人还没在企微里跟机器人说过话。
+ * 之前的三种状态只看库里那一列，于是界面显示「已绑定」，人以为自己通了，实际一条都
+ * 收不到（赵越就是这样丢了 5 条）。这个状态是**算出来的**：读最近一次投递结果。
+ */
+export type BindingState = 'bound' | 'need_init' | 'unbound' | 'failed';
 
 /**
  * 这一行该显示成哪种状态。
@@ -519,9 +532,20 @@ export function bindingStateOf(
 /** 三种状态的中文（界面那一行的 pill 用它，报告里也用——一处措辞）。 */
 export const BINDING_LABEL: Record<BindingState, string> = {
   bound: '已绑定',
+  need_init: '已绑定 · 未激活',
   unbound: '未绑定',
   failed: '验证失败',
 };
+
+/** 未激活时那一句话：说清要做什么，不说技术名词。 */
+export const NEED_INIT_HINT = '还没打通：这台机器人是个人机器人，只能给本人发消息，你无法与它对话。'
+  + '要让消息送到你手上，请在下面「用自己的机器人」里填一个群机器人 webhook（企微群 → 添加机器人）。';
+
+/** 是不是「没跟机器人说过话」这一类失败（853008）。 */
+export function looksUninitialized(error: string | null | undefined): boolean {
+  const text = error ?? '';
+  return text.includes('853008') || text.includes('还没和机器人说过话');
+}
 
 /**
  * webhook 的掩码：域名与路径照给，`key` 只留末 4 位。

@@ -33,18 +33,18 @@ function htmlOf(view: WecomBindingView): string {
 }
 
 const UNBOUND: WecomBindingView = {
-  state: 'unbound', stateLabel: '未绑定', userid: null,
+  state: 'unbound', stateLabel: '未绑定', hint: null, userid: null,
   webhook: null, webhookSet: false, lastLookupDay: null,
 };
 
 const BOUND: WecomBindingView = {
-  state: 'bound', stateLabel: '已绑定', userid: 'lvpin',
+  state: 'bound', stateLabel: '已绑定', hint: null, userid: 'lvpin',
   webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=****wxyz',
   webhookSet: true, lastLookupDay: '2026-11-10',
 };
 
 const FAILED: WecomBindingView = {
-  state: 'failed', stateLabel: '验证失败', userid: null,
+  state: 'failed', stateLabel: '验证失败', hint: null, userid: null,
   webhook: null, webhookSet: false, lastLookupDay: '2026-11-09',
 };
 

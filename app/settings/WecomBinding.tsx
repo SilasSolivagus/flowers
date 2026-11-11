@@ -43,8 +43,11 @@ export function WecomBinding({ view }: { view: WecomBindingView }) {
       <div className="i gen-row" data-bind="wecom">
         <div className="l"><b>绑定企微</b></div>
         <div className="v gen-actions">
-          <span className={`pill ${view.state === 'bound' ? 'ok' : 'no'}`}>{view.stateLabel}</span>
-          {view.state === 'bound' && view.userid !== null && (
+          {/* 未激活用 warn 而不是 no：绑定是对的，只是还差一个动作，不是失败。 */}
+          <span className={`pill ${view.state === 'bound' ? 'ok' : view.state === 'need_init' ? 'warn' : 'no'}`}>
+            {view.stateLabel}
+          </span>
+          {(view.state === 'bound' || view.state === 'need_init') && view.userid !== null && (
             <span className="wx-id">{view.userid}</span>
           )}
           <button
@@ -287,8 +290,8 @@ export function RobotPanel({ view, onChanged }: {
  */
 export const BIND_WHY = '绑定之后，需要你动手的需求和评审结果会直接私聊发到你的企微，'
   + '不用回站内看。没绑定也能用，只是收不到这些通知。'
-  + '第一次用之前要做一个动作：在企微里点开「产品设计部经理-房超（老妖）」这个机器人，给它发一句话'
-  + '——企微只允许机器人给「最近说过话」的成员发消息，不发这一句，推送会一直失败。';
+  + '注意：共用的那台是个人机器人，只有它的主人能收到，别人点开会提示「无法与它聊天」。'
+  + '所以除了主人以外的成员，要收到私聊只有一个办法——在下面「用自己的机器人」里填一个群机器人 webhook。';
 
 /**
  * 「userid 从哪来」（2026-11-11 纠正）。

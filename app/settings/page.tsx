@@ -94,7 +94,7 @@ const EMPTY_PARTS: MemberProviderParts = { baseUrl: null, apiKey: null, model: n
 
 /** 名册里没有这个人时的绑定视图：全空（是「还没绑」，不是错误）。 */
 const EMPTY_BINDING: WecomBindingView = {
-  state: 'unbound', stateLabel: '未绑定', userid: null,
+  state: 'unbound', stateLabel: '未绑定', hint: null, userid: null,
   webhook: null, webhookSet: false, lastLookupDay: null,
 };
 

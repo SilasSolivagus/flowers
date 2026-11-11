@@ -20,6 +20,14 @@ const HEALTHY: Snapshot = {
   cronAgeMinutes: { 'wecom-dispatch': 3, 'group-dispatch': 4, 'sheet-sync': 8 },
   wecomAuthorized: true,
   gateStatus: 302,
+  personalFailedRecent: 0,
+  queueBacklog: 0,
+  stuck: { review: 0, queue: 0, dev: 0 },
+  inboxOverdue: 0,
+  lateReleases: 0,
+  untestedNearRelease: 0,
+  unboundMembers: 0,
+  duplicateTitles: 0,
 };
 
 beforeEach(async () => { await resetDb(); await seedPeople(); });
@@ -52,6 +60,21 @@ describe('规则：五条各自独立响', () => {
     expect(evaluateAlerts({ ...HEALTHY, gateStatus: null }).map((a) => a.key)).toEqual(['gate_down']);
   });
 
+  it('P1：个人推送失败 ≥3 条 / 待排期积压 / 卡住 / 收集久放', () => {
+    expect(evaluateAlerts({ ...HEALTHY, personalFailedRecent: 3 }).map((a) => a.key)).toEqual(['personal_failed']);
+    expect(evaluateAlerts({ ...HEALTHY, personalFailedRecent: 2 })).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, queueBacklog: 16 }).map((a) => a.key)).toEqual(['queue_backlog']);
+    expect(evaluateAlerts({ ...HEALTHY, stuck: { review: 2, queue: 0, dev: 1 } }).map((a) => a.key)).toEqual(['stuck']);
+    expect(evaluateAlerts({ ...HEALTHY, inboxOverdue: 4 }).map((a) => a.key)).toEqual(['inbox_overdue']);
+  });
+
+  it('P2/P3：延期版本 / 发版前未提测 / 未绑定成员 / 同名重复', () => {
+    expect(evaluateAlerts({ ...HEALTHY, lateReleases: 1 }).map((a) => a.key)).toEqual(['release_late']);
+    expect(evaluateAlerts({ ...HEALTHY, untestedNearRelease: 2 }).map((a) => a.key)).toEqual(['release_untested']);
+    expect(evaluateAlerts({ ...HEALTHY, unboundMembers: 4 }).map((a) => a.key)).toEqual(['member_unbound']);
+    expect(evaluateAlerts({ ...HEALTHY, duplicateTitles: 6 }).map((a) => a.key)).toEqual(['duplicate_titles']);
+  });
+
   it('多个问题同时坏 → 每条都报（不互相吞）', () => {
     const keys = evaluateAlerts({
       ...HEALTHY, groupFailedRecent: 1, sheetFailed: 5, wecomAuthorized: false, gateStatus: 502,
@@ -75,7 +98,8 @@ describe('跑批：冷却与「发不出去也不炸」', () => {
 
     const first = await runAlerts({ deps });
     expect(first.sent).toContain('group_failed');
-    expect(sent[0]).toContain('[告警] 群播报失败');
+    // P3 的「成员未绑定」在测试库里也会响（7 个人都没绑），所以不按顺序断言第一条。
+    expect(sent.some((text) => text.includes('[告警] 群播报失败'))).toBe(true);
 
     const second = await runAlerts({ deps });
     expect(second.suppressed).toContain('group_failed');
@@ -102,6 +126,6 @@ describe('跑批：冷却与「发不出去也不炸」', () => {
     const run = await runAlerts({
       deps: { cronLogs: {}, wecomAuthorized: async () => true, probeGate: async () => 302, webhook: '' },
     });
-    expect(run.failed[0]).toContain('group_failed');
+    expect(run.failed.some((text) => text.startsWith('group_failed'))).toBe(true);
   });
 });
