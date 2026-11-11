@@ -47,7 +47,14 @@ export function SheetImportForm({
               <td>{item.num}. {item.title} · {item.owner} · {item.priority}{item.prd ? ' · 有 PRD' : ''}</td>
               <td>{item.matched ?? '—'}</td>
               <td>{item.action === 'move' ? '挪进待排期' : item.action === 'create' ? '新建' : '不动'}</td>
-              <td>{item.why}</td>
+              <td>
+                {item.why}
+                {/* 建之前把话说明白（2026-11-11）：这一行池里已经有同名的，
+                    再勾一次就多一条副本——上一次就是在这个位置多出 13 条。 */}
+                {item.action === 'create' && item.matched !== null && (
+                  <div className="muted">这些行池里已有：勾了会再造一条，先确认那条是不是同一条。</div>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

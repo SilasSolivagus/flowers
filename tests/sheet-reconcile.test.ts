@@ -36,6 +36,13 @@ describe('给建议', () => {
     expect(item!.action).toBe('keep');
   });
 
+  it('已经在待排期 → 不动（之前漏了这一档，点应用会再造一条副本）', () => {
+    const queued = [{ id: 'q', number: 813, title: 'S3 协议支持', state: 'queue' }];
+    const [item] = reconcile([row('3', 'S3 协议支持（上迭代遗留）')], queued);
+    expect(item!.action).toBe('keep');
+    expect(item!.why).toContain('已经在待排期');
+  });
+
   it('池里没有 → 新建', () => {
     const [item] = reconcile([row('20', '账号绑定与QQ登录')], existing);
     expect(item!.action).toBe('create');

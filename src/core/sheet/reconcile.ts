@@ -53,6 +53,9 @@ export function normTitle(raw: string): string {
 
 const IN_PROGRESS = new Set(['ready', 'dev', 'test', 'live']);
 const MOVABLE = new Set(['inbox', 'design', 'review']);
+/** 已经在待排期 = 这一行已经处理过（2026-11-11：之前它既不在 MOVABLE 也不在 IN_PROGRESS，
+ *  于是被建议「新建」，点一次应用就多一条同名副本）。 */
+const ALREADY_QUEUED = new Set(['queue']);
 
 /** 纯函数：表行 × 池子 → 建议。 */
 export function reconcile(rows: SheetRow[], existing: ExistingRequirement[]): ReconcileItem[] {
@@ -87,9 +90,19 @@ export function reconcile(rows: SheetRow[], existing: ExistingRequirement[]): Re
         diff,
       };
     }
+    const queued = byFit.find((item) => ALREADY_QUEUED.has(item.state));
+    if (queued) {
+      return {
+        row, match: queued, action: 'keep',
+        why: '已经在待排期（之前导入过），不动——再勾一次会多出一条同名副本',
+        diff,
+      };
+    }
     return {
       row, match: byFit[0] ?? null, action: 'create',
-      why: byFit.length === 0 ? '池里没有，新建到待排期' : '池里有同名但状态不适用，新建到待排期',
+      why: byFit.length === 0
+        ? '池里没有，新建到待排期'
+        : `池里已有同名（${stateText(byFit[0]!.state)}），勾了会再造一条副本`,
       diff,
     };
   });
