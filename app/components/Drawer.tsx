@@ -8,6 +8,7 @@ import type { Member } from '../../src/core/read/member';
 import { formatMonthDay } from '../../src/core/read/board';
 import { DESCRIPTIVE_FIELDS } from '../../src/core/requirements/fields';
 import { ScrollTop } from './ScrollTop';
+import { STATE_LABEL } from '../../src/core/state-machine';
 import { missingRequired } from '../../src/core/requirements/brief';
 import { requirementKey } from './Card';
 import { ActionBar, type ReleaseOption } from './ActionBar';
@@ -326,6 +327,19 @@ export function Drawer({
           {/* ① 信息 */}
           <section className="dsec">
             <h3>信息</h3>
+            {/* 疑似重复（2026-11-11）：只在真有相似条目时出现。
+                不是红字警告，是一行可点的链接——人点进去看是不是同一条，
+                是就搁置新的，不是就继续。 */}
+            {detail.duplicates.length > 0 && (
+              <p className="dupnote">
+                疑似重复：
+                {detail.duplicates.map((item) => (
+                  <a key={item.id} className="dupitem" href={`/?open=${item.id}`}>
+                    PAN-{item.number}（{STATE_LABEL[item.state as State]}）
+                  </a>
+                ))}
+              </p>
+            )}
             <dl className="fields">
               <dt>提出人</dt><dd>{info.requester ?? '—'}</dd>
               {/* 负责人这一行是「改」的入口（P4-05），也是 P4-06 锚点的可见形态：

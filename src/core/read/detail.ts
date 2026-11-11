@@ -7,6 +7,7 @@ import {
 } from '../auth/roles.js';
 import { listArtifacts, type ArtifactRef } from '../uemaster/list.js';
 import { evaluateLock } from '../requirements/brief.js';
+import { findDuplicates } from '../requirements/duplicates.js';
 import { evaluateStageLock } from '../uemaster/gate.js';
 import { healStaleJobs } from '../uemaster/liveness.js';
 import type { AttemptPhase } from '../uemaster/trace.js';
@@ -357,6 +358,13 @@ export type Detail = {
   actions: DetailAction[];
   /** 上面那几处控件各自要不要渲染。同样只来自 `can()`，页面不自己推导。 */
   permissions: DetailPermissions;
+  /**
+   * 疑似重复（2026-11-11）：池子里与这条标题像的需求（最多 3 条，不含自己）。
+   *
+   * 之前只有 MCP/API 的创建响应里带这个，网页上看不到——所以「新建时提示重复」对
+   * 在网页上点按钮的人等于没有。现在抽屉里直接显示：「疑似重复：PAN-380（收集）」。
+   */
+  duplicates: Array<{ id: string; number: number; title: string; state: string }>;
 };
 
 const ROLE_LINE: Record<string, string> = {
@@ -933,10 +941,12 @@ export async function getRequirementDetail(
     outOfScope: row.out_of_scope,
   });
 
+  const similar = (await findDuplicates(db, row.title)).filter((item) => item.id !== row.id);
   return {
     id: row.id,
     number: Number(row.number),
     title: row.title,
+    duplicates: similar,
     state: row.state,
     stateLabel: STATE_LABEL[row.state],
     days,

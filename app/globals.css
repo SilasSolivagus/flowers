@@ -677,3 +677,10 @@ a.card:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}
 /* 那句「无法恢复」是一段说明，不是一行数据：与上面的行分开一点，用正文辅助色。 */
 .row3 .l .hist .note{margin:4px 0 0;color:var(--c-text-3);
                      font:400 var(--t-caption) var(--f-sans)}
+
+/* 疑似重复（2026-11-11）：一行灰底提示 + 可点条目。不抢主色，也不做成红字警告——
+   它只是一个「你可能认识它」的提示，判断权在人。 */
+.dupnote{margin:0 0 8px;padding:8px;border-radius:var(--r-xs);background:var(--c-surface-2);
+  font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.dupnote .dupitem{margin-left:8px;color:var(--c-accent);text-decoration:none}
+.dupnote .dupitem:hover{text-decoration:underline}
