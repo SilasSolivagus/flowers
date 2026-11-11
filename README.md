@@ -85,6 +85,11 @@ inbox 收集 → design 待设计 → review 待评审 → queue 待排期 → r
 
 操作步骤见 **[使用手册](docs/使用手册.md)**。
 
+打印版（按用户故事地图组织，A4 横版一页）：
+
+- [普通 PM 的故事地图](docs/pdf/flowers-用户故事地图-PM.pdf)
+- [条线负责人的故事地图](docs/pdf/flowers-用户故事地图-条线负责人.pdf)
+
 ---
 
 ## 对外接口：MCP 讲规则，REST 干活
