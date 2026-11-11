@@ -142,6 +142,12 @@ export const submitReviewInput = z.object({
 export const updateInput = z.object({
   requirementId: requirementIdSchema,
   title: z.string().trim().min(1, '标题不能为空').optional(),
+  /** PRD 链接（2026-11-11）：改它是「补文档」，不是状态动作。 */
+  prdUrl: z.string().nullish(),
+  /** 类型（2026-11-11）：commercial / feature；空 = 未指定。 */
+  type: z.enum(['commercial', 'feature'], {
+    message: '类型只能是 commercial（商业）或 feature（功能）',
+  }).nullish(),
   context: z.string().nullish(),
   problem: z.string().nullish(),
   outcome: z.string().nullish(),
@@ -188,6 +194,15 @@ export const rescheduleInput = z.object({
   releaseId: releaseIdSchema,
   commitTestAt: dateSchema,
   commitDueAt: dateSchema,
+});
+
+/** `requirement_calibrate`：超管把存量卡片摆到它真实所在的阶段（要原因）。 */
+export const calibrateInput = z.object({
+  requirementId: requirementIdSchema,
+  to: z.enum([...BOARD_STATES] as [State, ...State[]], {
+    message: '状态只能是看板十列之一：inbox/design/review/queue/ready/dev/test/live/rejected/shelved',
+  }),
+  reason: z.string({ required_error: '状态校准必须写原因' }).trim().min(1, '状态校准必须写原因'),
 });
 
 /** `requirement_bounce`：打回必须写原因，并重填承诺完成日。 */
@@ -257,6 +272,7 @@ export const LEGAL_FROM: Record<DetailAction, readonly State[]> = {
   restore: ['shelved'],
   // 回滚（2026-11-10）：只有已上线的能撤回。
   rollback: ['live'],
+  reopen: ['dev'],
 };
 
 /** 一个工具的定义形状。`call` 返回**多段文本**，每段对应 MCP 结果里的一段。 */
@@ -581,6 +597,18 @@ async function scheduleTool(identity: Identity, raw: unknown): Promise<string[]>
   return [JSON.stringify(got, null, 2)];
 }
 
+async function calibrateTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const input = parseInput(calibrateInput, raw);
+  const got = await SERVICES.calibrateState(db, identity.member, input);
+  return [JSON.stringify(got, null, 2)];
+}
+
+async function reopenTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId, reason } = parseInput(terminalReasonInput, raw);
+  const got = await SERVICES.reopenRequirement(db, identity.member, { requirementId, reason });
+  return [JSON.stringify(got, null, 2)];
+}
+
 async function rescheduleTool(identity: Identity, raw: unknown): Promise<string[]> {
   const input = parseInput(rescheduleInput, raw);
   const got = await SERVICES.reschedule(db, identity.member, input);
@@ -894,6 +922,27 @@ export const TOOLS: readonly ToolDef[] = [
       + '规则与排期一致：提测日 ≤ 承诺完成日 ≤ 版本发版日，且必须有正式 PRD。'
       + '每次改写在时间线上留一条 requirement.rescheduled（带改前改后）。',
     call: rescheduleTool,
+  }),
+  tool({
+    name: 'requirement_calibrate',
+    title: '状态校准（超管）',
+    scope: 'write',
+    action: null,
+    inputSchema: calibrateInput,
+    purpose: '把一条需求直接摆到它**真实所在**的阶段（存量卡片对齐现实用），必须写原因。'
+      + '只有超管能做；只改状态，不动版本、承诺日与产物。日常推进仍走立项/评审/排期/打回。',
+    call: calibrateTool,
+  }),
+  tool({
+    name: 'requirement_reopen',
+    title: '退回待开发（开发中 → 待开发）',
+    scope: 'write',
+    action: null,
+    inputSchema: terminalReasonInput,
+    purpose: '开发中发现接错了 / 方案变了，把需求退回「待开发」重新排期，原因必填。'
+      + '与 requirement_bounce 不同：那是「测试没过」，这是「还没真正开始」。'
+      + '版本与承诺日保留，改日期用 requirement_reschedule。',
+    call: reopenTool,
   }),
   tool({
     name: 'requirement_bounce',

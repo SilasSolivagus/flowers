@@ -59,6 +59,8 @@ const ACTIONS: Record<string, string> = {
   reject: 'requirement_reject',
   shelve: 'requirement_shelve',
   restore: 'requirement_restore',
+  reopen: 'requirement_reopen',
+  calibrate: 'requirement_calibrate',
   rollback: 'requirement_rollback',
   // 这两个也有自己的短路径（`/claim`、`/assign`）；列在这里是为了让
   // `/actions/claim` 这种写法也能用，省得脚本记两套。

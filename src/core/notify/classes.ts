@@ -111,6 +111,8 @@ export const EVENT_CLASS: Readonly<Record<string, EventClass>> = {
   'requirement.deleted': 'change',          // 删除
   'requirement.restored': 'change',         // 恢复
   'requirement.rescheduled': 'change',      // 改排期（版本页 / MCP，2026-11-11）
+  'requirement.reopened': 'change',         // 退回待开发（2026-11-11）
+  'requirement.calibrated': 'change',       // 状态校准（超管，2026-11-11）
   /**
    * 从 Flower 迁入（P4-09）。归 `change`：这是一条历史记录，不是「现在需要谁动手」；
    * 放在 `action` 会让迁移一落地就给所有人推 803 条通知。
