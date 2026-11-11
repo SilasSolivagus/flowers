@@ -196,6 +196,22 @@ export const rescheduleInput = z.object({
   commitDueAt: dateSchema,
 });
 
+/** `requirements_batch_update`：批量改描述类字段，默认 dryRun（先给差异）。 */
+export const batchInput = z.object({
+  ids: z.array(requirementIdSchema).min(1, '至少给一条').max(50, '一次最多 50 条'),
+  patch: z.object({
+    priority: z.string().nullish(),
+    type: z.string().nullish(),
+    remark: z.string().nullish(),
+    platforms: z.array(z.string()).nullish(),
+    prdUrl: z.string().nullish(),
+  }).refine((value) => Object.values(value).some((item) => item !== undefined && item !== null), {
+    message: '没有任何要改的字段',
+  }),
+  /** 默认 true：先给差异。真写要显式给 false。 */
+  dryRun: z.boolean().optional(),
+});
+
 /** `requirement_calibrate`：超管把存量卡片摆到它真实所在的阶段（要原因）。 */
 export const calibrateInput = z.object({
   requirementId: requirementIdSchema,
@@ -597,6 +613,12 @@ async function scheduleTool(identity: Identity, raw: unknown): Promise<string[]>
   return [JSON.stringify(got, null, 2)];
 }
 
+async function batchTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const input = parseInput(batchInput, raw);
+  const got = await SERVICES.batchUpdate(db, identity.member, input);
+  return [JSON.stringify(got, null, 2)];
+}
+
 async function calibrateTool(identity: Identity, raw: unknown): Promise<string[]> {
   const input = parseInput(calibrateInput, raw);
   const got = await SERVICES.calibrateState(db, identity.member, input);
@@ -922,6 +944,17 @@ export const TOOLS: readonly ToolDef[] = [
       + '规则与排期一致：提测日 ≤ 承诺完成日 ≤ 版本发版日，且必须有正式 PRD。'
       + '每次改写在时间线上留一条 requirement.rescheduled（带改前改后）。',
     call: rescheduleTool,
+  }),
+  tool({
+    name: 'requirements_batch_update',
+    title: '批量改（先看差异再落库）',
+    scope: 'write',
+    action: null,
+    inputSchema: batchInput,
+    purpose: '一次改多条的描述类字段（优先级 / 类型 / 备注 / 平台 / PRD）。'
+      + '**默认 dryRun**：只返回每条会改成什么，确认后再传 dryRun:false 落库。'
+      + '负责人、版本、承诺日不在批量范围（各自有更严的规则）。逐条报告成功/跳过/被拒原因。',
+    call: batchTool,
   }),
   tool({
     name: 'requirement_calibrate',

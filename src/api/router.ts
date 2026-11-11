@@ -140,6 +140,7 @@ const ROUTES: Route[] = [
     pattern: '/requirements/:id/actions/:action',
     args: ({ params, body }) => ({ ...body, requirementId: params.id, action: params.action }),
   },
+  { method: 'POST', pattern: '/requirements/batch', tool: 'requirements_batch_update', args: ({ body }) => body },
   { method: 'GET', pattern: '/members', tool: 'member_list', args: () => ({}) },
   { method: 'GET', pattern: '/releases', tool: 'release_list', args: () => ({}) },
 ];

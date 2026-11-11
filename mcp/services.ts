@@ -6,6 +6,7 @@ import { schedule } from '../src/core/requirements/schedule.js';
 import { reschedule } from '../src/core/requirements/reschedule.js';
 import { reopenRequirement } from '../src/core/requirements/reopen.js';
 import { calibrateState } from '../src/core/requirements/calibrate.js';
+import { batchUpdate } from '../src/core/requirements/batch.js';
 import { bounce } from '../src/core/requirements/bounce.js';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
@@ -49,6 +50,7 @@ export type Services = {
   reschedule: typeof reschedule;
   reopenRequirement: typeof reopenRequirement;
   calibrateState: typeof calibrateState;
+  batchUpdate: typeof batchUpdate;
   bounce: typeof bounce;
   rejectRequirement: typeof rejectRequirement;
   shelveRequirement: typeof shelveRequirement;
@@ -77,6 +79,7 @@ export const SERVICES: Services = {
   reschedule,
   reopenRequirement,
   calibrateState,
+  batchUpdate,
   bounce,
   rejectRequirement,
   shelveRequirement,
