@@ -229,7 +229,18 @@ export function renderEventMessage(item: GroupEventItem, baseUrl: string): strin
   // 认领没有状态变化（inbox → inbox），它变的是负责人：抬头那句已经说了谁认领，
   // 这里再补一行「负责人」——与 Flower 的 `changes` 一样，只写变了的那一格。
   if (type === 'requirement.owner_assigned') {
-    lines.push(`> 负责人　<font color="comment">${from === null ? '空' : item.payload.from === null ? '空' : '原负责人'}</font> → <font color="comment">${item.actor}</font>`);
+    /**
+     * 认领/转交（2026-11-11 修正）：旧文案把「谁操作的」当成「改成了谁」，旧值还写成
+     * 字面的「原负责人」——于是「房超把负责人改成吕品」被播成「原负责人 → 房超」。
+     * 正确写法：`from` → `to`（都来自 payload），`actor` 只在末行署名。
+     */
+    const oldOwner = typeof item.payload.from === 'string' && item.payload.from.trim() !== ''
+      ? item.payload.from
+      : '空';
+    const newOwner = typeof item.payload.to === 'string' && item.payload.to.trim() !== ''
+      ? item.payload.to
+      : item.actor;
+    lines.push(`> 负责人　<font color="comment">${oldOwner}</font> → <font color="info">${newOwner}</font>`);
   } else if (from !== null || to !== null) {
     // 两个都没有就不画这一行（2026-11-11）：原来硬画成「空 → 空」，读者只会问
     // 「什么是空到空」。没有状态可说的播报（导入、认领之后的评审通过）不该自带一行噪音。
