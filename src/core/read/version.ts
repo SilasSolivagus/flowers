@@ -155,3 +155,27 @@ export async function listReleases(): Promise<Release[]> {
     };
   });
 }
+
+/**
+ * 「还能加进版本的需求」：待排期、且已经有正式 PRD（对齐 schedule 的那道门）。
+ *
+ * 版本页的「添加需求」下拉用这一份。放在读模型里而不是页面里：那条口径（哪些需求
+ * 有资格进版本）与 schedule 的拒绝理由必须指向同一件事，页面不该自己拼 WHERE。
+ */
+export async function releasableRequirements(): Promise<Array<{
+  id: string; number: number; title: string; owner: string | null;
+}>> {
+  const res = await db.execute<{
+    id: string; number: number; title: string; owner: string | null;
+  }>(sql`
+    select r.id, r.number, r.title, m.name as owner
+      from requirements r
+      left join members m on m.id = r.owner_member_id
+     where r.deleted_at is null
+       and r.state = 'queue'
+       and r.prd_url is not null and btrim(r.prd_url) <> ''
+     order by r.number`);
+  return res.rows.map((row) => ({
+    id: row.id, number: Number(row.number), title: row.title, owner: row.owner,
+  }));
+}

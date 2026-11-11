@@ -329,6 +329,9 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
                         where owner.id = r.owner_member_id
                           and owner.line = ${leadLine})`;
 
+  // 负责人自己那摊事（2026-11-11 扩）：原来只覆盖 4 类，于是「你自己名下的需求被搁置 /
+  // 退回 / 排期 / 状态变了」这些**最该让负责人知道**的事件只进了群、没进他的私聊——
+  // 李嘉配了自己的机器人却只看到产品群在响，就是这条缺口。仍然排除「自己做的事」。
   const base = sql`(
       (e.type = 'requirement.review_requested'
         and (select ra.reviewer_member_id
@@ -338,7 +341,9 @@ function addressed(member: Member, channel: Channel = 'site'): SQL {
               order by (ra.decided_at is null) asc, ra.decided_at asc
               limit 1) = ${member.id})
       or (e.type in ('requirement.evaluated', 'requirement.review_rejected',
-                     'requirement.bounced', 'requirement.auto_test')
+                     'requirement.bounced', 'requirement.auto_test',
+                     'requirement.state_changed', 'requirement.shelved',
+                     'requirement.restored', 'requirement.scheduled')
           and r.owner_member_id = ${member.id})
       or (e.type = 'requirement.created'
           and exists (select 1

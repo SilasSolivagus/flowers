@@ -3,17 +3,23 @@ import { createRequirement } from '../src/core/requirements/create.js';
 import { submitReview } from '../src/core/requirements/submit-review.js';
 import { reviewPass, reviewReject } from '../src/core/requirements/review.js';
 import { schedule } from '../src/core/requirements/schedule.js';
+import { reschedule } from '../src/core/requirements/reschedule.js';
 import { bounce } from '../src/core/requirements/bounce.js';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
 } from '../src/core/requirements/terminal.js';
 import { rollbackRelease } from '../src/core/requirements/rollback.js';
+import { claimRequirement } from '../src/core/requirements/claim.js';
+import { reassignOwner } from '../src/core/requirements/assign.js';
+import { updateRequirement } from '../src/core/requirements/manage.js';
 import { attachArtifact } from '../src/core/uemaster/attach.js';
 import { listArtifacts } from '../src/core/uemaster/list.js';
 import { latestSnapshot } from '../src/core/prd/snapshots.js';
 import { readPrd } from '../src/core/prd/read.js';
 import { getRequirementDetail } from '../src/core/read/detail.js';
 import { getBoard } from '../src/core/read/board.js';
+import { listMembers } from '../src/core/read/member.js';
+import { listReleases } from '../src/core/read/version.js';
 
 /**
  * 工具**只通过这张表**碰领域服务。别处不许直接 import `src/core/requirements/*`。
@@ -38,12 +44,18 @@ export type Services = {
   reviewPass: typeof reviewPass;
   reviewReject: typeof reviewReject;
   schedule: typeof schedule;
+  reschedule: typeof reschedule;
   bounce: typeof bounce;
   rejectRequirement: typeof rejectRequirement;
   shelveRequirement: typeof shelveRequirement;
   evaluate: typeof evaluate;
   restoreRequirement: typeof restoreRequirement;
   rollbackRelease: typeof rollbackRelease;
+  claimRequirement: typeof claimRequirement;
+  reassignOwner: typeof reassignOwner;
+  updateRequirement: typeof updateRequirement;
+  listMembers: typeof listMembers;
+  listReleases: typeof listReleases;
   attachArtifact: typeof attachArtifact;
   getRequirementDetail: typeof getRequirementDetail;
   listArtifacts: typeof listArtifacts;
@@ -58,12 +70,18 @@ export const SERVICES: Services = {
   reviewPass,
   reviewReject,
   schedule,
+  reschedule,
   bounce,
   rejectRequirement,
   shelveRequirement,
   evaluate,
   restoreRequirement,
   rollbackRelease,
+  claimRequirement,
+  reassignOwner,
+  updateRequirement,
+  listMembers,
+  listReleases,
   attachArtifact,
   getRequirementDetail,
   listArtifacts,

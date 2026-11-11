@@ -30,7 +30,7 @@ function hasPrd(prdUrl: string | null): boolean {
  * 解析不出来就报 bad_dates：否则 Invalid Date 会一路走到 `toISOString()`，
  * 抛的是 RangeError，控制器按 `e.code` 分支时只能当未知错误。
  */
-function parseDateOrThrow(text: string): Date {
+export function parseDateOrThrow(text: string): Date {
   const date = new Date(text);
   if (Number.isNaN(date.getTime())) throw new AppError('bad_dates', BAD_DATE);
   return date;

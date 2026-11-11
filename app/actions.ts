@@ -12,6 +12,7 @@ import { evaluate } from '../src/core/requirements/evaluate';
 import { submitReview } from '../src/core/requirements/submit-review';
 import { reviewPass, reviewReject } from '../src/core/requirements/review';
 import { schedule } from '../src/core/requirements/schedule';
+import { reschedule } from '../src/core/requirements/reschedule';
 import { bounce } from '../src/core/requirements/bounce';
 import {
   rejectRequirement, restoreRequirement, shelveRequirement,
@@ -97,7 +98,9 @@ async function run(call: (actor: string) => Promise<unknown>): Promise<ActionRes
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
   } finally {
+    // 版本页也读同一批需求（版本里的行、甘特、延期数），动作改完之后它同样要重取。
     revalidatePath('/');
+    revalidatePath('/releases');
   }
 }
 
@@ -254,6 +257,17 @@ export async function scheduleAction(formData: FormData): Promise<ActionResult> 
   const commitTestAt = field(formData, 'commitTestAt');
   const commitDueAt = field(formData, 'commitDueAt');
   return run((actor) => schedule(db, actor, {
+    requirementId, releaseId, commitTestAt, commitDueAt,
+  }));
+}
+
+/** 改排期（2026-11-11）：不动状态，只改版本与两个承诺日；版本页「改进度」用。 */
+export async function rescheduleAction(formData: FormData): Promise<ActionResult> {
+  const requirementId = field(formData, 'id');
+  const releaseId = field(formData, 'releaseId');
+  const commitTestAt = field(formData, 'commitTestAt');
+  const commitDueAt = field(formData, 'commitDueAt');
+  return run((actor) => reschedule(db, actor, {
     requirementId, releaseId, commitTestAt, commitDueAt,
   }));
 }
@@ -934,7 +948,9 @@ export async function updateMemberAction(formData: FormData): Promise<ActionResu
     if (error instanceof AppError) return { ok: false, message: error.message };
     throw error;
   } finally {
+    // 版本页也读同一批需求（版本里的行、甘特、延期数），动作改完之后它同样要重取。
     revalidatePath('/');
+    revalidatePath('/releases');
   }
 }
 

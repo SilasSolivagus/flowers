@@ -1,10 +1,11 @@
 import Link from 'next/link';
 
 import { db } from '../../src/db/client';
-import { listReleases } from '../../src/core/read/version';
+import { listReleases, releasableRequirements } from '../../src/core/read/version';
 import { previousRelease } from '../../src/core/releases/manage';
 import { Gantt } from '../components/Gantt';
 import { ReleaseForm } from '../components/ReleaseForm';
+import { ReleasePlan } from '../components/ReleasePlan';
 import './releases.css';
 import { Shell } from '../components/Shell';
 
@@ -33,6 +34,8 @@ export default async function ReleasesPage({
   }>;
 }) {
   const releases = await listReleases();
+  // 「加需求」下拉的候选：待排期 + 有 PRD（与 schedule 那道门同一条口径）。
+  const releasable = await releasableRequirements();
   const { release, new: fresh, edit } = await searchParams;
   const wanted = typeof release === 'string' ? release : null;
   const current = releases.find((r) => r.id === wanted) ?? releases[0] ?? null;
@@ -148,6 +151,23 @@ export default async function ReleasesPage({
             </section>
           </div>
         </div>
+      )}
+
+      {current !== null && (
+        <ReleasePlan
+          releaseId={current.id}
+          windowStart={current.windowStart.slice(0, 10)}
+          releaseDate={current.releaseDate.slice(0, 10)}
+          items={current.requirements.map((item) => ({
+            id: item.id,
+            number: item.number,
+            title: item.title,
+            stateLabel: item.stateLabel,
+            commitTestAt: item.commitTestAt,
+            commitDueAt: item.commitDueAt,
+          }))}
+          candidates={releasable}
+        />
       )}
 
       {creating && (

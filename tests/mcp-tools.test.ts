@@ -428,3 +428,97 @@ describe('scope：read token 不许写', () => {
     expect(got.isError).toBeUndefined();
   });
 });
+
+/**
+ * 2026-11-11：赵越的四条反馈逐条落成工具。
+ *
+ * 1. 查询不完整 → `requirement_list` 有 q / number / offset，limit 放到 500；
+ * 2. 缺基础查询 → `member_list` / `release_list`；
+ * 3. 详情缺正文 → `requirement_show` 返回六问 + legacyRef + missingBrief；
+ * 4. 缺编辑与认领 → `requirement_update` / `requirement_claim` / `requirement_assign`。
+ */
+describe('查询口径（2026-11-11 补齐）', () => {
+  it('requirement_list：按关键词与编号过滤，能分页，total/count 分开给', async () => {
+    await inInbox('S3 协议支持');
+    await inInbox('S3 兼容 API');
+    await inInbox('分享页搜索');
+
+    const byQ = jsonOf(await call('requirement_list', { q: 's3', owner: '吕品' }));
+    expect(byQ.total).toBe(2);
+    expect(byQ.count).toBe(2);
+
+    const page = jsonOf(await call('requirement_list', { owner: '吕品', limit: 1, offset: 1 }));
+    expect(page.total).toBe(3);
+    expect(page.count).toBe(1);
+    expect(page.offset).toBe(1);
+
+    const one = jsonOf(await call('requirement_list', { number: 2 }));
+    expect(one.total).toBe(1);
+    expect((one.requirements as Array<{ number: number }>)[0]!.number).toBe(2);
+  });
+
+  it('requirement_list：limit 上限现在是 500（原来 200）', async () => {
+    const bad = await call('requirement_list', { limit: 501 });
+    expect(bad.isError).toBe(true);
+    expect(textOf(bad)).toContain('最多 500');
+  });
+
+  it('requirement_show：返回六问正文、缺哪几问、迁移来源', async () => {
+    const id = await inInbox();
+    const detail = jsonOf(await call('requirement_show', { requirementId: id }));
+    expect(detail.description).toMatchObject({
+      context: BRIEF.context, problem: BRIEF.problem, outcome: BRIEF.outcome,
+    });
+    expect(detail.missingBrief).toEqual([]);
+    expect(detail.legacyRef).toBeNull();
+  });
+
+  it('member_list / release_list：给 UUID，不用再去页面抄', async () => {
+    await makeRelease('R-2026-12', '2026-12-01', '2026-12-04');
+    const members = jsonOf(await call('member_list', {}));
+    expect((members.members as Array<{ id: string; name: string }>).some((m) => m.name === '吕品')).toBe(true);
+
+    const releases = jsonOf(await call('release_list', {}));
+    expect((releases.releases as Array<{ id: string; name: string }>)[0]!.name).toBe('R-2026-12');
+  });
+
+  it('requirement_brief_prompts：六条问题 + 明确的「缺了不能做什么」', async () => {
+    const out = jsonOf(await call('requirement_brief_prompts', {}));
+    expect((out.required as unknown[])).toHaveLength(6);
+    expect(String(out.rule)).toContain('不能立项');
+    expect(String(out.rule)).toContain('不能生成评估材料');
+  });
+});
+
+describe('编辑类工具（2026-11-11：写侧开放）', () => {
+  it('requirement_update：改六问；权限与「改不了状态」由服务层兜底', async () => {
+    const id = await inInbox();
+    await call('requirement_update', {
+      requirementId: id,
+      outcome: '一次点完，漏配为 0',
+      surfaces: '管理后台 · 权限页',
+    });
+    const detail = jsonOf(await call('requirement_show', { requirementId: id }));
+    expect((detail.description as { outcome: string }).outcome).toBe('一次点完，漏配为 0');
+    expect(detail.state).toBe('inbox');
+  });
+
+  it('requirement_claim：把无主需求接到自己名下（不动状态）', async () => {
+    const created = await createRequirement(db, '房超', {
+      ...BRIEF, title: '无主需求', type: 'feature', requester: '孙建宏', ownerMemberId: null,
+    });
+    const got = jsonOf(await call('requirement_claim', { requirementId: created.id }));
+    expect(got.owner).toBe('吕品');
+    expect(jsonOf(await call('requirement_show', { requirementId: created.id })).state).toBe('inbox');
+  });
+
+  it('requirement_assign：超管能把需求转给另一个人', async () => {
+    const id = await inInbox();
+    const members = jsonOf(await call('member_list', {}));
+    const target = (members.members as Array<{ id: string; name: string; role: string }>)
+      .find((m) => m.name === '王妍')!;
+    const res = await call('requirement_assign', { requirementId: id, ownerMemberId: target.id }, as('房超'));
+    const got = jsonOf(res);
+    expect(got.owner).toBe('王妍');
+  });
+});

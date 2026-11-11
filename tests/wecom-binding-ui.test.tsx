@@ -110,7 +110,7 @@ describe('企微那两行', () => {
 
   it('展开的机器人面板：可选/只对自己/只回显末 4 位 + 测试与保存', () => {
     const html = renderToStaticMarkup(<RobotPanel view={BOUND} onChanged={() => undefined} />);
-    expect(html).toContain('而不是大家共用的那个');
+    expect(html).toContain('不再走共用那条路');
     expect(html).toContain('只存在这个部署的库里');
     expect(html).toContain('只显示末 4 位');
     expect(html).toContain('>测试<');

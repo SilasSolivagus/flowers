@@ -8,6 +8,8 @@ import { CreateInput } from '../src/core/requirements/create.js';
 import { BOARD_STATES } from '../src/core/read/board.js';
 import type { DetailAction } from '../src/core/read/detail.js';
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
+import { DESCRIPTIVE_FIELDS } from '../src/core/requirements/fields.js';
+import { missingRequired } from '../src/core/requirements/brief.js';
 import { packFor, STAGES, type Stage } from '../src/core/uemaster/packs.js';
 import { nextArtifactVersion } from '../src/core/uemaster/versions.js';
 import { SERVICES } from './services.js';
@@ -119,8 +121,14 @@ export const listInput = z.object({
   owner: z.string({ invalid_type_error: 'owner 是负责人姓名' }).trim().min(1).optional(),
   /** true = 只要「现在就等我动手」的那些（与看板主色框同一条规则）。 */
   mine: z.boolean({ invalid_type_error: 'mine 只能是 true 或 false' }).optional(),
+  /** 标题关键词（子串、不分大小写）。2026-11-11 加：没有它，597 条只能整页取回。 */
+  q: z.string({ invalid_type_error: 'q 是标题关键词' }).trim().min(1).max(200).optional(),
+  /** 编号（纯数字，PAN-742 写 742）。旧编号在迁移后重排，别拿老 Flower 的编号来查。 */
+  number: z.number({ invalid_type_error: 'number 是数字' }).int('number 是整数').min(1).optional(),
+  /** 分页起点（配合 limit 用）。默认 0。 */
+  offset: z.number({ invalid_type_error: 'offset 是数字' }).int('offset 是整数').min(0).optional(),
   limit: z.number({ invalid_type_error: 'limit 是数字' }).int('limit 是整数')
-    .min(1, 'limit 至少是 1').max(200, 'limit 最多 200').optional(),
+    .min(1, 'limit 至少是 1').max(500, 'limit 最多 500').optional(),
 });
 
 /** `requirement_submit_review`：PRD 链接是这条迁移的通行证。 */
@@ -128,6 +136,33 @@ export const submitReviewInput = z.object({
   requirementId: requirementIdSchema,
   prdUrl: z.string({ required_error: '提交评审必须填正式 PRD 链接', invalid_type_error: BAD_URL })
     .trim().min(1, '提交评审必须填正式 PRD 链接'),
+});
+
+/** `requirement_update`：只开「描述类」字段（标题 / 六问 / 平台 / 优先级 / 备注）。 */
+export const updateInput = z.object({
+  requirementId: requirementIdSchema,
+  title: z.string().trim().min(1, '标题不能为空').optional(),
+  context: z.string().nullish(),
+  problem: z.string().nullish(),
+  outcome: z.string().nullish(),
+  surfaces: z.string().nullish(),
+  edgeCases: z.string().nullish(),
+  outOfScope: z.string().nullish(),
+  platforms: z.array(z.string()).nullish(),
+  priority: z.enum(['p0', 'p1', 'p2', 'p3', 'green'], {
+    message: '优先级只能是 P0/P1/P2/P3/绿色通道（p0/p1/p2/p3/green）',
+  }).nullish(),
+  remark: z.string().nullish(),
+});
+
+/** `requirement_claim`：把一条无主需求接到自己名下。 */
+export const claimInput = z.object({ requirementId: requirementIdSchema });
+
+/** `requirement_assign`：转交负责人（条线负责人只能转本线，超管不受限）。 */
+export const assignInput = z.object({
+  requirementId: requirementIdSchema,
+  ownerMemberId: z.string({ required_error: '要给新负责人的 UUID（用 member_list 取）' })
+    .uuid('ownerMemberId 是成员的 UUID，不是姓名'),
 });
 
 /** `requirement_review_pass`：只有需求 ID（签字人由派单决定，不由参数决定）。 */
@@ -141,6 +176,14 @@ export const reviewRejectInput = z.object({
 
 /** `requirement_schedule`：版本 + 提测日 + 承诺完成日，三个都必填。 */
 export const scheduleInput = z.object({
+  requirementId: requirementIdSchema,
+  releaseId: releaseIdSchema,
+  commitTestAt: dateSchema,
+  commitDueAt: dateSchema,
+});
+
+/** `requirement_reschedule`：已在版本里的需求改版本 / 提测日 / 承诺完成日（不动状态）。 */
+export const rescheduleInput = z.object({
   requirementId: requirementIdSchema,
   releaseId: releaseIdSchema,
   commitTestAt: dateSchema,
@@ -383,7 +426,7 @@ async function prdTool(_identity: Identity, raw: unknown): Promise<string[]> {
 
 /** 列表：一条 SQL 取全部需求（`getBoard`），过滤在内存里做。 */
 async function listTool(identity: Identity, raw: unknown): Promise<string[]> {
-  const { state, owner, mine, limit } = parseInput(listInput, raw);
+  const { state, owner, mine, q, number, offset, limit } = parseInput(listInput, raw);
 
   const columns = await SERVICES.getBoard(identity.member);
   const rows = columns.flatMap((column) => column.cards.map((card) => ({
@@ -401,15 +444,25 @@ async function listTool(identity: Identity, raw: unknown): Promise<string[]> {
     inspectAtLabel: card.inspectAtLabel,
   })));
 
+  const needle = q?.toLowerCase();
   const filtered = rows.filter((row) => (
     (state === undefined || row.state === state)
     && (owner === undefined || row.owner === owner)
     && (mine === undefined || row.mine === mine)
+    && (number === undefined || row.number === number)
+    && (needle === undefined || row.title.toLowerCase().includes(needle))
   ));
 
+  // 先切片再返回：`total` 是「筛完有多少」，`count` 是「这一页给了几条」。
+  // 没有 offset/limit 时两者相等（老行为不变：一次全给）。
+  const start = offset ?? 0;
+  const page = filtered.slice(start, limit === undefined ? undefined : start + limit);
+
   return [JSON.stringify({
-    count: filtered.length,
-    requirements: limit === undefined ? filtered : filtered.slice(0, limit),
+    total: filtered.length,
+    offset: start,
+    count: page.length,
+    requirements: page,
   }, null, 2)];
 }
 
@@ -464,6 +517,12 @@ async function showTool(identity: Identity, raw: unknown): Promise<string[]> {
     priority: detail.info.priority,
     priorityLabel: detail.info.priorityLabel,
     skipReason: detail.info.skipReason,
+    // 六问正文（2026-11-11）：没有它，agent 要补全或评估只能另开页面。
+    description: detail.description,
+    // 迁移来源（Flower 的 uuid）。编号在迁移后重排，只有它能对上老系统那一条。
+    legacyRef: detail.info.legacyRef,
+    // 六问缺哪几问——与立项/生成两道门同一个判据，agent 不必自己数。
+    missingBrief: missingRequired(detail.description),
     // 两个字段都来自同一次 `can()`：`actions` 是「状态 ∩ 他能做」，`permissions`
     // 是那几处控件各自的结论。只给其中一个会让 agent 用「有动作」去猜「能不能改描述」。
     actions: detail.actions,
@@ -513,6 +572,12 @@ async function scheduleTool(identity: Identity, raw: unknown): Promise<string[]>
   return [JSON.stringify(got, null, 2)];
 }
 
+async function rescheduleTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const input = parseInput(rescheduleInput, raw);
+  const got = await SERVICES.reschedule(db, identity.member, input);
+  return [JSON.stringify(got, null, 2)];
+}
+
 async function bounceTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId, reason, newCommitDueAt } = parseInput(bounceInput, raw);
   // 不传 now：生产调用方用真实时钟（R24 的注入只给用例）。
@@ -525,6 +590,59 @@ async function bounceTool(identity: Identity, raw: unknown): Promise<string[]> {
 async function rejectTool(identity: Identity, raw: unknown): Promise<string[]> {
   const { requirementId, reason } = parseInput(terminalReasonInput, raw);
   const got = await SERVICES.rejectRequirement(db, identity.member, { requirementId, reason });
+  return [JSON.stringify(got, null, 2)];
+}
+
+async function memberListTool(identity: Identity, raw: unknown): Promise<string[]> {
+  void identity;
+  void raw;
+  const members = await SERVICES.listMembers();
+  return [JSON.stringify({
+    members: members.map((m) => ({ id: m.id, name: m.name, email: m.email, role: m.role, line: m.line })),
+  }, null, 2)];
+}
+
+async function releaseListTool(identity: Identity, raw: unknown): Promise<string[]> {
+  void identity;
+  void raw;
+  const releases = await SERVICES.listReleases();
+  return [JSON.stringify({
+    releases: releases.map((r) => ({
+      id: r.id, name: r.name, windowStart: r.windowStart, releaseDate: r.releaseDate,
+      shipped: r.shipped, inFlight: r.inFlight, late: r.late,
+    })),
+  }, null, 2)];
+}
+
+async function briefPromptsTool(identity: Identity, raw: unknown): Promise<string[]> {
+  void identity;
+  void raw;
+  // 纯常量：六个问题的标签与「不填会怎样」。给 agent 一份可以直接照念的问题清单，
+  // 省得每个工具说明里再抄一遍。
+  return [JSON.stringify({
+    required: DESCRIPTIVE_FIELDS.map((f) => ({
+      key: f.key, label: f.label, why: f.hint ?? '补充信息，缺了材料会写得更空',
+    })),
+    rule: '六问全必填：缺任何一条都不能立项（进待设计）、也不能生成评估材料；'
+      + '认领、提交评审、拒绝、搁置不受影响。',
+  }, null, 2)];
+}
+
+async function updateTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const input = parseInput(updateInput, raw);
+  const got = await SERVICES.updateRequirement(db, identity.member, input);
+  return [JSON.stringify(got, null, 2)];
+}
+
+async function claimTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const { requirementId } = parseInput(claimInput, raw);
+  const got = await SERVICES.claimRequirement(db, identity.member, { requirementId });
+  return [JSON.stringify(got, null, 2)];
+}
+
+async function assignTool(identity: Identity, raw: unknown): Promise<string[]> {
+  const input = parseInput(assignInput, raw);
+  const got = await SERVICES.reassignOwner(db, identity.member, input);
   return [JSON.stringify(got, null, 2)];
 }
 
@@ -621,8 +739,13 @@ export const TOOLS: readonly ToolDef[] = [
     inputSchema: planInput,
     purpose: '为一条需求生成某个阶段的 UEmaster 任务包（可直接执行的中文指令：画什么、'
       + '写到哪个文件、怎么交回来）。阶段只有 evaluate（评估）/ review（评审）/ inspect（走查）。'
+      + '**为什么要出这份材料**：它是一张能在评审会上直接投屏的 HTML——流程图 + 页面/入口 + '
+      + '异常与边界 + 范围，评审人按它签字，比一段文字少两轮返工。'
+      + '**示例**：一条「分享页搜索」的需求会得到「搜索入口 → 结果页 → 空态/失败态」三张流程图、'
+      + '5 条待确认项，评审时逐条拍板。'
       + '纯读：不改需求状态、不写时间线——材料是产物，立项（requirement_start_design）是'
       + '另一个动作。包里的文件名带版本号（evaluate-v003.html），照着写不会覆盖历史版本。'
+      + '**六问缺任何一条都不会出包**（先用 requirement_brief_prompts 补齐）。'
       + '拿到包之后照它做，写完文件再调 uemaster_attach。',
     call: planTool,
   }),
@@ -633,8 +756,72 @@ export const TOOLS: readonly ToolDef[] = [
     action: null,
     inputSchema: createInput,
     purpose: '新建一条需求（落在「收集」）。actor 就是这个 token 对应的人；'
-      + 'requester 是「谁提的」这个自由文本字段，不一定是同一个人。',
+      + 'requester 是「谁提的」这个自由文本字段，不一定是同一个人。'
+      + '**录入前必须先问用户六问**：调 requirement_brief_prompts 取六条问题原文，逐条问、'
+      + '不要自己编答案，再填进 context/problem/outcome/surfaces/edgeCases/outOfScope。'
+      + '六问不全也能建（进收集），但之后不能立项、不能生成评估材料。',
     call: createTool,
+  }),
+  tool({
+    name: 'requirement_brief_prompts',
+    title: '六问清单（照念给用户）',
+    scope: 'read',
+    action: null,
+    inputSchema: z.object({}),
+    purpose: '返回六问的原文与「不填会怎样」，供 agent 在录入/补全前逐条问用户。'
+      + '六问全必填：缺任何一条都不能立项，也不能生成评估材料。纯读。',
+    call: briefPromptsTool,
+  }),
+  tool({
+    name: 'member_list',
+    title: '成员列表',
+    scope: 'read',
+    action: null,
+    inputSchema: z.object({}),
+    purpose: '在册成员与他们的 UUID / 角色 / 条线。新建需求指派负责人、转交负责人时'
+      + '需要 ownerMemberId，就用这里的 id。纯读。',
+    call: memberListTool,
+  }),
+  tool({
+    name: 'release_list',
+    title: '版本列表',
+    scope: 'read',
+    action: null,
+    inputSchema: z.object({}),
+    purpose: '版本与它们的 UUID、发版日、已上线/在途/延期条数。排期（requirement_schedule）'
+      + '需要 releaseId，就用这里的 id。纯读。',
+    call: releaseListTool,
+  }),
+  tool({
+    name: 'requirement_update',
+    title: '改需求（描述类字段）',
+    scope: 'write',
+    action: null,
+    inputSchema: updateInput,
+    purpose: '改标题 / 六问 / 平台 / 优先级 / 备注。改不了类型、提出人、负责人、状态'
+      + '（负责人用 requirement_assign，状态用状态动作）。权限：负责人 / 条线负责人 / 超管。'
+      + '六问改完仍不全时，立项与生成照旧被拒。',
+    call: updateTool,
+  }),
+  tool({
+    name: 'requirement_claim',
+    title: '认领（无主 → 我）',
+    scope: 'write',
+    action: null,
+    inputSchema: claimInput,
+    purpose: '把一条**还没有负责人**的需求接到自己名下，不动状态。认领后你成为负责人，'
+      + '才能改它、立项、提交评审。已有负责人的需求不能认领（用 requirement_assign 转交）。',
+    call: claimTool,
+  }),
+  tool({
+    name: 'requirement_assign',
+    title: '转交负责人',
+    scope: 'write',
+    action: null,
+    inputSchema: assignInput,
+    purpose: '把需求转给另一个在册成员（ownerMemberId 用 member_list 的 id）。'
+      + '条线负责人只能转给本线的人，超管不受限；PM 不能转交。',
+    call: assignTool,
   }),
   tool({
     name: 'uemaster_attach',
@@ -644,7 +831,7 @@ export const TOOLS: readonly ToolDef[] = [
     inputSchema: attachInput,
     purpose: '把已经生成好的产物链接交出：站内路径（形如 /uemaster/PAN-7/evaluate-v003.html，'
       + '项目根目录 data/uemaster/ 下必须真有这个文件）或 http(s) 完整链接。'
-      + '会写一条 uemaster.attached 事件；需求还在「收集」时交评估材料会顺带推进到「待设计」。',
+      + '只写一条 uemaster.attached 事件，**不改状态**：要推进用 requirement_start_design。',
     call: attachTool,
   }),
   tool({
@@ -686,6 +873,18 @@ export const TOOLS: readonly ToolDef[] = [
       + '承诺完成日不能早于提测日、也不能晚于版本发版日。这一步就是「承诺」——'
       + '它会在时间线上写下这个 token 对应的人的名字。',
     call: scheduleTool,
+  }),
+  tool({
+    name: 'requirement_reschedule',
+    title: '改排期（版本 / 提测日 / 承诺完成日）',
+    scope: 'write',
+    action: null,
+    inputSchema: rescheduleInput,
+    purpose: '已经排进版本的需求（待开发 / 开发中 / 测试中）改版本或改两个承诺日，**不动状态**。'
+      + '第一次排期用 requirement_schedule；这条用于版本页「管理进度」。'
+      + '规则与排期一致：提测日 ≤ 承诺完成日 ≤ 版本发版日，且必须有正式 PRD。'
+      + '每次改写在时间线上留一条 requirement.rescheduled（带改前改后）。',
+    call: rescheduleTool,
   }),
   tool({
     name: 'requirement_bounce',

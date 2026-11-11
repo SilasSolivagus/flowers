@@ -102,3 +102,15 @@
   .vpage{--g-gut:140px}
   .vpage .vbar{gap:8px}
 }
+
+/* 本版本需求与进度（2026-11-11）：一张表 + 每行一个内联表单。
+   日期输入与按钮压在一行里——这一段的用途是「批量改几条日期」，行高越大越难扫。 */
+[data-panel="release-plan"] table.plan{width:100%;border-collapse:collapse;margin-top:8px}
+[data-panel="release-plan"] table.plan th{font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3);text-align:left;padding:4px 8px}
+[data-panel="release-plan"] table.plan td{padding:4px 8px;border-top:1px solid var(--c-line)}
+[data-panel="release-plan"] .plan-form{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+[data-panel="release-plan"] .plan-form input[type="date"]{width:150px}
+[data-panel="release-plan"] .plan-add{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-top:12px}
+[data-panel="release-plan"] .plan-add label{display:flex;flex-direction:column;gap:4px;
+  font:400 var(--t-caption) var(--f-sans);color:var(--c-text-3)}
+.muted{color:var(--c-text-3)}

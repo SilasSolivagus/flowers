@@ -274,6 +274,8 @@ export type Detail = {
     prdUrl: string | null;
     /** 备注（2026-11-10）：null = 没写。 */
     remark: string | null;
+    /** 迁移来源：老 Flower 那条需求的 uuid（2026-11-11 起给 MCP 对账用）。 */
+    legacyRef: string | null;
     /**
      * 平台（P4-08）：这条需求落在哪几个端上。空数组 = 未标注。
      *
@@ -702,6 +704,8 @@ type Row = {
   prd_url: string | null;
   /** 备注（2026-11-10）：只给抽屉与汇总表看，不进生成链路。 */
   remark: string | null;
+  /** 迁移来源（Flower 的 uuid）。旧编号在迁移后重排，只有它能对上老系统。 */
+  legacy_ref: string | null;
   skip_reason: string | null;
   state_entered_at: string;
   commit_test_at: string | null;
@@ -763,7 +767,8 @@ export async function getRequirementDetail(
   // 版本的 join 也带：版本被删之后，那条需求的排期字段仍在，但**版本名不该再显示**
   // （`rel.id` 会因为 join 不成立变成 null，`commit.release` 随之整段消失）。
   const found = await db.execute<Row>(sql`
-    select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.remark, r.skip_reason,
+    select r.id, r.number, r.title, r.type, r.state, r.requester, r.prd_url, r.remark,
+           r.legacy_ref, r.skip_reason,
            r.state_entered_at, r.commit_test_at, r.commit_due_at, r.created_at,
            r.context, r.problem, r.outcome, r.surfaces, r.edge_cases, r.out_of_scope,
            r.platforms, r.priority, r.source, r.source_note,
@@ -941,6 +946,7 @@ export async function getRequirementDetail(
       ownerLineLabel: lineLabelOf(row.owner_line),
       prdUrl: row.prd_url,
       remark: row.remark,
+      legacyRef: row.legacy_ref,
       platforms: normalizePlatforms(row.platforms),
       platformsLabel: platformsLabel(normalizePlatforms(row.platforms)),
       priority: normalizePriority(row.priority),
