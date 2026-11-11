@@ -9,7 +9,7 @@ import { BOARD_STATES } from '../src/core/read/board.js';
 import type { DetailAction } from '../src/core/read/detail.js';
 import { STATE_LABEL, type State } from '../src/core/state-machine.js';
 import { DESCRIPTIVE_FIELDS } from '../src/core/requirements/fields.js';
-import { missingRequired } from '../src/core/requirements/brief.js';
+import { evaluateLock, missingRequired } from '../src/core/requirements/brief.js';
 import { packFor, STAGES, type Stage } from '../src/core/uemaster/packs.js';
 import { nextArtifactVersion } from '../src/core/uemaster/versions.js';
 import { SERVICES } from './services.js';
@@ -333,7 +333,12 @@ function legalSentence(draft: Draft): string {
 function trailer(draft: Draft): string {
   const base = (process.env.FLOWERS_PUBLIC_URL ?? '').replace(/\/+$/, '');
   return `权限：${scopeLabel(draft.scope)}。${legalSentence(draft)}`
-    + `执行方式：技能包 ${base || ''}/api/v1/skills/flowers-ops（脚本直调 /api/v1/*，本回复只说明规则）。`;
+    // 读工具**就是**数据出口（返回业务 JSON）；只有写动作才建议走脚本。原来一句话把两者
+    // 都说成「只说明规则」，调用方会以为要再取技能包才拿得到数据。
+    + (draft.scope === 'read'
+      ? '本工具直接返回数据（纯读）。'
+      : `执行方式：建议用技能包 ${base || ''}/api/v1/skills/flowers-ops 里的脚本直调 /api/v1/*；`
+        + '本工具也能直接调，但只负责校验与规则。');
 }
 
 function tool(draft: Draft): ToolDef {
@@ -363,6 +368,18 @@ async function planTool(identity: Identity, raw: unknown): Promise<string[]> {
 
   const detail = await SERVICES.getRequirementDetail(requirementId);
   if (detail === null) throw new AppError('not_found', NO_REQUIREMENT);
+
+  /**
+   * 六问门（2026-11-11 修）：说明里写着「缺任何一条都不会出包」，实现当时只在
+   * `start.ts`（Flowers 自己跑生成器）把了门，MCP 这条**直接出包**的路漏了。
+   * 现在与生成同一条规则、同一句话：评估阶段的包要求六问齐。
+   *
+   * 评审 / 走查两阶段不要求：它们的输入是 PRD 与代码镜像，不以六问为前提。
+   */
+  if (stage === 'evaluate') {
+    const refusal = evaluateLock(detail.description);
+    if (refusal !== null) throw new AppError('description_incomplete', refusal);
+  }
 
   /**
    * 这一版是第几版（2026-11-10 owner 的第一次纠正）：包里那句「写到哪个文件」必须带
@@ -859,7 +876,7 @@ export const TOOLS: readonly ToolDef[] = [
     scope: 'write',
     action: null,
     inputSchema: updateInput,
-    purpose: '改标题 / 六问 / 平台 / 优先级 / 备注。改不了类型、提出人、负责人、状态'
+    purpose: '改标题 / 六问 / 类型 / PRD 链接 / 平台 / 优先级 / 备注。改不了提出人、负责人、状态'
       + '（负责人用 requirement_assign，状态用状态动作）。权限：负责人 / 条线负责人 / 超管。'
       + '六问改完仍不全时，立项与生成照旧被拒。',
     call: updateTool,
