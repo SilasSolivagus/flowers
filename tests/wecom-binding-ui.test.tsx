@@ -90,7 +90,9 @@ describe('企微那两行', () => {
     // 一、用途（私聊通知）。
     expect(html).toContain('私聊发到你的企微');
     // 二、怎么拿到自己的 userid（企业微信里那条路 + 管理员那条路）。
-    expect(html).toContain('企业微信 → 我 → 资料页');
+    // 主路径是按钮（按名字查），不是让人去「我 → 资料页」手抄——那里看不到 UserID。
+    expect(html).toContain('按名字查');
+    expect(html).toContain('work.weixin.qq.com');
     expect(html).toContain('通讯录');
     // 三、输入框与「验证」。
     expect(html).toContain('placeholder="例如：lvpin"');
@@ -124,7 +126,8 @@ describe('企微那两行', () => {
   it('三段说明各自只说一件事（文案本身不退化成一串功能清单）', () => {
     expect(BIND_WHY).toContain('私聊');
     expect(BIND_WHY).toContain('没绑定也能用');
-    expect(USERID_HOW).toContain('资料页');
+    expect(USERID_HOW).toContain('按名字查');
+    expect(USERID_HOW).toContain('通讯录');
     expect(ROBOT_WHY).toContain('可选');
     // 「存在本地」这件事必须在，因为它是「我凭什么敢填」的依据。
     expect(ROBOT_WHY).toContain('库里');
