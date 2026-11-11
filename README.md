@@ -1,9 +1,16 @@
-# Flower · 需求门禁
+# flowers · 需求门禁
 
-一个给 123 云盘产品线用的「需求门禁」系统：每条需求在 10 个状态之间按 13 条合法迁移前进，
-谁能做哪一步、什么时候能做，全部由领域层判断。**状态机才是产品，界面只是它的一个窗口**
-——页面不重算规则、不预校验表单、不替领域编造失败原因，它只做两件事：读模型给什么就画什么，
-用户点了就把表单交给对应的服务。
+123 云盘产品线的需求流程系统：需求在 10 个状态之间按 15 条合法迁移前进，谁能做哪一步、
+什么时候能做，全部由领域层判断。**状态机才是产品，界面只是它的一个窗口**——页面不重算规则、
+不预校验表单、不替领域编造失败原因。
+
+除了看板本身，它还负责三件事：
+
+1. **通知**：状态变动播报到团队群；需要谁动手的私聊推给他（可换成自己的机器人）。
+2. **对外接口**：MCP（27 个工具，讲规则）+ REST `/api/v1/*`（真执行）+ 技能包 `flowers-ops`。
+3. **告警**：失败堆积、任务停摆、流程卡点、版本风险、数据质量，按冷却周期推给相关人。
+
+---
 
 ## 环境要求
 
@@ -16,383 +23,258 @@
 git clone <repo> flowers && cd flowers
 npm install
 
-npm run db:up           # 起 postgres（docker compose up -d db）
-npm run db:migrate      # 建成表，幂等，可反复跑（演示库 flowers）
-npm run db:test:setup   # 建测试库 flowers_test + 跑同一批迁移，幂等
-npm run seed            # 灌演示数据（12 条需求铺满 10 列、5 个成员、2 个版本）
+npm run db:up           # 起 postgres
+npm run db:migrate      # 建表，幂等
+npm run db:test:setup   # 建测试库 flowers_test + 同一批迁移，幂等
+npm run seed            # 演示数据（12 条需求铺满十列、5 个成员、2 个版本）
 
 npm run dev             # http://localhost:3000
 ```
 
-要跑生产构建：
+生产构建：
 
 ```bash
-npm run build        # 必须走 webpack，见下面「三个坑」
-npm start            # http://localhost:3000
+npm run build   # 必须带 --webpack（extensionAlias 只在这个打包器下生效）
+npm start
 ```
 
-自检命令：
+自检：
 
 ```bash
-npx vitest run       # 1223 个用例（1222 通过 + 1 跳过）：领域 + 读模型 + 时钟 + 并发 + 重置守卫 + UEmaster 任务包与 attach
-                     # 跑的是独立库 flowers_test，**不碰演示库 flowers**
-npx tsc --noEmit     # 类型检查
-npm run demo         # 领域冒烟脚本：一条需求从收集走到上线，8 步逐项对齐，退出码 0 = 通过
+npx vitest run     # 114 个文件 / 2016 条用例，跑独立库 flowers_test，不碰演示库
+npx tsc --noEmit   # 类型检查
+npm run demo       # 领域冒烟：一条需求从收集走到上线；跑完要 npm run seed -- --reset
 ```
 
-`npm run demo` 会 `resetDb()` 清空数据，**跑完要补一次 `npm run seed -- --reset`**，否则界面是空的。
+---
+
+## 状态机（10 个状态 · 15 条迁移）
+
+```
+inbox 收集 → design 待设计 → review 待评审 → queue 待排期 → ready 待开发 → dev 开发中 → test 测试中 → live 已上线
+                                    ↘ rejected 已拒绝        ↗（任意非终态 → shelved 已搁置 → inbox）
+```
+
+| 迁移 | 触发 | 备注 |
+|---|---|---|
+| inbox → design | approve（立项） | **六问门**：`context/problem/outcome/surfaces/edgeCases/outOfScope` 缺一条就拒 |
+| inbox → review | submit_review | 必须有正式 PRD |
+| design → review | submit_review | 同上 |
+| review → queue | review_pass | 只有派单的评审人 / 超管能签 |
+| review → design | review_reject | 要写原因 |
+| queue → ready | schedule | 版本 + 提测日 + 承诺完成日，三缺一不可；要有 PRD |
+| ready → dev / dev → test / test → live | clock | 时钟按日期推进，cron 每 5 分钟一轮 |
+| dev → ready | reopen | **退回待开发**（2026-11-11）：接错了/方案变了，必须写原因 |
+| test → dev | bounce | 测试没过，重填承诺完成日 |
+| shelved → inbox | restore | 恢复（不做「回原阶段」，见已知限制） |
+| live → queue | rollback | 发出去有问题，退回待排期重排；清空版本与两个日期 |
+
+另有**状态校准**（超管专用，`requirement_calibrate`）：把存量卡片直接摆到它真实所在的阶段，
+必须写原因，只改状态、不动版本与产物。它不是捷径，是纠错。
+
+## 权限（六种能力，按"负责人所在条线"锚定）
+
+| 能力 | 谁 |
+|---|---|
+| `edit` | 负责人本人 / 负责人所在条线的负责人 / 超管 |
+| `review` | 负责人所在条线的负责人 / 超管（且状态在评审、派单是自己） |
+| `reassignOwner` | 条线负责人（只能转本线）/ 超管 |
+| `claim` | 任何 PM / 条线负责人 / 超管（只能认领无主需求） |
+| `admin` / `manageMembers` | 超管（`product_owner`） |
+
+七个人在册：房超（超管）、赵越（商业线负责人）、吕正豪（功能线负责人）、吕品/李嘉/王妍/罗丹（PM）。
+
+---
+
+## 页面
+
+| 路径 | 是什么 |
+|---|---|
+| `/` | 看板：10 列 = 10 个状态，卡片点开抽屉（`?open=<id>`）。默认隐藏「已上线超 90 天」，`?scope=all` 放回来 |
+| `/releases` | 版本页：甘特 + 时间进度 + **本版本需求与进度**（加需求、改提测日/承诺日/版本） |
+| `/settings` | 设置：我的（模型、企微绑定、个人机器人、MCP token）/ 项目 |
+| `/settings/sheet-import` | 企微表 → 待排期核对（超管）：匹配候选、逐条勾选、应用 |
+
+身份是登录会话（`flowers_session`，生产带 `Domain=.dirctable.com`，便于 b123 等兄弟子域共用）。
+`b123.dirctable.com` 的 nginx `auth_request` 打到 `/api/v1/auth/check?perm=b123`：200 放行 / 401 去登录。
+
+---
+
+## 通知
+
+### 群播报（团队群，`group_posts` 台账）
+
+进群的八种动静：认领、立项、提交评审、评审通过、被拒绝、被搁置、**已上线（附「请提出人验收」）**、回滚。
+每条带 `PAN-号 + 标题` 的抽屉链接与「谁 · 什么时候」。
+
+- **批量事件不播报**：payload 里带 `batch` 的事件（导入、批量改）只写账、不进群。
+- 版本日报（每天 10:00）：剩余天数、需求数、已上线/在途、今日到点、已延期（点名三条）。
+
+```bash
+npx tsx scripts/group-dispatch.ts --init      # 记起始水位，不补历史
+npx tsx scripts/group-dispatch.ts             # 播状态变动
+npx tsx scripts/group-dispatch.ts --daily     # 版本日报
+npx tsx scripts/group-dispatch.ts --dry-run   # 只打印
+```
+
+### 私聊（`notify_deliveries` 台账）
+
+只推「与你有关」的事件：派给你的评审、你名下需求的关键变动（评估/打回/搁置/恢复/排期/状态变更）、
+你提的需求进入收集。**两种送达方式**：
+
+| 方式 | 说明 |
+|---|---|
+| 共用的机器人（`wecom-cli message aibot send`） | **个人机器人**，只有它的主人能收到；别人无法与它对话 |
+| 用自己的机器人（群机器人 webhook） | 任何人可用：企微群 → 添加机器人 → 把 webhook 填进设置页 |
+
+发生 `853008`（"当前会话不是机器人的最近会话"）时，实际含义是「这台机器人只能给本人发」，
+设置页会把该成员标成 **已绑定 · 未激活** 并给出改用 webhook 的指引。
+
+---
 
 ## 待排期 → 企微汇总表
 
-需求**进待排期**（`review_pass`，`review → queue`）时，往一张别人维护的电子表格末尾追加一行：
-`迭代需求汇总-版本日志` 的「待排期需求」tab。
+需求进待排期时往表尾追加一行（表：`迭代需求汇总-版本日志` / tab `kvf2dh`）。
 
 ```bash
-npm run sheet:sync          # 扫一轮：把 pending / failed 的写进表里
-npx tsx scripts/sheet-sync.ts --limit 20   # 这轮最多 20 条（默认 50）
+npx tsx scripts/sheet-sync.ts --limit 20    # 扫一轮 pending/failed
 ```
 
-三件事写在代码里，不是写在文档里：
+- **不绑在请求上**：迁移事务里只登记 `sheet_sync(pending)`，由 cron 扫。
+- **两层幂等**：`unique(requirement_id, target)`；写入前读 A 列，`PAN-n` 已在就跳过。
+- 列映射：# 写 `PAN-n`；名称/负责人/优先级/涉及端/描述/PRD/备注有值；迭代情况、涉及研发人员、预评审留空。
 
-1. **不绑在请求上**。状态迁移的同一个事务里只登记一条 `sheet_sync`（pending），真正
-   的追加由上面那条命令扫。企微抖了不该让需求进不了待排期。
-2. **两层幂等**。台账层 `unique (requirement_id, target)`；表格层追加前先读 A 列，
-   `PAN-<编号>` 已经在表里就跳过（超时重跑不会写出两行）。读不到 A 列就整轮不写。
-3. **列映射**。`#` 写 `PAN-n`（表里那 22 行旧数据是人工连号，**不动**，新行往后接）；
-   需求名称 / 负责人 / 优先级 / 涉及端 / 需求描述（取 `outcome`，空则退 `problem`）/
-   PRD链接 / 备注 有值；迭代情况 / 涉及研发人员 / 预评审 三列留空——flowers 里没有
-   数据源，机器不猜（表里这三列本来就基本是空的）。
-
-目标表可以用环境变量换掉，不必改代码：`FLOWERS_QUEUE_SHEET_DOC`（整条文档链接）、
-`FLOWERS_QUEUE_SHEET_TAB`（工作表 id，现在是 `kvf2dh`）。
-
-定时跑（cron，每 10 分钟一次；分字段写 0,10,20…，别用星号斜杠，它会提前关注释）：
-
-```
-cd /path/to/flowers && npx tsx scripts/sheet-sync.ts >> /tmp/flowers-sheet.log 2>&1
-```
-
-## 群播报（状态变动 + 版本日报）
-
-发到**团队群**（企微群机器人），与「发给个人」的 `scripts/wecom-dispatch.ts` 是两条路，
-各有各的台账（`group_posts` / `notify_deliveries`）。
+**导入核对页**（`/settings/sheet-import`，超管）：把表里每一行与池子里匹配，给出「挪进待排期 /
+新建 / 不动」的建议与理由，逐条勾选后才写库（写 `state_changed` + `review_passed`，带 `batch`，不播报）。
 
 ```bash
-npx tsx scripts/group-dispatch.ts --webhook 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…'
-npx tsx scripts/group-dispatch.ts --init      # 记起始水位：不补播历史事件
-npx tsx scripts/group-dispatch.ts             # 播状态变动（一轮合成一条，默认 ≤10 条）
-npx tsx scripts/group-dispatch.ts --daily     # 版本每日进展（一天一条，含所有在播版本）
-npx tsx scripts/group-dispatch.ts --dry-run   # 只打印要发什么（不需要先配 webhook）
+npx tsx scripts/import-sheet-queue.ts --rows rows.json          # 只出计划
+npx tsx scripts/import-sheet-queue.ts --rows rows.json --apply  # 落库
 ```
 
-进群的八种动静：认领、立项进待设计、提交评审、评审通过进待排期、被拒绝、被搁置、
-**已上线（附一句「请提出人验收」）**、回滚。每条带 `PAN-号 + 标题` 的抽屉链接。
+---
 
-版本日报只播「发版日在过去 7 天到未来 45 天」的版本：剩余天数、需求数、已上线/在途、
-**今日到点**、**已延期（点名三条）**。数据来自 `listReleases()`——甘特用的同一个读模型。
+## 告警（`src/core/alerts`）
 
-cron（每 5 分钟一个循环 + 每天 10:00 一条日报）：
+| 级别 | 规则 | 阈值 | 冷却 |
+|---|---|---|---|
+| P0 | 群播报失败 | 30 分钟内 >0 | 6 小时 |
+| P0 | 汇总表同步失败 | ≥3 行 | 6 小时 |
+| P0 | 定时任务停摆 | 超过 2 倍周期没更新 | 6 小时 |
+| P0 | 企微授权失效 | `wecom-cli` 非 authorized | 6 小时 |
+| P0 | 看板门不可用 | b123 探活 5xx / 连不上 | 6 小时 |
+| P1 | 个人推送失败 | ≥3 条/2 小时 | 3 天 |
+| P1 | 待排期积压 | >15 条 | 3 天 |
+| P1 | 需求卡住 | 待评审/待排期 >5 天、开发中 >10 天 | 3 天 |
+| P1 | 收集久放 | >14 天未立项 | 3 天 |
+| P2 | 版本有延期需求 | 承诺日已过未上线 | 3 天 |
+| P2 | 发版前仍有未提测 | 距发版 ≤3 天 | 3 天 |
+| P3 | 成员收不到私聊 | 无 userid 也无 webhook | 3 天 |
+| P3 | 同名需求重复 | 归一标题重复 | 3 天 |
 
-```
-*/5 * * * * cd /path/to/flowers && npx tsx scripts/group-dispatch.ts >> /tmp/flowers-group.log 2>&1
-0 10 * * *  cd /path/to/flowers && npx tsx scripts/group-dispatch.ts --daily >> /tmp/flowers-group.log 2>&1
-```
-
-## 时间范围、回滚、批量搁置
-
-三件事都是「简化」的一部分：板子上只留下还在动的东西，发错了能撤，堆积的能收。
-
-1. **看板默认不显示「已上线超过 90 天」的需求**（`LIVE_HISTORY_DAYS`，read/board.ts）。
-   库里 265 条已上线里 207 条停在那儿超过 90 天，全是迁移历史；`?scope=all` 或工具条
-   上那个「含历史」开关会把它们放回来。判据用 `state_entered_at`（发出去多久），
-   不是 `created_at`。其余九列不受影响。
-2. **回滚**：`live → queue`（抽屉里已上线那一行的「回滚」）。它退到**待排期**而不是
-   开发中——`dev` 的时钟会立刻把它推回测试与已上线，等于没撤；退到队列才有出路
-   （重新排期一次）。版本与两个日期一起清空，撤回来之前的那一版写进事件流。
-3. **批量搁置**（`scripts/shelve-stale.ts`）：默认只动「收集」、超过 180 天、dry-run。
+每条消息四段：**级别 → 现在多少 → 具体哪 3 条（PAN + 负责人 + 多久）→ 下一步 + 链接**，
+并 @ 相关人；@ 到条线负责人时写明「请安排人处理」。
 
 ```bash
-npx tsx scripts/shelve-stale.ts                          # 预览清单
-npx tsx scripts/shelve-stale.ts --dry-run=false          # 真搁置
-npx tsx scripts/shelve-stale.ts --days 90 --states inbox,design
+npx tsx scripts/alerts.ts            # 只出报告
+npx tsx scripts/alerts.ts --apply    # 真发（cron 每 15 分钟跑这个）
 ```
 
-收集用 `created_at` 算年龄（迁移把 `state_entered_at` 压平成了迁移那一天），
-其余状态用 `state_entered_at`。原因写成「长期未推进：停在收集超过 N 天」，
-每一条都会在事件流里留下 actor = 超管。
+---
 
-## 三个页面
+## MCP 与 REST
 
-| 路径 | 是什么 |
-| --- | --- |
-| `/` | 需求看板。10 列 = 10 个状态，每列固定 220px，比视口宽就横向滚（滚轮也能滚）。卡片三行：标题 / 等谁 / 编号 + 停留天数；「现在欠你一个动作」的卡有主色框。点卡片开抽屉，URL 是 `/?open=<需求 id>`，可刷新、可分享、可后退。 |
-| `/releases` | 版本页。按版本看甘特（需求 × 日期）与时间维度的进度：开工日到发版日用了多少、在途几条、延期几条、已上线几条。 |
-| `/settings` | 设置页。两个 tab：`我的` / `项目`，用 `?tab=project` 这类查询参数切换，不是客户端状态。 |
+### MCP（27 个工具）：讲规则
 
-**八个动作都在看板卡的抽屉里**（抽屉第六段是动作条），不在导航上：提交评审 / 通过 /
-打回（评审打回） / 排期 / 打回（测试打回） / 拒绝 / 搁置 / 恢复。每个动作能看到哪些、
-点下去要填什么，由读模型按当前状态给出；失败就在抽屉里显示服务抛出的那句中文，
-刷新也不会把它弄丢。
-
-「评估」不在动作条里：它没有单独的一步。抽屉「参考」段那三行各有一个「生成」——服务端
-把任务包喂给本机装着的生成器，产物落回 `data/uemaster/PAN-n/<stage>.html`，那一行就变成
-链接 + 日期。生成器怎么选见下面「生成器：装了 ≠ 能用」；不装生成器也能走「交回材料」，
-或者接 MCP 让别的 agent 干（见 `docs/mcp.md`）。
-
-身份暂时只是一个 cookie（`flowers_actor`，缺省「吕品」），没有登录；界面上**没有切换入口**——
-左轨底部那块只是把当前身份读出来（姓名 + 角色），SSO 之前身份由配置决定。
-左轨的折叠偏好也是 cookie（`flowers_rail`，`open` / `collapsed` / `auto`）。
-
-## UEmaster 怎么接
-
-### UEmaster 是什么
-
-[UEmaster](https://github.com/SilasSolivagus/UEmaster) 是一个 **agent skill**（不是服务、不是 SDK）：
-两个 sub-skill —— `flow-canvas`（把流程画成横平竖直的 SVG：流程图 / 架构图 / ER / 甘特 / 时序）
-和 `flow-walkthrough`（出三栏联动的评审页：左边点流程节点，右边切原型页面）。
-**它自己没有模型**：纯提示词 + 确定性 Python 排版脚本，跑在**你的** agent 里。这就是
-Flowers 敢说「我们不调 LLM」的前提，也是下面那条限制的来源。
-
-### 三段循环
-
-一条需求、一个阶段，转三圈：
+`/mcp`（Streamable HTTP，Bearer `flw_…`）。工具描述里写清：能不能做、合法状态、要填什么、
+六问不齐会怎样。执行建议走 REST（每条描述末尾给技能包地址）。
 
 ```bash
-uemaster_plan   { requirementId, stage }         # ① 拿任务包（纯读，不改状态）
-# ② agent 照包干：装 flow-canvas / flow-walkthrough，跑 UEmaster，写单个自足 HTML 到
-#    data/uemaster/PAN-<n>/<stage>.html
-uemaster_attach { requirementId, stage, url }    # ③ 把 /uemaster/PAN-<n>/<stage>.html 交回来
+npx tsx scripts/mcp-smoke.ts     # 冒烟
 ```
 
-`stage` 只有三个值：`evaluate` / `review` / `inspect`（评估 / 评审 / 走查）。交回之后抽屉
-「参考」段对应那一行立刻变成链接 + 日期，记录段多一条
-`uemaster.attached`。站内路径必须真有文件（`data/uemaster/` 下），否则 `artifact_missing`——
-包自己写着该往哪写，写不对就是没干活。文件不在 `public/` 里：`/uemaster/...` 由动态路由
-`app/uemaster/[...path]/route.ts` 服务，每个响应带
-`Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:`
-——产物是同源的第三方 HTML，它的脚本能跑（走查页的点击切换因此在站内是活的），但没有
-`allow-same-origin`，所以它读不到本站 cookie、用不了 storage、同源请求也发不出去
-（R-P2-9）。
-
-### 生成器：装了 ≠ 能用
-
-「生成」跑的是**本机的一条命令**，不是任何 LLM SDK。可选的是这五个，`src/core/uemaster/candidates.ts`
-里各有一行（id / 显示名 / 命令 / 一句说明）：
-
-| id | 显示名 | 命令 | 任务包怎么进去 |
-| --- | --- | --- | --- |
-| `claude` | Claude Code | `claude -p --permission-mode acceptEdits` | stdin |
-| `codex` | Codex | `codex exec --sandbox workspace-write --skip-git-repo-check -` | stdin |
-| `dsh` | DeepSeek Harness | `dsh headless {prompt}` | 命令里的 `{prompt}`（argv） |
-| `ollama` | Ollama | `ollama run <模型名>` | stdin（先把模型名填上） |
-| `custom` | 自建 / 自定义 | 自己写 | 两种都行 |
-
-**命令契约**只有两条：
-
-| 格子 | 两种形状 | 判据 |
-| --- | --- | --- |
-| 任务包怎么进 | 模板里有 `{prompt}` → 作为那个 argv 元素；没有 → 写 stdin | 看模板里有没有 `{prompt}` |
-| 产物怎么出 | 命令自己写文件 → 用那份新鲜文件；没写、但 stdout 里有 HTML → 由 Flowers 写到产物路径 | 退出 0 之后先看文件 mtime，再看 stdout；都没有就是失败 |
-
-**解析顺序**：`FLOWERS_GEN_CMD` → 设置页「生成器」保存的那条 → PATH 探测。
-探测到一条就直接用（第一次失败会打开选择器）；探测到多条就让人选；一条都没有时
-「生成」按钮禁用，旁边写着「未检测到生成器」。
-
-**装了 ≠ 能用，测试是唯一的真相。** PATH 只告诉你「要不要把它列出来」；`--version` 只告诉你
-「装了」；`login status` 甚至会撒谎——本机的 `codex login status` 打印
-“Logged in using ChatGPT”，紧接着 `codex exec` 回 401 `refresh token already used`。
-所以设置页那一行有个「测试」：拿一条固定的极小任务（`生成一个 HTML 文档，<title>flowers</title>，
-正文一行 hello`）真跑一次，10 秒，两种交法都认。通过就写「通过（字节 · 毫秒）」，
-失败就把 stderr 原文写在行下面。**保存不要求先测通**（模型名、代理、key 都可能要慢慢调），
-但没通过时那一行就写着「未通过测试」——它不会假装这条命令能用。
-
-### 入口是 MCP server
-
-Flowers 里那个「桥」是 `mcp/server.ts`，**只讲 stdio**，不是 HTTP 端口：
+### REST（`/api/v1/*`）：真执行
 
 ```bash
-npm run mcp:build                # = tsc -p tsconfig.mcp.json，编译到 dist/
-npm run mcp                      # = node dist/mcp/server.js，等 stdin 上的 JSON-RPC
-
-# 或者直接接进客户端（在仓库根跑一次，开发态用 tsx 省掉编译）
-claude mcp add flowers -e FLOWERS_MCP_ACTOR=claude-code -- npx tsx mcp/server.ts
-codex mcp add flowers --env FLOWERS_MCP_ACTOR=codex -- npx tsx mcp/server.ts
+GET  /api/v1/meta                      # API 版本、技能包地址、鉴权说明（公开）
+GET  /api/v1/skills[/flowers-ops]      # 技能包清单 / 整包内容（公开）
+GET  /api/v1/board
+GET  /api/v1/requirements?state=&owner=&q=&number=&offset=&limit=
+POST /api/v1/requirements
+GET|PATCH /api/v1/requirements/:id
+GET  /api/v1/requirements/:id/prd
+POST /api/v1/requirements/:id/{claim|assign|plan|artifacts}
+POST /api/v1/requirements/:id/actions/:action
+       start-design|submit-review|review-pass|review-reject|schedule|reschedule|
+       bounce|reopen|reject|shelve|restore|rollback|calibrate
+POST /api/v1/requirements/batch        # 批量改（默认 dryRun）
+GET  /api/v1/members | /api/v1/releases
 ```
 
-**生产（`npm ci --omit=dev`）先 `mcp:build` 再 `mcp`。** `tsx` 是 devDependency，
-装生产依赖时根本不存在，所以 `npm run mcp` 不经过它：`tsc -p tsconfig.mcp.json` 把
-`mcp/` 与 `src/` 编成 `dist/`（`rootDir` 是仓库根，所以 `dist/mcp/server.js` 引用的
-`../src/core/...` 落地就是 `dist/src/core/...`），再让 Node 直接跑那些文件。领域层用的是
-`./x.js` 这种**带扩展名**的相对导入——编译后它们就是真实存在的文件，这正是这条路能成立、
-而 Node 的「原生 type stripping」做不到的原因（它不做扩展名与目录解析）。客户端也可以
-直接写 `node /绝对路径/dist/mcp/server.js`。
+错误按 `AppError.code` 映射：403 / 404 / 409，正文是那句中文。写操作**不要自动重试**。
 
-三个工具（`uemaster_plan` / `uemaster_attach` / `requirement_show`）的参数、失败文案、
-cwd 与产物根的关系、几种客户端的接法：见 [`docs/mcp.md`](docs/mcp.md)。生成器（抽屉里那三个
-「生成」按钮跑什么）见上面「生成器：装了 ≠ 能用」。
-想不接客户端先验一遍：
+### 技能包 `flowers-ops`
+
+`skills/flowers-ops/`（SKILL.md + 零依赖 `flowers.mjs`）。版本号是内容哈希，取最新：
 
 ```bash
-npx tsx scripts/mcp-smoke.ts     # 用官方 SDK 的 client 起子进程，按 agent 的顺序跑完三个工具
+curl -s $FLOWERS_API/api/v1/skills/flowers-ops   # {version, updatedAt, files:[{path,content}]}
+FLOWERS_API=https://flower.dirctable.com FLOWERS_TOKEN=flw_… \
+  node flowers.mjs list --state=queue --limit=10
 ```
 
-**MCP 写库记在谁头上**由环境变量 `FLOWERS_MCP_ACTOR` 决定（写进 `events.actor` 与
-`uemaster_artifacts.created_by`），缺省 `agent`，空串也算没配。一个客户端一个值
-（`claude-code` / `codex` / `ci`）——别填真人姓名，那会让时间线看起来是某个人点的。
+---
 
-### 「收集 → 待设计」这道门，现在由评估材料推
+## 脚本一览
 
-需求还在**收集**里时交回 `stage='evaluate'`，`uemaster_attach` 会在**同一个事务**里把它
-推进**待设计**（与领域层 `evaluate` 走同一道门：没有类型就 `missing_type`，整条 attach
-回滚）。动作条上已经没有「评估」这个按钮了——材料的到达本身就是那次点击。已经在
-待设计或更后面的需求补一份新评估，只换材料，不会被打回。
+| 脚本 | 用途 |
+|---|---|
+| `wecom-dispatch.ts` | 时钟推进 + 私聊推送（`--tick`） |
+| `group-dispatch.ts` | 群播报（状态变动 / `--daily` 日报 / `--dry-run`） |
+| `sheet-sync.ts` | 待排期写企微表 |
+| `import-sheet-queue.ts` | 汇总表 22 行批量进待排期 |
+| `shelve-stale.ts` | 批量搁置（默认收集 / 180 天 / dry-run） |
+| `alerts.ts` | 告警一轮（默认 dry-run） |
+| `healthcheck.sh` | 自检：服务/端口/域名/库/企微/台账/磁盘 |
+| `migrate-flower.ts` | 从旧 Flower 迁移（`--refresh` 只补差异） |
+| `import-members.ts` / `reset-passwords.ts` | 名册 / 初始密码 |
+| `sheet` / `sheet-import` 相关见上文 | |
 
-评审与走查照旧：`提交评审` 要 PRD 链接，这条约束没变。
+---
 
-### 没有 agent 怎么办（D1 的实话）
+## 部署（当前生产）
 
-**Flowers 自己不调 LLM，也不会替你调。** P2 没做「组织自备 key、后端调模型」这条路：
-那等于把整份 skill 提示词与排版脚本搬进服务端、再选模型供应商管 key 计费限流，
-产出的图还会和 agent 里跑出来的不一致。所以：
+- 主机：`dogyun`（47.115.229.192），systemd `flowers.service`，端口 3010，Next 生产构建
+- 数据库：Docker `flowers-postgres`，`127.0.0.1:5434`
+- 入口：`edge-nginx`（容器）→ `172.19.0.1:3010`；`flower.dirctable.com` 与 b123 的门都走它
+- cron（`/etc/cron.d/flowers`）：推送/播报 5 分钟、汇总表 10 分钟、日报 10:00、自检 30 分钟、**告警 15 分钟**
 
-1. 抽屉「参考」段每一行右边有**复制任务包**：复制出来是一段完整的中文任务包（画什么、
-   装哪两个 skill、写到哪个文件、怎么交回），贴给任何能跑 skill 的 agent 就行，不必先
-   接 MCP。同一行右边还有**交回材料**：把材料贴成链接或直接传那个 `.html`（≤5 MB），
-   服务端会把它落到 `data/uemaster/` 并验证文件真在——所以完全绕开 MCP 也走得完整圈。
-2. 干脆不评估：`提交评审` 直接 `收集 → 待评审`。这条路**永远开着**，评估是加速器，不是关卡。
-
-## 领域怎么组织的
-
-```
-src/core
-├── state-machine.ts     10 个状态、13 条合法单步迁移、状态机亲自执行的两道门（必须带 PRD 链接、必须有类型）
-├── errors.ts            AppError：带 code 的中文错误，消息原样显示到界面上
-├── events.ts            事件流写入：每一次迁移都留一条「谁、什么时候、做了什么」
-├── validate.ts          服务入参的形状校验（zod）
-├── requirements/        七个服务，一个动作一个文件
-│   ├── create.ts          createRequirement          建需求（进收集）
-│   ├── evaluate.ts        evaluate                    评估（收集 → 待设计）
-│   ├── submit-review.ts   submitReview                提交评审（→ 待评审，要 PRD 链接）
-│   ├── review.ts          reviewPass / reviewReject   评审通过（→ 待排期）/ 打回（→ 待设计）
-│   ├── schedule.ts        schedule                    排期（→ 待开发，校验版本与三个日期）
-│   ├── bounce.ts          bounce                      测试打回（待测试 → 开发中）
-│   └── terminal.ts        reject / shelve / restore   终态与恢复
-├── clock/tick.ts        时钟：按上海日历日把 待开发 → 开发中 → 测试中 → 已上线 自动推进
-├── uemaster/            UEmaster 材料（P2）：只发任务包、收链接，不调模型
-│   ├── packs.ts           packFor(stage, req)：三份任务包正文（纯函数，不碰库）
-│   ├── attach.ts          attachArtifact()：校验链接与文件 → 落库 → 写事件；evaluate 时同事务推进状态
-│   ├── candidates.ts      五个生成器候选（显示名 / 命令模板 / 一句说明），纯数据，服务端与客户端共用
-│   ├── detect.ts          detect()：只查 PATH 里有哪些可执行文件，不执行它们；按 PATH 缓存
-│   ├── generator.ts       runGenerator() / testGenerator()：{prompt} 与 stdin、文件与 stdout、硬超时
-│   ├── settings.ts        app_settings 的读写：generator.command / generator.test
-│   ├── start.ts           startGeneration() + runJob()：作业的起点与 worker 的执行体
-│   ├── store.ts           站内路径 ↔ data/uemaster 的翻译（含越界守卫）
-│   └── list.ts            listArtifacts()：每个 stage 取最新一条
-└── read/                只读模型（SQL），页面的唯一数据来源
-    ├── board.ts           getBoard()：10 列 + 卡片摘要（等谁、停留几天、是否要你动手）
-    ├── detail.ts          getRequirementDetail(id)：抽屉六段 + 当前合法动作集合
-    ├── version.ts         listReleases() / getVersion(id)：版本页与排期下拉
-    └── member.ts          listMembers() / currentMember()：名册与 cookie 里的当前成员
-
-src/db
-├── schema.ts            表结构（requirements / review_assignments / events / releases / members /
-│                        uemaster_artifacts / uemaster_jobs / app_settings）
-├── migrations/          drizzle 生成的 SQL 迁移，`npm run db:migrate` 逐个应用
-├── client.ts            pg 连接池 + drizzle 实例
-├── migrate.ts           迁移执行器
-└── reset.ts             resetDb()：truncate 六张表并复位序列（含「这库能不能清」的守卫）
-
-mcp/
-├── server.ts             stdio MCP server（`npm run mcp`）：只做接线，不起端口
-└── tools.ts              三个工具的纯函数实现与 zod schema（客户端看到的 schema 就是这份）
-```
-
-界面层在 `app/`：`page.tsx` 是看板，`releases/`、`settings/` 是另外两页，`actions.ts` 是
-`'use server'` 的入口（只做「取字段 → 解身份 → 调服务 → 翻译 AppError」），
-`components/` 是外壳、左轨、看板、甘特、抽屉与动作条；参考段那一行有「生成 / 交回材料」，
-`GeneratorPicker` 是「探测到多条时选一个」的那张表。
-
-## 三个坑（新人一定会踩）
-
-**一、Next 必须用 `--webpack`，永远不要 `--turbopack`。**
-`src/core` 用的是 NodeNext 风格的相对导入（`import ... from './errors.js'`），这是 `tsx` / `vitest`
-直接跑 `.ts` 时唯一正确的写法。Turbopack 不做扩展名别名，server component 一 import 领域层就
-500：`Can't resolve './errors.js'`。`next.config.ts` 里用 `experimental.extensionAlias` 补上
-`.js → .ts`，而这条只有 webpack 认。所以 `package.json` 里两个脚本都写死了
-`next dev -p 3000 --webpack` / `next build --webpack`。
-
-**二、`resetDb()` 清空的是 `DATABASE_URL` 指向的那个库；测试进程连的是另一张库。**
-`resetDb()` 直接 truncate 十一张表，守卫就在 truncate 前面（`src/db/reset.ts`），口径分两条：
-
-- **测试进程**（`VITEST=true` 或 `NODE_ENV=test`）：只放行名字以 `_test` 结尾的库。默认落到
-  `flowers_test`，可用 `TEST_DATABASE_URL` 整条覆盖。**故意不看 `FLOWERS_ALLOW_RESET`**——
-  写错配置指到 `flowers` 时，`resetDb()` 会当场抛错、一张表都不清，而不是悄悄把演示数据截断。
-- **非测试进程**（`scripts/seed.ts`、`scripts/demo.ts`）：库名是 `flowers`，或显式
-  `FLOWERS_ALLOW_RESET=1`。这两个脚本清的是演示库，跑完要补：
+关键环境变量：
 
 ```bash
-npm run seed -- --reset
+DATABASE_URL=postgres://…            # 应用连库
+FLOWERS_SESSION_SECRET=…             # 会话签名密钥（不设会落盘生成一把）
+FLOWERS_COOKIE_DOMAIN=.dirctable.com # 跨子域共用会话（b123）
+FLOWERS_PUBLIC_URL=https://flower.dirctable.com
+FLOWERS_QUEUE_SHEET_DOC / _TAB       # 汇总表
+FLOWERS_GEN_CMD                      # 生成器命令（覆盖设置页那条）
+FLOWERS_GATE_URL                     # 告警探活的外部门
 ```
 
-于是 `npx vitest run` 与演示库彻底分开：测试前后 `requirements` 的 12 条 id 集合逐条不变，
-`app_settings` 的 provider / 镜像配置也不会被清掉。新克隆仓库先 `npm run db:test:setup` 一次
-（幂等，测试库不在时才建、迁移永远按最新一批补齐）。
+---
 
-`npm run seed` 不加 `--reset` 只在空库上灌，这是刻意的：一个已经有人用的库不该被演示数据覆盖。
+## 数据与迁移
 
-**三、`git clean -fdx` 会删掉 `data/`，而 `data/` 里放着全部产物与会话密钥。**
-`data/` 是 git 忽略的**运行期**目录：`data/uemaster/` 是每一条需求生成过的评估 / 评审 / 走查
-材料（`uemaster_artifacts` 只存链接），`data/.flowers-session-secret` 是会话签名密钥。
-`git clean -fdx` 里的 `-x` 专门删被忽略的文件，所以在仓库根敲一次，这两样**一起消失**，
-而且不会有任何提示——`git status` 干净得像什么都没发生。
+- 从旧 Flower 迁入 804 条需求，只保留 `legacy_ref`（老库 uuid）；**编号在迁移后重排**，
+  老编号不可反查。
+- 迁移只把旧描述写进 `context`，其余五问为空，所以**六问门会让存量需求过不了立项**——
+  这是刻意的：它们本来就该补完再立项。
+- 已存在 7 组同名重复（同一个规划在旧系统拆成多张卡），处理方式见告警 P3。
 
-2026-11-08 就这么丢过一次：一次子 agent 会话里的 `git clean -fdx` 把 `data/uemaster/` 整个删掉，
-`uemaster_artifacts` 的行还在，抽屉里那条链接点开是 404「产物不存在」；同一个 `data/.flowers-session-secret`
-被删之后，所有人手里的会话同时失效，看起来像「登录随机掉线」。
+## 已知限制
 
-所以：**这个仓库里永远不要跑 `git clean -fdx`，也不要跑 `git clean -fdx data`**。
-真要清未跟踪的文件，用 `git clean -fd`（不带 `-x`，忽略文件不受影响），而且先跑一次
-`git status --ignored` 看清它会动哪些东西——那一条命令列出来的就是 `-x` 会删的全部。
-备份优先：`cp -a data /tmp/data-$(date +%s)` 比任何一次 clean 都便宜。
-
-## 设计是哪来的
-
-- 界面规范：<https://github.com/SilasSolivagus/silas-UX>（**唯一真源**：颜色、字阶、间距、圆角、动效、尺寸、断点）
-  - `app/tokens.css` 是**生成产物**，不要手改：真源在 `vendor/silas-ux/tokens.json`（带 `COMMIT` 戳），
-    `npm run tokens:sync` 重新生成，`npm run tokens:check` 校验有没有漂
-  - `npm run design:check` 扫全部样式表：颜色字面量、裸 px 字号、非 4 倍间距、越档圆角、越档动效时长，
-    零违规才算过；同一条断言在 `tests/design-tokens.test.ts` 里，`npm test` 会拦住回潮
-  - 主题三档（随系统 / 浅色 / 深色）由顶栏开关写 cookie（`flowers_theme`），`<html data-theme>`
-    服务端直出，不闪白
-- 产品口径：`docs/superpowers/specs/2026-11-05-flower-gate-product-design.md`
-- 实施计划：`docs/superpowers/plans/`
-  - `2026-11-05-flowers-gate-p1-core.md` + `…-p1-core-ledger.md`（P1 领域内核与执行台账，含控制器裁决 R1–R44）
-  - `2026-11-06-flowers-p4-web.md`（P4 三个页面）
-  - `2026-11-06-flowers-p2-uemaster.md`（P2 UEmaster 接入，含裁决 D1 与 R-P2-1…R-P2-8）
-- UEmaster 本体：<https://github.com/SilasSolivagus/UEmaster>
-- 界面截图：`docs/superpowers/shots/`（`18`–`19` 是 UEmaster 两行，`20`–`22` 是复制任务包 / 附着产物 / 状态被推进）
-
-## 还糙的地方
-
-以下是 P2 收口时**已知且故意没修**的（都能在代码里指到具体位置）：
-
-1. **交回材料的两条路还不等价。** MCP 那条能指定任意站内路径或外链；抽屉那条只收
-   `/uemaster/` 下的站内路径（传文件时自己拼名字）。「传文件」在浏览器里没有被真的按过
-   一次（本机浏览器没有配置上传目录），multipart 那一段只在用例里验过。
-2. **`scripts/mcp-smoke.ts` 会留痕。** 它 attach 一条真产物（actor=`claude-code`，把需求
-   推进待设计），但收尾只删占位文件、不删 `uemaster_artifacts` 那一行——抽屉里因此会留下一行
-   「文件已丢失」（2026-11-08 之前是一条 404 链接，见下面第 3 条）。跑完要
-   `npm run seed -- --reset` 复位。
-3. **`listArtifacts` 仍然不 stat 文件**（R-P2-5 的一半还在）：它只读库。2026-11-08 之后，
-   「文件在不在」由抽屉的读模型（`getRequirementDetail` 的 `filePresent`，每行一次 stat）
-   回答，界面据此画「文件已丢失，重新生成」而不是一条死链。**看板与 MCP 还没有这一格**——
-   它们要的话得各加一次 stat，那是有意的取舍：一次看板刷新是几百行。
-4. **「最新一份」同毫秒会飘**（R-P2-4）：重做产生的多行按 `created_at desc` 取第一行，
-   时间戳相同时用 uuid 兜底。要真修得给表加 `seq` 列。
-5. **没有产物历史视图**：旧行留在库里，读侧只给最新一条，界面上没有任何入口能翻到上一版。
-6. **`evaluateAction` 是个无入口的 action**：动作条已经不渲染「评估」，但
-   `app/actions.ts` 的 dispatcher 里还挂着 `evaluate`（状态机本身仍允许 收集 → 待设计）。
-7. **走查仍然是手动的**：`inspect` 的包得有人自己拿，系统不会催。看板那句现在至少
-   说的是事实（`待走查` / `已走查 · MM-DD`），但它不替你发起什么。
-8. **截图里的产物是手写的占位 HTML**（1351 字节）：P2 的验证只证明「包 → 文件 → attach →
-   抽屉 → 状态」这条链路，不证明 UEmaster 出的图好看。
+1. **搁置恢复回「收集」**，不回原阶段（没有存「搁置前状态」这一列）。
+2. **批量操作**只覆盖描述类字段（优先级/类型/备注/平台/PRD）；负责人与排期各自有更严的规则。
+3. **迁移数据的「停留天数」**只能显示「自迁移起 N 天」——没有历史事件可回溯。
+4. **个人机器人**只服务它的主人；其他成员要私聊必须配自己的群机器人 webhook。
+5. 看板的「含历史」开关默认关闭，已上线超 90 天的需求不会出现在默认视图。
