@@ -6,7 +6,7 @@ import { db } from '../../db/client.js';
 import { readSetting, writeSetting } from '../uemaster/settings.js';
 import { readGroupWebhook } from '../notify/group.js';
 import { checkWebhook, sendWebhook } from '../notify/wecom.js';
-import { evaluateAlerts, type Alert, type Snapshot } from './rules.js';
+import { LEVEL_LABEL, evaluateAlerts, type Alert, type Snapshot } from './rules.js';
 
 /**
  * 告警跑一轮（2026-11-11，H1 的 P0）。
@@ -30,7 +30,22 @@ import { evaluateAlerts, type Alert, type Snapshot } from './rules.js';
  */
 
 export const ALERT_PREFIX = 'alert.';
-/** 同一告警的冷却：6 小时内不重复（P0 里最急的那条也会在下一轮再提醒一次）。 */
+/**
+ * 冷却（2026-11-11 owner 的口径：**3 天响一次**）。
+ *
+ * 但 P0 不能等 3 天：群发不出去、门挂了、任务停摆这些是「现在就坏了」，6 小时后还坏着
+ * 就该再喊一次。所以按级别分：
+ * - P0：6 小时（故障持续就该持续提醒）；
+ * - P1–P3：72 小时（积压、久放、重复这些是慢性问题，一天响几次只会让人屏蔽它）。
+ */
+export const COOLDOWN_MINUTES_BY_LEVEL: Record<string, number> = {
+  p0: 360,
+  p1: 4320,
+  p2: 4320,
+  p3: 4320,
+};
+
+/** 兼容旧调用点：默认冷却（P0 那一档）。 */
 export const COOLDOWN_MINUTES = 360;
 
 export type AlertRun = {
@@ -137,7 +152,76 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
        group by 1 having count(*) > 1
     ) d`)).rows[0]?.n ?? 0);
 
+  // 每条告警最多举 3 个例子：群消息里「19 条」没人能动手，「PAN-380 吕品 5 天」能。
+  const sample = async (query: ReturnType<typeof sql>): Promise<string[]> => {
+    const res = await db.execute<{ label: string }>(query);
+    return res.rows.map((row) => row.label).filter((label) => label.trim() !== '').slice(0, 3);
+  };
+
+  const samples: Record<string, string[]> = {
+    queue_backlog: await sample(sql`
+      select 'PAN-' || number || ' ' || left(title, 18) || coalesce(' · ' || m.name, ' · 未指派')
+             || ' · ' || extract(day from now() - state_entered_at)::int || ' 天' as label
+        from requirements r left join members m on m.id = r.owner_member_id
+       where r.deleted_at is null and r.state = 'queue'
+       order by state_entered_at asc limit 3`),
+    stuck: await sample(sql`
+      select 'PAN-' || number || ' ' || left(title, 18) || ' · ' || coalesce(m.name, '未指派')
+             || ' · ' || extract(day from now() - state_entered_at)::int || ' 天' as label
+        from requirements r left join members m on m.id = r.owner_member_id
+       where r.deleted_at is null
+         and ((state = 'review' and state_entered_at < now() - interval '5 days')
+           or (state = 'queue' and state_entered_at < now() - interval '5 days')
+           or (state = 'dev' and state_entered_at < now() - interval '10 days'))
+       order by state_entered_at asc limit 3`),
+    inbox_overdue: await sample(sql`
+      select 'PAN-' || number || ' ' || left(title, 20) || coalesce(' · ' || m.name, ' · 未指派') as label
+        from requirements r left join members m on m.id = r.owner_member_id
+       where r.deleted_at is null and r.state = 'inbox'
+         and state_entered_at < now() - interval '14 days'
+       order by state_entered_at asc limit 3`),
+    release_late: await sample(sql`
+      select 'PAN-' || r.number || ' ' || left(r.title, 18) || ' · ' || v.name as label
+        from requirements r join releases v on v.id = r.release_id
+       where r.deleted_at is null and r.state not in ('live','rejected','shelved')
+         and r.commit_due_at < now()
+       order by r.commit_due_at asc limit 3`),
+    release_untested: await sample(sql`
+      select 'PAN-' || r.number || ' ' || left(r.title, 18) || ' · ' || v.name as label
+        from requirements r join releases v on v.id = r.release_id
+       where r.deleted_at is null and r.state = 'ready'
+         and v.release_date between now() and now() + interval '3 days'
+       order by v.release_date asc limit 3`),
+    member_unbound: await sample(sql`
+      select name as label from members
+       where deactivated_at is null
+         and coalesce(nullif(btrim(wecom_userid), ''), nullif(btrim(wecom_webhook), '')) is null
+       order by name limit 3`),
+    duplicate_titles: await sample(sql`
+      select string_agg('PAN-' || number, ' / ') as label
+        from requirements
+       where deleted_at is null
+       group by regexp_replace(lower(title), '[^一-龥a-z0-9]', '', 'g')
+      having count(*) > 1
+       order by count(*) desc limit 3`),
+    personal_failed: await sample(sql`
+      select distinct m.name as label
+        from notify_deliveries d join members m on m.id = d.member_id
+       where d.channel = 'wecom' and d.status = 'failed'
+         and d.created_at > now() - interval '2 hours'
+       limit 3`),
+    group_failed: await sample(sql`
+      select 'evt:' || coalesce(ref, '?') || ' · ' || left(coalesce(error, ''), 30) as label
+        from group_posts where status = 'failed'
+       order by created_at desc limit 3`),
+    sheet_failed: await sample(sql`
+      select 'PAN-' || r.number || ' ' || left(r.title, 18) as label
+        from sheet_sync s join requirements r on r.id = s.requirement_id
+       where s.state = 'failed' limit 3`),
+  };
+
   return {
+    samples,
     groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateStatus,
     personalFailedRecent, queueBacklog, stuck, inboxOverdue,
     lateReleases, untestedNearRelease, unboundMembers, duplicateTitles,
@@ -171,6 +255,34 @@ async function probeGate(): Promise<number | null> {
   }
 }
 
+function webhookBase(): string {
+  return (process.env.FLOWERS_PUBLIC_URL ?? '').replace(/\/+$/, '');
+}
+
+/**
+ * 一条告警长什么样（2026-11-11 第二次改）。
+ *
+ * 第一版只写「待排期积压 19 条，超过 15 条的线」——群里没人知道那是谁的、下一步做什么。
+ * 现在固定四段：**级别 → 现在多少 → 具体哪几条 → 下一步（带链接）**，最后一行说明
+ * 多久再提醒。不是越长越好：例子最多 3 条，其余说「等」。
+ */
+export function renderAlert(alert: Alert, base: string): string {
+  const lines = [
+    `**[告警 · ${LEVEL_LABEL[alert.level]}] ${alert.title}**`,
+    `现在：${alert.detail}`,
+  ];
+  if (alert.samples.length > 0) {
+    lines.push('具体是：');
+    for (const sample of alert.samples) lines.push(`· ${sample}`);
+    if (alert.samples.length === 3) lines.push('· ……其余不逐条列');
+  }
+  lines.push(`下一步：${alert.nextStep}`);
+  if (base !== '') lines.push(base + alert.link);
+  const cooldown = alert.level === 'p0' ? '6 小时' : '3 天';
+  lines.push(`（同类问题 ${cooldown}内不再提醒 · flowers）`);
+  return lines.join('\n');
+}
+
 export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {}): Promise<AlertRun> {
   const deps = opts.deps ?? {};
   const now = (deps.now ?? (() => new Date()))();
@@ -195,7 +307,8 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
     const last = await readSetting(db, `${ALERT_PREFIX}${alert.key}`);
     if (last !== null) {
       const ageMinutes = (now.getTime() - new Date(last).getTime()) / 60_000;
-      if (Number.isFinite(ageMinutes) && ageMinutes < COOLDOWN_MINUTES) {
+      const cooldown = COOLDOWN_MINUTES_BY_LEVEL[alert.level] ?? 360;
+      if (Number.isFinite(ageMinutes) && ageMinutes < cooldown) {
         run.suppressed.push(alert.key);
         continue;
       }
@@ -208,7 +321,7 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       run.failed.push(`${alert.key}：没有可用的群机器人地址`);
       continue;
     }
-    const text = `**[告警] ${alert.title}**\n${alert.detail}`;
+    const text = renderAlert(alert, webhookBase());
     const result = await send(webhook, text);
     if (result.ok) {
       await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());

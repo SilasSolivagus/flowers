@@ -3,7 +3,7 @@ import { sql } from 'drizzle-orm';
 
 import { db, pool } from '../src/db/client.js';
 import { evaluateAlerts, CRON_LIMITS, type Snapshot } from '../src/core/alerts/rules.js';
-import { runAlerts, COOLDOWN_MINUTES } from '../src/core/alerts/run.js';
+import { runAlerts, COOLDOWN_MINUTES, COOLDOWN_MINUTES_BY_LEVEL } from '../src/core/alerts/run.js';
 import { writeSetting } from '../src/core/uemaster/settings.js';
 import { resetDb, seedPeople } from './helpers/db.js';
 
@@ -20,6 +20,7 @@ const HEALTHY: Snapshot = {
   cronAgeMinutes: { 'wecom-dispatch': 3, 'group-dispatch': 4, 'sheet-sync': 8 },
   wecomAuthorized: true,
   gateStatus: 302,
+  samples: {},
   personalFailedRecent: 0,
   queueBacklog: 0,
   stuck: { review: 0, queue: 0, dev: 0 },
@@ -99,11 +100,20 @@ describe('跑批：冷却与「发不出去也不炸」', () => {
     const first = await runAlerts({ deps });
     expect(first.sent).toContain('group_failed');
     // P3 的「成员未绑定」在测试库里也会响（7 个人都没绑），所以不按顺序断言第一条。
-    expect(sent.some((text) => text.includes('[告警] 群播报失败'))).toBe(true);
+    expect(sent.some((text) => text.includes('群播报失败'))).toBe(true);
+    // 消息必须带「下一步」与级别，否则群里没人知道该动什么。
+    expect(sent[0]).toContain('下一步：');
+    expect(sent[0]).toContain('告警 · P');
 
     const second = await runAlerts({ deps });
     expect(second.suppressed).toContain('group_failed');
     expect(second.sent).not.toContain('group_failed');
+  });
+
+  it('P1–P3 是 3 天冷却，P0 仍是 6 小时', () => {
+    expect(COOLDOWN_MINUTES_BY_LEVEL.p0).toBe(360);
+    expect(COOLDOWN_MINUTES_BY_LEVEL.p1).toBe(4320);
+    expect(COOLDOWN_MINUTES_BY_LEVEL.p3).toBe(4320);
   });
 
   it('过了冷却窗口会再发一次', async () => {
