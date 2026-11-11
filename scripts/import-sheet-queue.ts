@@ -105,7 +105,14 @@ async function main(): Promise<void> {
         });
         await recordEvent(tx, {
           requirementId: item.target!.id, actor: 'system', type: 'requirement.review_passed',
-          payload: { importedFrom: '企微汇总表 kvf2dh', row: item.row.num, prdUrl: prd },
+          payload: {
+            importedFrom: '企微汇总表 kvf2dh',
+            row: item.row.num,
+            prdUrl: prd,
+            // 批量标记：这条是导入时补的「评审通过」，不是有人在评审会上签的字，
+            // 因此既不播报也不私聊（保留在时间线里可查）。
+            batch: 'sheet-queue-import-20261111',
+          },
         });
       });
       moved += 1;
@@ -130,7 +137,14 @@ async function main(): Promise<void> {
         });
         await recordEvent(tx, {
           requirementId: row.id, actor: 'system', type: 'requirement.review_passed',
-          payload: { importedFrom: '企微汇总表 kvf2dh', row: item.row.num, prdUrl: prd },
+          payload: {
+            importedFrom: '企微汇总表 kvf2dh',
+            row: item.row.num,
+            prdUrl: prd,
+            // 批量标记：这条是导入时补的「评审通过」，不是有人在评审会上签的字，
+            // 因此既不播报也不私聊（保留在时间线里可查）。
+            batch: 'sheet-queue-import-20261111',
+          },
         });
       });
       created += 1;

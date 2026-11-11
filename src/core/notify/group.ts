@@ -230,7 +230,9 @@ export function renderEventMessage(item: GroupEventItem, baseUrl: string): strin
   // 这里再补一行「负责人」——与 Flower 的 `changes` 一样，只写变了的那一格。
   if (type === 'requirement.owner_assigned') {
     lines.push(`> 负责人　<font color="comment">${from === null ? '空' : item.payload.from === null ? '空' : '原负责人'}</font> → <font color="comment">${item.actor}</font>`);
-  } else {
+  } else if (from !== null || to !== null) {
+    // 两个都没有就不画这一行（2026-11-11）：原来硬画成「空 → 空」，读者只会问
+    // 「什么是空到空」。没有状态可说的播报（导入、认领之后的评审通过）不该自带一行噪音。
     lines.push(`> 状态　<font color="comment">${fromText}</font> → <font color="${tone}">${toText}</font>`);
   }
 
@@ -342,6 +344,9 @@ export async function pendingGroupEvents(
      where e.seq > ${sinceSeq}
        and e.type = any(${sql.param([...GROUP_EVENT_TYPES])}::text[])
        and r.deleted_at is null
+       -- 批量事件不播报（2026-11-11）：导入/批量改状态带 payload.batch，
+       -- 与站内通知、企微私聊同一条口径（read/notify.ts 的 notBatch）。
+       and not (e.payload::jsonb ? 'batch')
        and not exists (
          select 1 from group_posts g
           where g.kind = ${KIND_EVENTS} and g.ref = 'evt:' || e.seq::text
