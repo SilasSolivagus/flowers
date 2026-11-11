@@ -38,7 +38,9 @@ export type Trigger =
   | 'review_pass' | 'review_reject' | 'schedule'
   | 'clock' | 'bounce' | 'restore'
   /** 回滚（2026-11-10）：已上线 → 待排期。发出去的东西有问题，退回去重排。 */
-  | 'rollback';
+  | 'rollback'
+  /** 退回待开发（2026-11-11）：开发中 → 待开发。接错了/方案变了，退回去重新排。 */
+  | 'reopen';
 
 /**
  * 状态机亲自执行的门禁。
@@ -125,6 +127,9 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: 'dev',    to: 'test',    trigger: 'clock',         clock: true },
   { from: 'test',   to: 'live',    trigger: 'clock',         clock: true },
   { from: 'test',   to: 'dev',     trigger: 'bounce' },
+  // 退回待开发（2026-11-11）：开发中发现自己接错了/方案变了，退回去重新排期。
+  // 与 bounce（测试→开发）方向相同、语义不同：那是「测试没过」，这是「开发还没真正开始」。
+  { from: 'dev',    to: 'ready',   trigger: 'reopen' },
   { from: 'shelved', to: 'inbox',  trigger: 'restore' },
   // 回滚（2026-11-10）：唯一一条倒着走的边。落到 queue 而不是 dev 的理由写在
   // requirements/rollback.ts 的文件头——dev 的时钟会立刻把它推回测试与已上线。

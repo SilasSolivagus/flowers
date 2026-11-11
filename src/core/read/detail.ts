@@ -44,7 +44,9 @@ export type DetailAction =
   | 'approve' | 'submitReview' | 'reject' | 'shelve'
   | 'reviewPass' | 'reviewReject' | 'schedule' | 'bounce' | 'restore'
   /** 回滚（2026-11-10）：live → queue。 */
-  | 'rollback';
+  | 'rollback'
+  /** 退回待开发（2026-11-11）：dev → ready。 */
+  | 'reopen';
 
 /**
  * 动作 → 它要求的那一格能力（P4-05）。
@@ -67,6 +69,7 @@ export const ACTION_ABILITY: Record<DetailAction, Ability> = {
   restore: 'edit',
   // 回滚与搁置同一条能力：能决定「这条不做了」的人，也能决定「这条退回去重排」。
   rollback: 'edit',
+  reopen: 'edit',
   reviewPass: 'review',
   reviewReject: 'review',
 };
@@ -408,8 +411,10 @@ export function actionsFor(state: State): DetailAction[] {
     case 'queue':
       return ['schedule', 'shelve'];
     case 'ready':
-    case 'dev':
       return ['shelve'];
+    case 'dev':
+      // 退回待开发（2026-11-11）：接错了 / 方案变了，退回去重新排期。
+      return ['reopen', 'shelve'];
     case 'test':
       return ['bounce', 'shelve'];
     case 'live':
