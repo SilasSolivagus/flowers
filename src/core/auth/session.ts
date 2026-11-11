@@ -110,6 +110,18 @@ export async function hasSignedSession(): Promise<boolean> {
  * 表单是站内 POST，不受影响），而点一个外链过来仍然是已登录的。`secure` 跟着协议走：
  * 本地 http 若写死 secure，浏览器会直接丢掉它，开发时永远登不进去。
  */
+/**
+ * cookie 的 Domain（2026-11-11）：b123 这类兄弟子域要在自己的 nginx 里做 `auth_request`，
+ * 浏览器必须把这张 cookie 一并送到 `b123.dirctable.com`，否则门永远看到「没登录」。
+ *
+ * 由 `FLOWERS_COOKIE_DOMAIN` 给（生产 `.dirctable.com`）；不设就是 host-only——
+ * 本机 localhost 与测试都不受影响。
+ */
+const COOKIE_DOMAIN = (): string | undefined => {
+  const value = process.env.FLOWERS_COOKIE_DOMAIN?.trim();
+  return value === undefined || value === '' ? undefined : value;
+};
+
 export async function setSessionCookie(name: string, epoch: number): Promise<void> {
   const { cookies } = await import('next/headers');
   const jar = await cookies();
@@ -118,6 +130,8 @@ export async function setSessionCookie(name: string, epoch: number): Promise<voi
     sameSite: 'lax',
     path: '/',
     secure: process.env.NODE_ENV === 'production',
+    // 设了域就带上：兄弟子域（b123）的 auth_request 才能读到会话。
+    ...(COOKIE_DOMAIN() === undefined ? {} : { domain: COOKIE_DOMAIN() }),
     maxAge: Math.floor(12 * 60 * 60),
   });
 }

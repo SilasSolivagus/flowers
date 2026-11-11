@@ -41,7 +41,9 @@ export default function proxy(request: NextRequest): NextResponse {
  * - `favicon.ico`、`robots.txt`：浏览器/爬虫的无身份请求；
  * - `login`：门外那一页本身（否则会无限重定向）；
  * - `mcp`：Bearer token 的那条路（见文件头）。
+ * - `api/v1/auth/check`：edge 的 `auth_request` 子请求（b123 看板的门）。它自己判会话并
+ *   返回 200/401；被代理层再重定向一次，nginx 会把它当成「门坏了」→ 503。
  */
 export const config = {
-  matcher: ['/((?!_next/|favicon\\.ico|robots\\.txt|login|mcp).*)'],
+  matcher: ['/((?!_next/|favicon\\.ico|robots\\.txt|login|mcp|api/v1/auth/check).*)'],
 };
