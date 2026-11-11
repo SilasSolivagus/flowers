@@ -371,6 +371,18 @@ export function RequirementForm({ mode, members, me, closeHref, initial }: Requi
             );
           })}
 
+          {/* 查重（2026-11-11）：只在新建时出现。默认不勾——池子里有相似标题会被拒，
+              人确认不是同一条时才勾上重提。 */}
+          {mode === 'create' && (
+            <div className="fld">
+              <label htmlFor="req-allowDuplicate">
+                确认不是重复
+                <span className="hintline">池子里已有相似标题时，勾上才允许新建</span>
+              </label>
+              <input id="req-allowDuplicate" type="checkbox" name="allowDuplicate" value="1" />
+            </div>
+          )}
+
           {/* 备注（2026-11-10）：**不是第七问**——六问各自会喂到生成链路的某一处，
               这一格只去企微汇总表最后一列。所以它单独放在六问之后、不参与
               必填提示，也不进指纹（改了备注不会把产物打成「需求已更新」）。 */}

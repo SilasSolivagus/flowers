@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { db, pool } from '../src/db/client.js';
 import { createRequirement } from '../src/core/requirements/create.js';
@@ -21,22 +21,34 @@ describe('相似判定', () => {
   });
 });
 
-beforeEach(async () => { await resetDb(); await seedPeople(); });
+beforeEach(async () => {
+  process.env.FLOWERS_DUPLICATE_CHECK = 'on';
+  await resetDb(); await seedPeople();
+});
+afterEach(() => { process.env.FLOWERS_DUPLICATE_CHECK = 'off'; });
 afterAll(async () => { await pool.end(); });
 
-describe('建需求时给建议', () => {
-  it('有相似需求 → 返回值带 duplicates（不阻止创建）', async () => {
+describe('建需求：重复就不让建', () => {
+  it('有相似需求 → duplicate_suspected，并点名那几条', async () => {
+    await createRequirement(db, '吕品', { ...BRIEF, title: 'S3 协议支持', type: 'feature', requester: 'x' });
+    await expect(createRequirement(db, '吕品', {
+      ...BRIEF, title: 'S3 协议支持（上迭代遗留）', type: 'feature', requester: 'x',
+    })).rejects.toMatchObject({ code: 'duplicate_suspected' });
+  });
+
+  it('勾了「确认不是重复」→ 照建', async () => {
     await createRequirement(db, '吕品', { ...BRIEF, title: 'S3 协议支持', type: 'feature', requester: 'x' });
     const created = await createRequirement(db, '吕品', {
       ...BRIEF, title: 'S3 协议支持（上迭代遗留）', type: 'feature', requester: 'x',
+      allowDuplicate: true,
     });
-    expect(created.duplicates?.map((d) => d.title)).toEqual(['S3 协议支持']);
+    expect(created.state).toBe('inbox');
   });
 
-  it('没有相似的 → 不带这个字段', async () => {
+  it('没有相似的 → 直接建', async () => {
     const created = await createRequirement(db, '吕品', {
       ...BRIEF, title: '完全不同的需求名', type: 'feature', requester: 'x',
     });
-    expect(created.duplicates).toBeUndefined();
+    expect(created.number).toBeGreaterThan(0);
   });
 });

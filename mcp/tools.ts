@@ -818,7 +818,9 @@ export const TOOLS: readonly ToolDef[] = [
       + 'requester 是「谁提的」这个自由文本字段，不一定是同一个人。'
       + '**录入前必须先问用户六问**：调 requirement_brief_prompts 取六条问题原文，逐条问、'
       + '不要自己编答案，再填进 context/problem/outcome/surfaces/edgeCases/outOfScope。'
-      + '六问不全也能建（进收集），但之后不能立项、不能生成评估材料。',
+      + '六问不全也能建（进收集），但之后不能立项、不能生成评估材料。'
+      + '池子里已有相似标题时会被拒（duplicate_suspected）并点名那几条；'
+      + '确认不是重复再传 allowDuplicate:true。',
     call: createTool,
   }),
   tool({

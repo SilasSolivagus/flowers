@@ -634,6 +634,8 @@ export async function createRequirementAction(formData: FormData): Promise<Entry
     sourceNote: field(formData, 'sourceNote'),
     requester: field(formData, 'requester'),
     ownerMemberId: owner === '' ? null : owner,
+    // 查重（2026-11-11）：网页上那个「确认不是重复」的勾，勾了才允许同名新建。
+    allowDuplicate: field(formData, 'allowDuplicate') === '1',
     // 平台是**多值**（P4-08）：同名 checkbox 提交上来是几行，`getAll` 取全部。
     // 一个都没勾就是空数组 = 未标注（不是「没传」：表单永远会提交这一格的存在性）。
     platforms: formData.getAll('platforms').filter((v): v is string => typeof v === 'string'),

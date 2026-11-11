@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { recordEvent } from '../events.js';
 import { findDuplicates } from './duplicates.js';
+import { STATE_LABEL, type State } from '../state-machine.js';
 import { AppError, withPgErrors } from '../errors.js';
 import { requirePlainObject } from '../validate.js';
 import { assertCan, requireActor } from '../auth/guard.js';
@@ -133,6 +134,13 @@ export const CreateInput = z.object({
   /** 来源（Ruling 3）：可省略；「其他」的自述另存一列。 */
   source: SourceInput,
   sourceNote: SourceNoteInput,
+  /**
+   * 「我确认不是重复，仍然新建」（2026-11-11 owner 的口径：重复就不让建）。
+   *
+   * 只在**建的那一次**有意义，不落库。默认 false：池子里有高度相似的标题时直接拒绝，
+   * 并把那几条的名字说出来；人要建就勾一下，等于在时间线上留一句「我知道它像」。
+   */
+  allowDuplicate: z.boolean().optional(),
 }).merge(DescriptiveInput);
 
 export type CreateInput = z.infer<typeof CreateInput>;
@@ -202,6 +210,29 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
   const input = parsed.data;
 
   /**
+   * 查重（2026-11-11）：标题像就**不让建**，除非显式 `allowDuplicate`。
+   *
+   * 为什么从「提示」改成「拦」：提示放在返回值和抽屉里，人往往是建完才看见，那时
+   * 已经多了一条。拦的门槛放在这里（唯一写入口），网页 / MCP / REST 三条路一起生效。
+   * 判据仍然保守（归一后完全相同，或包含且短边 ≥6 字），宁可漏也不要误伤常见名字；
+   * 误伤时人勾一下就能过，不会卡死。
+   */
+  // 测试环境关掉（`vitest.config.ts` 里设 off）：大量用例会反复建同名需求来铺状态，
+  // 挨个加 `allowDuplicate` 只是噪音；查重本身由 `tests/duplicates.test.ts` 单独打开覆盖。
+  const duplicateCheck = process.env.FLOWERS_DUPLICATE_CHECK !== 'off';
+  const similar = duplicateCheck ? await findDuplicates(db, input.title) : [];
+  if (similar.length > 0 && input.allowDuplicate !== true) {
+    const names = similar
+      .map((item) => `PAN-${item.number}（${STATE_LABEL[item.state as State]}）`)
+      .join('、');
+    throw new AppError(
+      'duplicate_suspected',
+      `池子里已有相似需求：${names}。确认是同一条就先去处理旧的那条；`
+        + '确实不是重复，勾选「确认不是重复」后再提交。',
+    );
+  }
+
+  /**
    * 规则 1「录入即负责人」（P4-04）：**谁建谁负责**。P4-06 确认「任何 PM 都能立项，
    * 立项即成为负责人」——于是新建这条路上没有第二种默认：owner 就是 actor，
    * 除非超管显式指定别人 / 显式留空。
@@ -258,11 +289,6 @@ export async function createRequirement(db: Db, actor: string, raw: unknown) {
       // 时间轴要回答的是「建的时候填了没有」，不是「大概率算哪一类」。
       payload: { number, title: input.title, type, source },
     });
-    // 建完之后附一句「像它的那几条」（2026-11-11）：不拦，只让人/agent 看见。
-    const duplicates = await findDuplicates(db, input.title);
-    return {
-      id: row.id, number, state: row.state as 'inbox',
-      ...(duplicates.length === 0 ? {} : { duplicates }),
-    };
+    return { id: row.id, number, state: row.state as 'inbox' };
   }));
 }

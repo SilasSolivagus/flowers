@@ -48,6 +48,12 @@ export default defineConfig({
     env: {
       FLOWERS_TEST_RUN_ID: runId,
       FLOWERS_DATA_DIR: dataDir,
+      /**
+       * 建需求查重（2026-11-11）：用例经常反复建同名需求来铺状态，逐个加
+       * `allowDuplicate` 只是噪音。这里默认关掉；`tests/duplicates.test.ts`
+       * 在自己的 beforeEach 里打开，查重逻辑本身仍有覆盖。
+       */
+      FLOWERS_DUPLICATE_CHECK: 'off',
     },
   },
 });
