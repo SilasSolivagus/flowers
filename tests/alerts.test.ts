@@ -19,7 +19,8 @@ const HEALTHY: Snapshot = {
   sheetFailed: 0,
   cronAgeMinutes: { 'wecom-dispatch': 3, 'group-dispatch': 4, 'sheet-sync': 8 },
   wecomAuthorized: true,
-  gateStatus: 302,
+  gateEdge: 302,
+  gateUpstream: 401,
   samples: {},
   personalFailedRecent: 0,
   queueBacklog: 0,
@@ -57,8 +58,12 @@ describe('规则：五条各自独立响', () => {
 
   it('企微授权失效 / 门 5xx / 门连不上', () => {
     expect(evaluateAlerts({ ...HEALTHY, wecomAuthorized: false }).map((a) => a.key)).toEqual(['wecom_auth']);
-    expect(evaluateAlerts({ ...HEALTHY, gateStatus: 503 }).map((a) => a.key)).toEqual(['gate_down']);
-    expect(evaluateAlerts({ ...HEALTHY, gateStatus: null }).map((a) => a.key)).toEqual(['gate_down']);
+    // 只有一个来源坏 → 不报（上一版的误报就是这么来的）
+    expect(evaluateAlerts({ ...HEALTHY, gateEdge: 503 }).map((a) => a.key)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, gateUpstream: null }).map((a) => a.key)).toEqual([]);
+    // 两个都坏 → 报
+    expect(evaluateAlerts({ ...HEALTHY, gateEdge: 503, gateUpstream: 500 }).map((a) => a.key)).toEqual(['gate_down']);
+    expect(evaluateAlerts({ ...HEALTHY, gateEdge: null, gateUpstream: null }).map((a) => a.key)).toEqual(['gate_down']);
   });
 
   it('P1：个人推送失败 ≥3 条 / 待排期积压 / 卡住 / 收集久放', () => {
@@ -78,7 +83,8 @@ describe('规则：五条各自独立响', () => {
 
   it('多个问题同时坏 → 每条都报（不互相吞）', () => {
     const keys = evaluateAlerts({
-      ...HEALTHY, groupFailedRecent: 1, sheetFailed: 5, wecomAuthorized: false, gateStatus: 502,
+      ...HEALTHY, groupFailedRecent: 1, sheetFailed: 5, wecomAuthorized: false,
+      gateEdge: 502, gateUpstream: null,
     }).map((a) => a.key).sort();
     expect(keys).toEqual(['gate_down', 'group_failed', 'sheet_failed', 'wecom_auth']);
   });

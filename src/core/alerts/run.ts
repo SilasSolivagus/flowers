@@ -65,6 +65,7 @@ export type AlertDeps = {
   wecomAuthorized?: () => Promise<boolean>;
   send?: (webhook: string, text: string) => Promise<{ ok: boolean; message?: string }>;
   cronLogs?: Record<string, string>;
+  probeUpstream?: () => Promise<number | null>;
   webhook?: string;
 };
 
@@ -105,7 +106,8 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
     ? await deps.wecomAuthorized()
     : await probeWecomAuthorized();
 
-  const gateStatus = deps.probeGate ? await deps.probeGate() : await probeGate();
+  const gateEdge = deps.probeGate ? await deps.probeGate() : await probeGate();
+  const gateUpstream = deps.probeUpstream ? await deps.probeUpstream() : await probeUpstream();
 
   const personalFailedRecent = await countSince(sql`
     select count(*)::int as n from notify_deliveries
@@ -266,7 +268,7 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
 
   return {
     samples, mentions,
-    groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateStatus,
+    groupFailedRecent, sheetFailed, cronAgeMinutes, wecomAuthorized, gateEdge, gateUpstream,
     personalFailedRecent, queueBacklog, stuck, inboxOverdue,
     lateReleases, untestedNearRelease, unboundMembers, duplicateTitles,
   };
@@ -306,6 +308,22 @@ export function gateProbeArgs(rawUrl = process.env.FLOWERS_GATE_URL ?? 'https://
     ...insecure, '--max-time', '6', '-o', '/dev/null', '-w', '%{http_code}',
     '--resolve', `${url.hostname}:${port}:127.0.0.1`, url.href,
   ];
+}
+
+/**
+ * 上游那一半：直连 flowers 的校验口（不经过 edge），正常应为 401 / 200。
+ * 走 `http://127.0.0.1:${PORT}`，端口取 `FLOWERS_PORT`，默认 3010。
+ */
+async function probeUpstream(): Promise<number | null> {
+  const port = process.env.FLOWERS_PORT ?? '3010';
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/auth/check?perm=b123`, {
+      redirect: 'manual', signal: AbortSignal.timeout(5000),
+    });
+    return res.status;
+  } catch {
+    return null;
+  }
 }
 
 async function probeGate(): Promise<number | null> {

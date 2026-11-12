@@ -65,8 +65,16 @@ export type Snapshot = {
   cronAgeMinutes: Record<string, number>;
   /** 企微授权：`wecom-cli auth show` 是不是 authorized。 */
   wecomAuthorized: boolean;
-  /** 外部门探测：HTTP 状态码；null = 连不上。 */
-  gateStatus: number | null;
+  /**
+   * 外部门探测（2026-11-12 改成两个来源）：
+   * - `edge`：经过 edge 的 server 块 + auth_request（回环，`--resolve` 到 127.0.0.1）；
+   * - `upstream`：直连 flowers 的校验口。
+   *
+   * 只有**两个来源都坏**才报警：上一版只用一个来源，服务器连自己公网 IP 的 hairpin
+   * 一抖就误报了一整夜。null = 连不上。
+   */
+  gateEdge: number | null;
+  gateUpstream: number | null;
 };
 
 /** 每个定时任务允许的最大静默（分钟）。2 倍周期 + 余量。 */
@@ -240,14 +248,21 @@ export function evaluateAlerts(snapshot: Snapshot): Alert[] {
     });
   }
 
-  if (snapshot.gateStatus === null || snapshot.gateStatus >= 500) {
+  /**
+   * 门可用 = 任一来源给出「正常响应」。正常的意思：
+   * edge 侧 302（跳登录）/200；上游 401（没登录）/200。5xx 与连不上都算坏。
+   * 两个来源都坏才报——单点抖动不再变成假告警。
+   */
+  const edgeOk = snapshot.gateEdge !== null && snapshot.gateEdge < 500;
+  const upstreamOk = snapshot.gateUpstream !== null && snapshot.gateUpstream < 500;
+  if (!edgeOk && !upstreamOk) {
+    const edgeText = snapshot.gateEdge === null ? '连不上' : String(snapshot.gateEdge);
+    const upText = snapshot.gateUpstream === null ? '连不上' : String(snapshot.gateUpstream);
     alerts.push({
       key: 'gate_down',
       level: 'p0',
       title: '看板门不可用',
-      detail: snapshot.gateStatus === null
-        ? 'b123 的门连不上（请求超时或连接被拒）。'
-        : `b123 的门返回 ${snapshot.gateStatus}，所有人都进不去。`,
+      detail: `两个来源都坏：edge ${edgeText} / 上游 ${upText}。所有人都进不去。`,
       samples: [],
       nextStep: '先看 flowers 是否在跑（systemctl status flowers），再看 edge-nginx 的 45-b123.conf 上游。',
       link: '/settings',
