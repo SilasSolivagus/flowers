@@ -228,3 +228,18 @@ describe('版本每日进展：一张 template_card，字段与 Flower 的概览
     }), today)).toEqual([2]);
   });
 });
+
+describe('恢复也要播报（2026-11-12）', () => {
+  it('requirement.restored 渲染成「需求恢复 · 已搁置 → 收集」', async () => {
+    const { renderEventMessage } = await import('../src/core/notify/group.js');
+    const msg = renderEventMessage({
+      seq: 1, type: 'requirement.restored', actor: '吕品',
+      requirementId: 'r', number: 181, title: '分享链接转存优化',
+      payload: { from: 'shelved', to: 'inbox' }, requester: null,
+      at: '2026-11-12T07:20:00.000Z',
+    }, 'https://flower.dirctable.com');
+    expect(msg).toContain('需求恢复');
+    expect(msg).toContain('已搁置');
+    expect(msg).toContain('收集');
+  });
+});

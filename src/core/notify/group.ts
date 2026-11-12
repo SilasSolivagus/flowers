@@ -36,6 +36,9 @@ export const GROUP_EVENT_TYPES = [
   'requirement.shelved',
   'requirement.auto_live',
   'requirement.rolled_back',
+  // 恢复（2026-11-12）：搁置回来也是状态变动，群里要能看见——之前漏了，吕品把
+  // PAN-181 从搁置恢复时群里一声不响。
+  'requirement.restored',
 ] as const;
 
 export type GroupEventType = (typeof GROUP_EVENT_TYPES)[number];
@@ -169,6 +172,7 @@ const EVENT_LABEL: Record<GroupEventType, string> = {
   'requirement.shelved': '需求搁置',
   'requirement.auto_live': '版本上线 · 待验收',
   'requirement.rolled_back': '回滚',
+  'requirement.restored': '需求恢复',
 };
 
 /** 颜色：进展用 info(绿)，坏消息用 warning(橙红)，其余 comment(灰)。与 Flower 同一套语义。 */
@@ -181,6 +185,7 @@ const EVENT_TONE: Record<GroupEventType, 'info' | 'warning' | 'comment'> = {
   'requirement.shelved': 'warning',
   'requirement.auto_live': 'info',
   'requirement.rolled_back': 'warning',
+  'requirement.restored': 'comment',
 };
 
 /** 状态的中文名：`payload.from` / `payload.to` 是状态键，播报里要写「待评审 → 待排期」。 */
