@@ -288,14 +288,46 @@ async function probeWecomAuthorized(): Promise<boolean> {
   }
 }
 
-/** 探一次 b123 的门：没登录时 302 才算健康；5xx / 连不上都算坏。 */
+/**
+ * 门的探活地址与参数（2026-11-12 修）。
+ *
+ * 事故：告警从凌晨开始每 6 小时报一次「看板门不可用」，但外部访问一直是 302。
+ * 原因是探活从服务器打自己的**公网域名**：云主机没有 hairpin NAT，Node 的 fetch
+ * 连 47.115.229.192:443 会超时（curl 也时好时坏），而这条链路根本不是用户走的那条。
+ *
+ * 现在用 `curl --resolve` 把域名钉到 **127.0.0.1**：仍然是「真的过一遍 edge 的
+ * server 块与 auth_request」，只是不绕公网。`FLOWERS_GATE_URL` 仍然可以覆盖。
+ */
+export function gateProbeArgs(rawUrl = process.env.FLOWERS_GATE_URL ?? 'https://b123.dirctable.com/'): string[] {
+  const url = new URL(rawUrl);
+  const port = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port;
+  const insecure = url.protocol === 'https:' ? ['-k'] : [];
+  return [
+    ...insecure, '--max-time', '6', '-o', '/dev/null', '-w', '%{http_code}',
+    '--resolve', `${url.hostname}:${port}:127.0.0.1`, url.href,
+  ];
+}
+
 async function probeGate(): Promise<number | null> {
-  const url = process.env.FLOWERS_GATE_URL ?? 'https://b123.dirctable.com/';
   try {
-    const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
-    return res.status;
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile('curl', gateProbeArgs(), { timeout: 8000 }, (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout.trim());
+      });
+    });
+    const code = Number(out);
+    return Number.isFinite(code) && code > 0 ? code : null;
   } catch {
-    return null;
+    // curl 不可用（少见）→ 退回原来的公网探活；它至少能回答「外部到底通不通」。
+    try {
+      const url = process.env.FLOWERS_GATE_URL ?? 'https://b123.dirctable.com/';
+      const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
+      return res.status;
+    } catch {
+      return null;
+    }
   }
 }
 

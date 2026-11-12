@@ -139,3 +139,13 @@ describe('跑批：冷却与「发不出去也不炸」', () => {
     expect(run.failed.some((text) => text.startsWith('group_failed'))).toBe(true);
   });
 });
+
+describe('门探活参数（2026-11-12 修 hairpin）', () => {
+  it('域名钉到 127.0.0.1，端口跟着 URL 走', async () => {
+    const { gateProbeArgs } = await import('../src/core/alerts/run.js');
+    const args = gateProbeArgs('https://b123.dirctable.com/');
+    expect(args[args.indexOf('--resolve') + 1]).toBe('b123.dirctable.com:443:127.0.0.1');
+    expect(args).toContain('-k');
+    expect(args[args.length - 1]).toBe('https://b123.dirctable.com/');
+  });
+});
