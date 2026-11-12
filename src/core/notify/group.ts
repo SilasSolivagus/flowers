@@ -371,6 +371,10 @@ export async function pendingGroupEvents(
       from events e
       join requirements r on r.id = e.requirement_id
      where e.seq > ${sinceSeq}
+       -- 只播**新鲜**事件（2026-11-12）：给播报名单补一个新类型时，历史上同类型的
+       -- 事件会一起被扫出来——上一次就是这么把 11-11 的恢复事件补发到群里的。
+       -- 24 小时足够覆盖 cron 停摆，又不会把旧账当新闻。
+       and e.at > now() - interval '24 hours'
        and e.type = any(${sql.param([...GROUP_EVENT_TYPES])}::text[])
        and r.deleted_at is null
        -- 批量事件不播报（2026-11-11）：导入/批量改状态带 payload.batch，
