@@ -124,6 +124,18 @@ function transportText(error: unknown, timeoutMs: number): string {
   const cause = error instanceof Error && error.cause instanceof Error && error.cause.message !== ''
     ? `（${error.cause.message}）`
     : '';
+  /**
+   * 网络层失败（2026-11-12）：`fetch failed` / `ECONNREFUSED` / `ENOTFOUND` / `ETIMEDOUT`
+   * 与「key 错、模型名错」是两类事。前者是**服务器到那个地址不通**——本次事故就是
+   * 主机出网被限制，用户会以为是自己的 key 有问题，回去反复改一个没坏的 key。
+   * 所以这里把话说死：不是密钥问题，是这条链路不通。
+   */
+  const looksNetwork = /fetch failed|ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|certificate|socket hang up/i
+    .test(`${message} ${cause}`);
+  if (looksNetwork) {
+    return `连不上模型接口：服务器到该地址不通（${message}${cause}）。这不是 API Key 的问题——`
+      + '先确认服务器能访问这个域名（出网 / 安全组 / DNS），或换一个本机可达的接口地址。';
+  }
   return `请求失败：${message}${cause}`;
 }
 

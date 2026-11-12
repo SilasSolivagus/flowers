@@ -349,7 +349,9 @@ describe('complete：key 不外泄', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error).not.toContain(KEY);
-    expect(result.error).toContain('请求失败');
+    // 2026-11-12：网络层失败改写成了「连不上模型接口 / 不是 API Key 的问题」，
+    // 断言跟着换成两种可能之一（ECONNREFUSED 走网络分支，其它仍走「请求失败」）。
+    expect(result.error).toMatch(/请求失败|连不上模型接口/);
   });
 
   it('redactSecret 是字面替换，不是正则', () => {
