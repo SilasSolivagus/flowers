@@ -147,6 +147,10 @@ FLOWERS_API=https://flower.dirctable.com FLOWERS_TOKEN=flw_… \
 
 ## 架构
 
+![系统架构](docs/diagrams/architecture.png)
+
+（[SVG 源文件](docs/diagrams/architecture.svg) · 2026-11-12）
+
 ```
 app/                 Next App Router：页面 + 少量薄路由（/mcp、/api/v1/*、/uemaster/*）
 src/core/            领域层（状态机、服务、读模型、通知、告警）——规则只在这里

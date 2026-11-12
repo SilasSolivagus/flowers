@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 792" font-family="Helvetica Neue, Helvetica, Arial, PingFang SC, Microsoft YaHei, sans-serif">
+<defs>
+  <marker id="a-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/></marker>
+  <marker id="a-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/></marker>
+  <marker id="a-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#9333ea"/></marker>
+  <marker id="a-gray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#6b7280"/></marker>
+  <marker id="a-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#ea580c"/></marker>
+  <filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#0f172a" flood-opacity="0.08"/></filter>
+</defs>
+<rect width="1240" height="792" fill="#ffffff"/>
+<text x="40" y="42" font-size="22" font-weight="600" fill="#111827">flowers · 需求门禁 · 系统架构（2026-11-12）</text>
+<text x="40" y="64" font-size="13" fill="#6b7280">状态机是产品，界面只是窗口；MCP 讲规则、REST 干活、cron 把消息送出去</text>
+<rect x="32" y="78" width="1176" height="90" rx="12" fill="#fbfcfd" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="48" y="96" font-size="12" font-weight="600" fill="#6b7280" letter-spacing="0.6">使用者与外部入口</text>
+<rect x="52" y="100" width="208" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="66" y="122" font-size="13" font-weight="600" fill="#111827">浏览器</text>
+<text x="66" y="140" font-size="11" fill="#6b7280">PM / 条线负责人 / 超管</text>
+<rect x="276" y="100" width="208" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="290" y="122" font-size="13" font-weight="600" fill="#111827">AI agent</text>
+<text x="290" y="140" font-size="11" fill="#6b7280">Claude Code · 脚本</text>
+<rect x="500" y="100" width="208" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="514" y="122" font-size="13" font-weight="600" fill="#111827">企微</text>
+<text x="514" y="140" font-size="11" fill="#6b7280">群播报 · 私聊推送</text>
+<rect x="724" y="100" width="208" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="738" y="122" font-size="13" font-weight="600" fill="#111827">b123 经营看板</text>
+<text x="738" y="140" font-size="11" fill="#6b7280">auth_request 放行后进入</text>
+<rect x="948" y="100" width="240" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="962" y="122" font-size="13" font-weight="600" fill="#111827">企微汇总表</text>
+<text x="962" y="140" font-size="11" fill="#6b7280">待排期追加 · 22 行核对</text>
+<rect x="32" y="180" width="1176" height="74" rx="12" fill="#fbfcfd" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="48" y="198" font-size="12" font-weight="600" fill="#6b7280" letter-spacing="0.6">接入层</text>
+<rect x="52" y="202" width="1136" height="42" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="66" y="224" font-size="13" font-weight="600" fill="#111827">edge-nginx（容器）· flower.dirctable.com / b123.dirctable.com</text>
+<text x="66" y="242" font-size="11" fill="#6b7280">TLS 终止 · 上游 172.19.0.1:3010 · /api/v1/auth/check?perm=b123 做门禁</text>
+<rect x="32" y="262" width="1176" height="214" rx="12" fill="#fbfcfd" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="48" y="280" font-size="12" font-weight="600" fill="#6b7280" letter-spacing="0.6">应用（Next.js 16 · systemd flowers.service · :3010）</text>
+<rect x="52" y="288" width="236" height="174" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<rect x="52" y="288" width="4" height="174" rx="2" fill="#2563eb"/>
+<text x="66" y="310" font-size="13" font-weight="600" fill="#111827">界面（App Router）</text>
+<text x="66" y="328" font-size="11" fill="#6b7280">看板 · 抽屉 · 版本页</text>
+<text x="66" y="343" font-size="11" fill="#6b7280">设置（模型/企微/token）</text>
+<text x="66" y="358" font-size="11" fill="#6b7280">导入核对页</text>
+<rect x="304" y="288" width="236" height="174" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<rect x="304" y="288" width="4" height="174" rx="2" fill="#7c3aed"/>
+<text x="318" y="310" font-size="13" font-weight="600" fill="#111827">薄路由入口</text>
+<text x="318" y="328" font-size="11" fill="#6b7280">/mcp（27 个工具）</text>
+<text x="318" y="343" font-size="11" fill="#6b7280">/api/v1/*（REST）</text>
+<text x="318" y="358" font-size="11" fill="#6b7280">/uemaster/*（产物）</text>
+<rect x="556" y="288" width="236" height="174" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<rect x="556" y="288" width="4" height="174" rx="2" fill="#16a34a"/>
+<text x="570" y="310" font-size="13" font-weight="600" fill="#111827">领域层 src/core</text>
+<text x="570" y="328" font-size="11" fill="#6b7280">状态机 10 状态 / 15 迁移</text>
+<text x="570" y="343" font-size="11" fill="#6b7280">服务 · 读模型 · 权限</text>
+<text x="570" y="358" font-size="11" fill="#6b7280">六问门 · 查重</text>
+<rect x="808" y="288" width="236" height="174" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<rect x="808" y="288" width="4" height="174" rx="2" fill="#ea580c"/>
+<text x="822" y="310" font-size="13" font-weight="600" fill="#111827">通知 · 告警 · 同步</text>
+<text x="822" y="328" font-size="11" fill="#6b7280">群播报 / 私聊推送</text>
+<text x="822" y="343" font-size="11" fill="#6b7280">告警 P0–P3（6h / 3d）</text>
+<text x="822" y="358" font-size="11" fill="#6b7280">汇总表同步 · 导入核对</text>
+<rect x="1060" y="288" width="128" height="76" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="1074" y="310" font-size="13" font-weight="600" fill="#111827">产物目录</text>
+<text x="1074" y="328" font-size="11" fill="#6b7280">data/uemaster</text>
+<rect x="1060" y="386" width="128" height="76" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="1074" y="408" font-size="13" font-weight="600" fill="#111827">生成器</text>
+<text x="1074" y="426" font-size="11" fill="#6b7280">本机 CLI /</text>
+<text x="1074" y="441" font-size="11" fill="#6b7280">模型接口</text>
+<rect x="32" y="490" width="1176" height="108" rx="12" fill="#fbfcfd" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="48" y="508" font-size="12" font-weight="600" fill="#6b7280" letter-spacing="0.6">数据与外部服务</text>
+<rect x="52" y="512" width="356" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="66" y="534" font-size="13" font-weight="600" fill="#111827">PostgreSQL 17（容器 flowers-postgres）</text>
+<text x="66" y="552" font-size="11" fill="#6b7280">requirements · events · 各台账 · mcp_tokens</text>
+<rect x="428" y="512" width="300" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="442" y="534" font-size="13" font-weight="600" fill="#111827">模型接口</text>
+<text x="442" y="552" font-size="11" fill="#6b7280">成员自配；平台 key 仅超管</text>
+<rect x="748" y="512" width="440" height="56" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="762" y="534" font-size="13" font-weight="600" fill="#111827">企微开放接口</text>
+<text x="762" y="552" font-size="11" fill="#6b7280">群机器人 webhook · wecom-cli 私聊 · 电子表格</text>
+<rect x="32" y="610" width="1176" height="96" rx="12" fill="#fbfcfd" stroke="#e5e7eb" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="48" y="628" font-size="12" font-weight="600" fill="#6b7280" letter-spacing="0.6">定时任务（cron /etc/cron.d/flowers）</text>
+<rect x="52" y="636" width="208" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="66" y="658" font-size="12" font-weight="600" fill="#111827">推送 / 时钟 5 分钟</text>
+<text x="66" y="676" font-size="11" fill="#6b7280">wecom-dispatch --tick</text>
+<rect x="276" y="636" width="208" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="290" y="658" font-size="12" font-weight="600" fill="#111827">群播报 5 分钟</text>
+<text x="290" y="676" font-size="11" fill="#6b7280">group-dispatch</text>
+<rect x="500" y="636" width="208" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="514" y="658" font-size="12" font-weight="600" fill="#111827">版本日报 10:00</text>
+<text x="514" y="676" font-size="11" fill="#6b7280">group-dispatch --daily</text>
+<rect x="724" y="636" width="208" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="738" y="658" font-size="12" font-weight="600" fill="#111827">汇总表 10 分钟</text>
+<text x="738" y="676" font-size="11" fill="#6b7280">sheet-sync</text>
+<rect x="948" y="636" width="208" height="54" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" filter="url(#soft)"/>
+<text x="962" y="658" font-size="12" font-weight="600" fill="#111827">告警 15 分钟</text>
+<text x="962" y="676" font-size="11" fill="#6b7280">alerts --apply</text>
+<path d="M 156,156 L 156,202" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#a-blue)"/>
+<text x="164" y="182" font-size="11" fill="#6b7280">HTTPS</text>
+<path d="M 380,156 L 380,202" fill="none" stroke="#9333ea" stroke-width="1.8" marker-end="url(#a-purple)"/>
+<text x="388" y="182" font-size="11" fill="#6b7280">/mcp · /api/v1</text>
+<path d="M 604,156 L 604,202" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 828,156 L 828,202" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#a-blue)"/>
+<text x="836" y="182" font-size="11" fill="#6b7280">auth_request</text>
+<path d="M 1068,156 L 1068,202" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 620,244 L 620,288" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#a-blue)"/>
+<text x="628" y="270" font-size="11" fill="#6b7280">反代 :3010</text>
+<path d="M 288,375 L 304,375" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 540,375 L 556,375" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 792,375 L 808,375" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 1044,320 L 1060,320" fill="none" stroke="#6b7280" stroke-width="1.8" marker-end="url(#a-gray)"/>
+<path d="M 1124,364 L 1124,386" fill="none" stroke="#9333ea" stroke-width="1.8" marker-end="url(#a-purple)"/>
+<text x="1132" y="378" font-size="11" fill="#6b7280">生成</text>
+<path d="M 180,462 L 180,512" fill="none" stroke="#16a34a" stroke-width="1.8" marker-end="url(#a-green)"/>
+<text x="188" y="488" font-size="11" fill="#6b7280">读写（同事务写事件）</text>
+<path d="M 620,462 L 620,512" fill="none" stroke="#9333ea" stroke-width="1.8" marker-end="url(#a-purple)"/>
+<text x="628" y="488" font-size="11" fill="#6b7280">模型调用</text>
+<path d="M 920,462 L 920,512" fill="none" stroke="#ea580c" stroke-width="1.8" marker-end="url(#a-orange)"/>
+<text x="928" y="488" font-size="11" fill="#6b7280">webhook</text>
+<path d="M 1043,636 L 1043,620 L 1216,620 L 1216,278 L 1196,278" fill="none" stroke="#6b7280" stroke-width="1.8" stroke-dasharray="5,3" marker-end="url(#a-gray)"/>
+<text x="1052" y="614" font-size="11" fill="#6b7280">跑脚本（只写台账 / 发消息）</text>
+<line x1="52" y1="772" x2="78" y2="772" stroke="#2563eb" stroke-width="2" marker-end="url(#a-blue)"/>
+<text x="86" y="776" font-size="11" fill="#6b7280">主链路 / 请求</text>
+<line x1="262" y1="772" x2="288" y2="772" stroke="#9333ea" stroke-width="2" marker-end="url(#a-purple)"/>
+<text x="296" y="776" font-size="11" fill="#6b7280">MCP · REST · 模型</text>
+<line x1="472" y1="772" x2="498" y2="772" stroke="#16a34a" stroke-width="2" marker-end="url(#a-green)"/>
+<text x="506" y="776" font-size="11" fill="#6b7280">数据库读写</text>
+<line x1="682" y1="772" x2="708" y2="772" stroke="#ea580c" stroke-width="2" marker-end="url(#a-orange)"/>
+<text x="716" y="776" font-size="11" fill="#6b7280">企微推送</text>
+<line x1="892" y1="772" x2="918" y2="772" stroke="#6b7280" stroke-width="2" marker-end="url(#a-gray)"/>
+<text x="926" y="776" font-size="11" fill="#6b7280">异步 / 触发</text>
+</svg>
