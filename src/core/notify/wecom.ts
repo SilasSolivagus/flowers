@@ -603,7 +603,14 @@ export function checkWebhook(raw: unknown): WebhookCheck {
 }
 
 /** 一条 webhook 消息的预算：15 秒。比 CLI 那条路短——它是一次普通的 HTTPS POST。 */
-export const WEBHOOK_TIMEOUT_MS = 15_000;
+/**
+ * 群机器人超时（2026-11-12 由 15s 提到 30s）。
+ *
+ * 实测：日报那张 template_card 偶尔 15 秒回不来（`The operation was aborted due to timeout`），
+ * 于是 group_posts 记 failed、告警又跟着响一次。卡片本身不大，是企微侧偶发慢；
+ * 30 秒够它回完，又短到 cron 不会堆。
+ */
+export const WEBHOOK_TIMEOUT_MS = 30_000;
 
 /** 群机器人的正文上限是 4096 字节（企微文档）；超了会被服务端拒。留 200 字节余量。 */
 const WEBHOOK_MAX_BYTES = 3900;
@@ -635,13 +642,31 @@ export async function sendWebhook(
     markdown: { content: clipBytes(content, WEBHOOK_MAX_BYTES) },
   });
 
+  /**
+   * 一次重试（2026-11-12）：服务器到 qyapi 的 DNS 会偶发抖动（实测 3 次里 1 次解析超时），
+   * 于是「其实没事」的一条播报被记成 failed、再触发一条告警——噪音叠噪音。
+   * 只在**根本没拿到响应**（连接/DNS/超时）时重试一次；拿到 HTTP 响应就不重试，
+   * 否则会把一条已经发出去的消息再发一遍。
+   */
+  let response: Response | null = null;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      response = await doFetch(checked.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (response === null) {
+    return fail('cli_failed', `发到机器人失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
   try {
-    const response = await doFetch(checked.url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
     const text = await response.text();
     if (!response.ok) {
       return fail('cli_failed', `机器人的接口回了 HTTP ${response.status}：${tail(text) || '（没有正文）'}`);

@@ -155,3 +155,15 @@ describe('门探活参数（2026-11-12 修 hairpin）', () => {
     expect(args[args.length - 1]).toBe('https://b123.dirctable.com/');
   });
 });
+
+describe('告警发到哪个机器人（2026-11-12）', () => {
+  it('配了 notify.alertWebhook 就用它，没配退回群播报那条', async () => {
+    const { writeSetting } = await import('../src/core/uemaster/settings.js');
+    const { readAlertWebhook } = await import('../src/core/notify/group.js');
+    await writeSetting(db, 'notify.groupWebhook', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=group-0000');
+    expect(await readAlertWebhook(db)).toContain('group-0000');
+
+    await writeSetting(db, 'notify.alertWebhook', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=alert-1111');
+    expect(await readAlertWebhook(db)).toContain('alert-1111');
+  });
+});

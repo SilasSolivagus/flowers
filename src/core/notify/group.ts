@@ -88,6 +88,19 @@ export function looksLikeGroupWebhook(url: string): boolean {
   return WEBHOOK_SHAPE.test(text) || LOCAL_ECHO.test(text);
 }
 
+/** 告警专用的群机器人（2026-11-12）：告警与业务播报分开，免得淹在产品群。 */
+export const ALERT_WEBHOOK_SETTING = 'notify.alertWebhook';
+
+/**
+ * 告警发到哪：优先 `notify.alertWebhook`（owner 指定），没配才退回群播报那条。
+ * 两者都是企微群机器人，形状校验同一套。
+ */
+export async function readAlertWebhook(db: Db): Promise<string | null> {
+  const stored = (await readSetting(db, ALERT_WEBHOOK_SETTING))?.trim() ?? '';
+  if (stored !== '') return stored;
+  return readGroupWebhook(db);
+}
+
 export async function readGroupWebhook(db: Db): Promise<string | null> {
   const stored = await readSetting(db, GROUP_WEBHOOK_SETTING);
   const env = process.env.FLOWERS_GROUP_WEBHOOK;

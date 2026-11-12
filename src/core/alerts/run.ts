@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 
 import { db } from '../../db/client.js';
 import { readSetting, writeSetting } from '../uemaster/settings.js';
-import { readGroupWebhook } from '../notify/group.js';
+import { readAlertWebhook } from '../notify/group.js';
 import { checkWebhook, sendWebhook } from '../notify/wecom.js';
 import { LEVEL_LABEL, evaluateAlerts, type Alert, type Snapshot } from './rules.js';
 
@@ -450,7 +450,8 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
   };
   if (alerts.length === 0) return run;
 
-  const webhook = deps.webhook ?? (await readGroupWebhook(db)) ?? '';
+  // 告警有自己的机器人（owner 2026-11-12：告警与业务播报分开，别淹产品群）。
+  const webhook = deps.webhook ?? (await readAlertWebhook(db)) ?? '';
   const send = deps.send ?? ((hook: string, text: string) => sendWebhook(hook, text, { fetchImpl: fetch }));
 
   for (const alert of alerts) {
