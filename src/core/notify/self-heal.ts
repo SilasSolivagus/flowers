@@ -4,6 +4,7 @@ import { recordEvent } from '../events.js';
 import { AppError } from '../errors.js';
 import { shanghaiDayOf } from '../clock/tick.js';
 import { prefsOf } from './prefs.js';
+import { looksUninitialized } from './wecom.js';
 
 /**
  * 企微绑定自检（P2「绑定自愈」）：**绑不上的人，别等到没人想起来的时候才发现。**
@@ -99,15 +100,28 @@ type MemberRow = {
  * 不该打扰超管。行数不足 N 也返回 0：新入职的人还没攒够证据。
  */
 async function failedStreak(db: Exec, memberId: string): Promise<number> {
-  const res = await db.execute<{ status: string }>(sql`
-    select status
+  const res = await db.execute<{ status: string; error: string | null }>(sql`
+    select status, error
       from notify_deliveries
      where member_id = ${memberId} and channel = 'wecom'
      order by event_seq desc
      limit ${FAILED_STREAK}`);
   const rows = res.rows;
   if (rows.length < FAILED_STREAK) return 0;
-  return rows.every((row) => row.status !== 'sent') ? rows.length : 0;
+  if (!rows.every((row) => row.status !== 'sent')) return 0;
+  /**
+   * 853008 不算「账号没对上」（2026-11-13）。
+   *
+   * 这条失败的真正含义是「这台机器人只能给本人发消息」——账号本身是绑对的，
+   * 去设置里点「查一下」也查不出任何东西。把它算进「绑定失效」，就会在群里
+   * 连报两天「房超/赵越的企微账号没发出去，去点查一下」，而真正该做的是
+   * 「配自己的机器人 webhook」。
+   *
+   * 所以这类失败**不触发**绑定提醒；它由「个人推送失败」那条 P1 告警负责，
+   * 措辞指向正确的那一步。
+   */
+  if (rows.some((row) => looksUninitialized(row.error))) return 0;
+  return rows.length;
 }
 
 /**
