@@ -5,7 +5,7 @@ import { sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { readSetting, writeSetting } from '../uemaster/settings.js';
 import { readAlertWebhook } from '../notify/group.js';
-import { checkWebhook, sendWebhook } from '../notify/wecom.js';
+import { alertDedupKey, checkWebhook, enqueueOutbox, resolveOutboxBin, sendWebhook } from '../notify/wecom.js';
 import { LEVEL_LABEL, evaluateAlerts, type Alert, type Snapshot } from './rules.js';
 
 /**
@@ -451,6 +451,9 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
   if (alerts.length === 0) return run;
 
   // 告警有自己的机器人（owner 2026-11-12：告警与业务播报分开，别淹产品群）。
+  const outboxBin = resolveOutboxBin({
+    hasLegacyMock: deps.send !== undefined || deps.webhook !== undefined,
+  });
   const webhook = deps.webhook ?? (await readAlertWebhook(db)) ?? '';
   const send = deps.send ?? ((hook: string, text: string) => sendWebhook(hook, text, { fetchImpl: fetch }));
 
@@ -468,13 +471,33 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       run.sent.push(`${alert.key}（预览）`);
       continue;
     }
+
+    const targets = snapshot.mentions?.[alert.key] ?? [];
+    const mentioned = targets.filter((t) => t.userid.trim() !== '');
+    const text = renderAlert(alert, webhookBase(), mentioned);
+
+    if (outboxBin !== null) {
+      const dedupKey = alertDedupKey(alert.key, alert.level, now, COOLDOWN_MINUTES_BY_LEVEL);
+      const queued = await enqueueOutbox({
+        channel: 'webhook',
+        target: 'flowers_alert',
+        type: mentioned.length > 0 ? 'text' : 'markdown',
+        dedupKey,
+        content: text,
+      }, { bin: outboxBin });
+      if (queued.ok) {
+        await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());
+        run.sent.push(alert.key);
+      } else {
+        run.failed.push(`${alert.key}：${queued.message}`);
+      }
+      continue;
+    }
+
     if (webhook === '' || !checkWebhook(webhook).ok) {
       run.failed.push(`${alert.key}：没有可用的群机器人地址`);
       continue;
     }
-    const targets = snapshot.mentions?.[alert.key] ?? [];
-    const mentioned = targets.filter((t) => t.userid.trim() !== '');
-    const text = renderAlert(alert, webhookBase(), mentioned);
 
     /**
      * 有要 @ 的人 → 用 **text** 消息（企微只有 text 支持 mentioned_list；markdown 不行），

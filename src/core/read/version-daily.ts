@@ -93,11 +93,16 @@ function clip(text: string, max = 40): string {
   return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`;
 }
 
-/** 整体进度：已上线 / 全部。没有需求时 0。 */
+/** 各状态折算的完成度。只数「已上线」的话，整版一直显示 0% 直到上线那天，没有参考价值。 */
+const STATE_WEIGHT: Record<string, number> = { ready: 0, dev: 0.2, test: 0.6, live: 1 };
+
+/** 整体进度：按需求状态加权平均。没有需求时 0。 */
 function overallPercent(release: Release): number {
   const total = release.requirements.length;
   if (total === 0) return 0;
-  return Math.round((release.shipped / total) * 100);
+  const sum = release.requirements.reduce(
+    (acc, item) => acc + (STATE_WEIGHT[item.state] ?? 0), 0);
+  return Math.round((sum / total) * 100);
 }
 
 export type VersionDailyCard = { releaseId: string; releaseName: string; card: TextNoticeCard };

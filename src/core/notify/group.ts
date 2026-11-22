@@ -1,7 +1,12 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { readSetting, writeSetting } from '../uemaster/settings.js';
-import { checkWebhook, sendWebhook } from './wecom.js';
+import {
+  checkWebhook, dailyImageDedupKey, enqueueOutbox, outboxGroupTarget,
+  resolveOutboxBin, sendWebhook,
+} from './wecom.js';
 
 /**
  * 群播报（2026-11-10）：**需求状态变动**发到团队群。
@@ -105,8 +110,11 @@ export async function readAlertWebhook(db: Db): Promise<string | null> {
 }
 
 export async function readGroupWebhook(db: Db): Promise<string | null> {
-  const stored = await readSetting(db, GROUP_WEBHOOK_SETTING);
+  const tag = (process.env.FLOWERS_GROUP_TAG ?? '').trim();
   const env = process.env.FLOWERS_GROUP_WEBHOOK;
+  // 带 FLOWERS_GROUP_TAG 的那一路＝第二个群：用它自己的 webhook，不受库里主群设置影响。
+  if (tag !== '' && (env ?? '').trim() !== '') return (env as string).trim();
+  const stored = await readSetting(db, GROUP_WEBHOOK_SETTING);
   const picked = (stored ?? env ?? '').trim();
   return picked === '' ? null : picked;
 }
@@ -299,24 +307,48 @@ export type TextNoticeCard = {
  * 大号关键数据、横排统计、引用区和跳转按钮的卡片。markdown 做不出那三块版式，
  * 而 owner 要的是「跟群里原来那张一模一样」。
  */
+export type GroupSendOpts = {
+  fetchImpl?: typeof fetch;
+  dedupKey?: string;
+  target?: string;
+  outboxBin?: string | false | null;
+};
+
 export async function sendGroupCard(
-  webhook: string, card: TextNoticeCard, opts: { fetchImpl?: typeof fetch } = {},
+  webhook: string, card: TextNoticeCard, opts: GroupSendOpts = {},
 ): Promise<{ ok: true } | { ok: false; message: string }> {
+  const templateCard = {
+    card_type: 'text_notice',
+    source: card.source,
+    main_title: { title: card.title, desc: card.desc },
+    ...(card.emphasis === null ? {} : { emphasis_content: { title: card.emphasis.title, desc: card.emphasis.desc } }),
+    ...(card.stats === null ? {} : { horizontal_content_list: card.stats }),
+    ...(card.quote === null ? {} : { quote_area: { type: 0, title: card.quote.title, quote_text: card.quote.quote_text } }),
+    jump_list: card.jumps.map((jump) => ({ type: 1, title: jump.title, url: jump.url })),
+    card_action: { type: 1, url: card.action.url },
+  };
+
+  const outboxBin = resolveOutboxBin({
+    outboxBin: opts.outboxBin,
+    hasLegacyMock: opts.fetchImpl !== undefined,
+  });
+  if (outboxBin !== null && opts.dedupKey !== undefined && opts.dedupKey.trim() !== '') {
+    const queued = await enqueueOutbox({
+      channel: 'webhook',
+      target: opts.target ?? webhook,
+      type: 'template_card',
+      dedupKey: opts.dedupKey,
+      content: JSON.stringify(templateCard),
+    }, { bin: outboxBin });
+    return queued.ok ? { ok: true } : { ok: false, message: queued.message };
+  }
+
   const checked = checkWebhook(webhook);
   if (!checked.ok) return { ok: false, message: checked.message };
 
   const body = JSON.stringify({
     msgtype: 'template_card',
-    template_card: {
-      card_type: 'text_notice',
-      source: card.source,
-      main_title: { title: card.title, desc: card.desc },
-      ...(card.emphasis === null ? {} : { emphasis_content: { title: card.emphasis.title, desc: card.emphasis.desc } }),
-      ...(card.stats === null ? {} : { horizontal_content_list: card.stats }),
-      ...(card.quote === null ? {} : { quote_area: { type: 0, title: card.quote.title, quote_text: card.quote.quote_text } }),
-      jump_list: card.jumps.map((jump) => ({ type: 1, title: jump.title, url: jump.url })),
-      card_action: { type: 1, url: card.action.url },
-    },
+    template_card: templateCard,
   });
 
   const doFetch = opts.fetchImpl ?? fetch;
@@ -347,10 +379,87 @@ export async function sendGroupCard(
 
 /** 发一条。失败是数据，不是异常（与 `sendWebhook` 同一口径）。 */
 export async function postGroup(
-  webhook: string, content: string, opts: { fetchImpl?: typeof fetch } = {},
+  webhook: string, content: string, opts: GroupSendOpts = {},
 ): Promise<{ ok: true } | { ok: false; message: string }> {
+  const outboxBin = resolveOutboxBin({
+    outboxBin: opts.outboxBin,
+    hasLegacyMock: opts.fetchImpl !== undefined,
+  });
+  if (outboxBin !== null && opts.dedupKey !== undefined && opts.dedupKey.trim() !== '') {
+    const queued = await enqueueOutbox({
+      channel: 'webhook',
+      target: opts.target ?? webhook,
+      type: 'markdown',
+      dedupKey: opts.dedupKey,
+      content,
+    }, { bin: outboxBin });
+    return queued.ok ? { ok: true } : { ok: false, message: queued.message };
+  }
   const got = await sendWebhook(webhook, content, opts);
   return got.ok ? { ok: true } : { ok: false, message: got.message };
+}
+
+/**
+ * 版本日报图发送：优先入队本地 Outbox（`flowers_main` / `flowers_group2`），
+ * 无 Outbox 的本地环境回退到直连群机器人 `image` 消息。
+ */
+export async function enqueueDailyImage(input: {
+  pngPath: string;
+  png?: Buffer;
+  webhook?: string | null;
+  tag?: string | null;
+  releaseId: string;
+  dateKey: string;
+  outboxBin?: string | false | null;
+  fetchImpl?: typeof fetch;
+}): Promise<{ ok: boolean; message: string }> {
+  const outboxBin = resolveOutboxBin({
+    outboxBin: input.outboxBin,
+    hasLegacyMock: input.fetchImpl !== undefined,
+  });
+  if (outboxBin !== null) {
+    const target = outboxGroupTarget(input.tag);
+    const dedupKey = dailyImageDedupKey(input.tag, input.releaseId, input.dateKey);
+    const queued = await enqueueOutbox({
+      channel: 'webhook',
+      target,
+      type: 'image',
+      dedupKey,
+      filePath: input.pngPath,
+    }, { bin: outboxBin });
+    if (queued.ok) {
+      return {
+        ok: true,
+        message: `outbox queued id=${queued.id ?? '?'}${queued.deduped ? ' (deduped)' : ''} target=${target}`,
+      };
+    }
+    return { ok: false, message: queued.message };
+  }
+
+  const hook = (input.webhook ?? '').trim();
+  if (hook === '') return { ok: false, message: '没有配置群 webhook' };
+  const checked = checkWebhook(hook);
+  if (!checked.ok) return { ok: false, message: checked.message };
+
+  try {
+    const buf = input.png ?? readFileSync(input.pngPath);
+    const base64 = buf.toString('base64');
+    const md5 = createHash('md5').update(buf).digest('hex');
+    const doFetch = input.fetchImpl ?? fetch;
+    const res = await doFetch(checked.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ msgtype: 'image', image: { base64, md5 } }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const json = (await res.json().catch(() => ({}))) as { errcode?: number; errmsg?: string };
+    return {
+      ok: res.ok && (json.errcode ?? 0) === 0,
+      message: `HTTP ${res.status} errcode=${json.errcode ?? '?'} ${json.errmsg ?? ''}`.trim(),
+    };
+  } catch (error) {
+    return { ok: false, message: `发图失败：${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /**

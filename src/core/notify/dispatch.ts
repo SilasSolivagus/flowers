@@ -8,8 +8,8 @@ import { prefsOf, type Level } from './prefs.js';
 import { eventTimeText } from './group.js';
 import { checkWecomBindings, type BindingAlert } from './self-heal.js';
 import {
-  lookupUserid, messageOf, resolveUserid, sendMarkdown, sendWebhook,
-  type Runner, type WecomFail,
+  enqueueOutbox, lookupUserid, messageOf, personalDedupKey, resolveOutboxBin,
+  resolveUserid, sendMarkdown, sendWebhook, type Runner, type WecomFail,
 } from './wecom.js';
 
 /**
@@ -88,6 +88,7 @@ export type DispatchOptions = {
   // ── 下面几个只给用例注入用（默认走真实 CLI / 真实 fetch + 真实时钟）──
   run?: Runner;
   bin?: string | null;
+  outboxBin?: string | false | null;
   timeoutMs?: number;
   /** 测「自己的机器人」那条路时替换 `fetch`（不打真企微）。 */
   webhookFetch?: typeof fetch;
@@ -225,6 +226,11 @@ export async function dispatchWecom(
      * 失败与共用那条同命：记 `failed`，下一轮就地重试（`record` 的 upsert）。区别只在
      * 一句话——`sendWebhook` 的错误里已经抹掉了 key。
      */
+    const outboxBin = resolveOutboxBin({
+      outboxBin: opts.outboxBin,
+      hasLegacyMock: opts.run !== undefined || opts.webhookFetch !== undefined,
+    });
+
     const ownWebhook = typeof member.wecomWebhook === 'string' ? member.wecomWebhook.trim() : '';
     if (ownWebhook !== '') {
       for (const candidate of candidates) {
@@ -237,7 +243,15 @@ export async function dispatchWecom(
           run.messages.push({ ...preview(candidate, content), status: 'planned' });
           continue;
         }
-        const sent = await sendWebhook(ownWebhook, content, { fetchImpl: opts.webhookFetch });
+        const sent = outboxBin !== null
+          ? await enqueueOutbox({
+            channel: 'webhook',
+            target: ownWebhook,
+            type: 'markdown',
+            dedupKey: personalDedupKey(member.id, candidate.eventSeq),
+            content,
+          }, { bin: outboxBin, run: opts.run, timeoutMs: opts.timeoutMs })
+          : await sendWebhook(ownWebhook, content, { fetchImpl: opts.webhookFetch });
         if (sent.ok) {
           const written = await record(database, member.id, candidate.eventSeq, 'sent', null);
           if (written) {
@@ -282,9 +296,17 @@ export async function dispatchWecom(
         continue;
       }
 
-      const sent = await sendMarkdown(resolved.userid, content, {
-        run: opts.run, bin: opts.bin, timeoutMs: opts.timeoutMs,
-      });
+      const sent = outboxBin !== null
+        ? await enqueueOutbox({
+          channel: 'aibot',
+          target: resolved.userid,
+          type: 'markdown',
+          dedupKey: personalDedupKey(member.id, candidate.eventSeq),
+          content,
+        }, { bin: outboxBin, run: opts.run, timeoutMs: opts.timeoutMs })
+        : await sendMarkdown(resolved.userid, content, {
+          run: opts.run, bin: opts.bin, timeoutMs: opts.timeoutMs,
+        });
       if (sent.ok) {
         const written = await record(database, member.id, candidate.eventSeq, 'sent', null);
         // 已经 `sent` 的格子写不进去（并发两次运行的兜底）：按「没发」计，

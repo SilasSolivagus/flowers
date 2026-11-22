@@ -195,7 +195,7 @@ describe('版本每日进展：一张 template_card，字段与 Flower 的概览
     const { card } = versionCard(r, today, BASE);
     expect(card.title).toBe('123云盘 研发日报 · 11-10');
     expect(card.desc).toBe('2026.11 · 11/24 发版 · 还剩 10 个工作日');
-    expect(card.emphasis).toEqual({ title: '33%', desc: '整体进度（理论 60%）' });
+    expect(card.emphasis).toEqual({ title: '60%', desc: '整体进度（理论 60%）' });
     expect(card.stats).toEqual([
       { keyname: '需求', value: '3 项' },
       { keyname: '已上线', value: '1 项' },

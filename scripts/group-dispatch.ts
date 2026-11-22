@@ -34,6 +34,9 @@ import {
   readGroupWebhook, readWatermark, renderEventMessage, saveGroupWebhook, sendGroupCard,
   writeWatermark,
 } from '../src/core/notify/group.js';
+import {
+  groupDailyDedupKey, groupEventDedupKey, outboxGroupTarget, resolveOutboxBin,
+} from '../src/core/notify/wecom.js';
 import { listReleases } from '../src/core/read/version.js';
 import { todayInShanghai, versionCards } from '../src/core/read/version-daily.js';
 
@@ -79,11 +82,14 @@ try {
     process.stdout.write(`已记下起始水位：events.seq <= ${seq} 的历史事件不再补播。\n`);
   }
 
+  const tag = (process.env.FLOWERS_GROUP_TAG ?? '').trim();
+  const outboxEnabled = resolveOutboxBin() !== null;
+  const target = outboxGroupTarget(tag);
   const webhook = await readGroupWebhook(db);
   const baseUrl = await publicBaseUrl(db);
 
-  // dry-run 不需要 webhook：预览要能在配置之前就做（否则「先配一个错的地址再看效果」）。
-  if (webhook === null && !args.dryRun) {
+  // dry-run 或已启用统一 Outbox 时不需要库里存明文 webhook（wecom.conf 按别名解析）。
+  if (webhook === null && !outboxEnabled && !args.dryRun) {
     process.stderr.write(
       '没有配置团队群 webhook：用 --webhook <企微群机器人地址> 保存一次，或设 FLOWERS_GROUP_WEBHOOK。\n',
     );
@@ -96,7 +102,7 @@ try {
     } else {
       const dateKey = new Date(today * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       for (const { releaseId, releaseName, card } of cards) {
-        const ref = `daily:${releaseId}:${dateKey}`;
+        const ref = `daily:${releaseId}:${dateKey}${tag === '' ? '' : ':' + tag}`;
         const already = (await db.execute<{ n: number }>(sql`
           select count(*)::int as n from group_posts
            where kind = ${KIND_DAILY} and ref = ${ref} and status = 'sent'`)).rows[0]?.n ?? 0;
@@ -112,7 +118,10 @@ try {
           insert into group_posts (kind, ref, content, status)
           values (${KIND_DAILY}, ${ref}, ${JSON.stringify(card)}, 'pending')
           on conflict (kind, ref) do nothing`);
-        const sent = await sendGroupCard(webhook!, card);
+        const sent = await sendGroupCard(webhook ?? target, card, {
+          dedupKey: groupDailyDedupKey(tag, releaseId, dateKey),
+          target,
+        });
         if (sent.ok) {
           await db.execute(sql`
             update group_posts set status = 'sent', posted_at = now(), attempts = attempts + 1
@@ -157,7 +166,10 @@ try {
           insert into group_posts (kind, ref, content, status)
           values (${KIND_EVENTS}, ${ref}, ${content}, 'pending')
           on conflict (kind, ref) do nothing`);
-        const posted = await postGroup(webhook!, content);
+        const posted = await postGroup(webhook ?? target, content, {
+          dedupKey: groupEventDedupKey(tag, item.seq),
+          target,
+        });
         await db.execute(sql`
           update group_posts
              set status = ${posted.ok ? 'sent' : 'failed'},

@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import {
@@ -701,4 +702,191 @@ function clipBytes(text: string, max: number): string {
   let out = text;
   while (Buffer.byteLength(out, 'utf8') > max - 1) out = out.slice(0, -1);
   return `${out}…`;
+}
+
+// ─── 2026-11-22：统一企微本地 Outbox 队列适配（wecom-enqueue）──────────────
+
+/** 服务器上统一 Outbox 入队 CLI 的默认路径（可由 `WECOM_ENQUEUE_BIN` 覆盖）。 */
+export const DEFAULT_OUTBOX_BIN = '/opt/123pan/tools/bin/wecom-enqueue';
+
+export const OUTBOX_TIMEOUT_MS = 15_000;
+
+export type OutboxEnqueueInput = {
+  channel: 'webhook' | 'aibot';
+  target: string;
+  type: 'markdown' | 'text' | 'image' | 'template_card';
+  dedupKey: string;
+  content?: string;
+  filePath?: string;
+  notBefore?: string;
+  dryRun?: boolean;
+};
+
+export type OutboxEnqueueOk = {
+  ok: true;
+  id: number | null;
+  deduped: boolean;
+  dryRun?: boolean;
+};
+
+/** 抹掉错误信息中可能出现的 webhook `key=...` 参数（仅保留末 4 位）。 */
+function maskWebhookInText(raw: string): string {
+  return raw.replace(/([?&]key=)([^&#\s"'\]]+)/gi, (_m, prefix: string, key: string) => {
+    const tailPart = key.length > 4 ? key.slice(-4) : '';
+    return `${prefix}****${tailPart}`;
+  });
+}
+
+function normalizeGroupTag(tag?: string | null): string {
+  const t = (tag ?? '').trim();
+  return t === '' ? 'main' : t;
+}
+
+/** 群标签 → `wecom.conf` 中的具名 webhook 别名。 */
+export function outboxGroupTarget(tag?: string | null): string {
+  const t = (tag ?? '').trim();
+  if (t === '' || t === 'main') return 'flowers_main';
+  if (t === 'bdf1') return 'flowers_group2';
+  return `flowers_${t}`;
+}
+
+/** 个人推送确定性幂等键：`flowers-personal:<memberId>:<eventSeq>`。 */
+export function personalDedupKey(memberId: string, eventSeq: number): string {
+  return `flowers-personal:${memberId}:${eventSeq}`;
+}
+
+/** 群状态播报确定性幂等键：`flowers-group:<tag>:evt:<eventSeq>`。 */
+export function groupEventDedupKey(tag: string | null | undefined, eventSeq: number): string {
+  return `flowers-group:${normalizeGroupTag(tag)}:evt:${eventSeq}`;
+}
+
+/** 群日报卡片确定性幂等键：`flowers-group:<tag>:daily:<releaseId>:<dateKey>`。 */
+export function groupDailyDedupKey(
+  tag: string | null | undefined, releaseId: string, dateKey: string,
+): string {
+  return `flowers-group:${normalizeGroupTag(tag)}:daily:${releaseId}:${dateKey}`;
+}
+
+/** 版本日报图确定性幂等键：`flowers-daily-img:<tag>:<releaseId>:<dateKey>`。 */
+export function dailyImageDedupKey(
+  tag: string | null | undefined, releaseId: string, dateKey: string,
+): string {
+  return `flowers-daily-img:${normalizeGroupTag(tag)}:${releaseId}:${dateKey}`;
+}
+
+/** 告警确定性幂等键：`flowers-alert:<alertKey>:<cooldownBucket>`。 */
+export function alertDedupKey(
+  alertKey: string,
+  level: string,
+  now: Date,
+  cooldownMinutesByLevel: Record<string, number> = { p0: 360, p1: 4320, p2: 4320, p3: 4320 },
+): string {
+  const mins = cooldownMinutesByLevel[level] ?? 360;
+  const bucket = Math.floor(now.getTime() / (mins * 60_000));
+  return `flowers-alert:${alertKey}:${bucket}`;
+}
+
+/**
+ * 解析当前环境下是否启用 `wecom-enqueue`：
+ * 1. 显式禁用（`outboxBin === false` 或 `WECOM_ENQUEUE_BIN === 'off'`）→ null（回退直连）；
+ * 2. 显式指定（`opts.outboxBin` 或环境变量 `WECOM_ENQUEUE_BIN`）→ 返回该路径；
+ * 3. 旧单测注入了 `run` / `fetchImpl` mock 且未指定 Outbox → null（保持既有单测语义）；
+ * 4. 生产默认：若 `/opt/123pan/tools/bin/wecom-enqueue` 存在则启用，否则回退直连。
+ */
+export function resolveOutboxBin(opts: {
+  outboxBin?: string | false | null;
+  hasLegacyMock?: boolean;
+} = {}): string | null {
+  if (opts.outboxBin === false) return null;
+  const envBin = process.env.WECOM_ENQUEUE_BIN?.trim() ?? '';
+  if (envBin.toLowerCase() === 'off') return null;
+  if (typeof opts.outboxBin === 'string' && opts.outboxBin.trim() !== '') {
+    return opts.outboxBin.trim();
+  }
+  if (envBin !== '') return envBin;
+  if (opts.hasLegacyMock === true) return null;
+  return existsSync(DEFAULT_OUTBOX_BIN) ? DEFAULT_OUTBOX_BIN : null;
+}
+
+/** 拼装 `wecom-enqueue` 的 argv（不经过 shell）。 */
+export function outboxEnqueueArgv(input: OutboxEnqueueInput): string[] {
+  const argv: string[] = [
+    '--channel', input.channel,
+    '--target', input.target,
+    '--type', input.type,
+    '--dedup-key', input.dedupKey,
+  ];
+  if (input.notBefore !== undefined && input.notBefore.trim() !== '') {
+    argv.push('--not-before', input.notBefore.trim());
+  }
+  if (input.filePath !== undefined && input.filePath.trim() !== '') {
+    argv.push('--file', input.filePath.trim());
+  } else if (input.content !== undefined) {
+    argv.push('--content', input.content);
+  }
+  if (input.dryRun === true) {
+    argv.push('--dry-run');
+  }
+  return argv;
+}
+
+/**
+ * 调用 `wecom-enqueue` 将消息入队本地 SQLite Outbox。
+ * 失败是数据不是异常：入队失败绝不抛出，错误信息统一脱敏。
+ */
+export async function enqueueOutbox(
+  input: OutboxEnqueueInput,
+  opts: { run?: Runner; bin?: string | null; timeoutMs?: number } = {},
+): Promise<OutboxEnqueueOk | WecomFail> {
+  const bin = (opts.bin ?? resolveOutboxBin() ?? DEFAULT_OUTBOX_BIN).trim();
+  if (bin === '') return fail('bad_config', 'wecom-enqueue 路径为空');
+
+  const timeoutMs = positive(opts.timeoutMs, OUTBOX_TIMEOUT_MS);
+  const run = opts.run ?? defaultRunner;
+
+  let result: RunResult;
+  try {
+    result = await run(bin, outboxEnqueueArgv(input), timeoutMs);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return fail('cli_failed', `wecom-enqueue 调用异常：${maskWebhookInText(redact(msg))}`);
+  }
+
+  if (result.spawnError !== null) {
+    const raw = `${result.spawnError.code ?? 'ERR'}：${result.spawnError.message}`;
+    return result.spawnError.code === 'ENOENT'
+      ? fail('missing_binary', `找不到 wecom-enqueue（${bin}）`)
+      : fail('cli_failed', `wecom-enqueue 启动失败（${maskWebhookInText(redact(raw))}）`);
+  }
+  if (result.timedOut) {
+    return fail('timeout', `wecom-enqueue 超时：等了 ${Math.round(timeoutMs / 1000)} 秒未返回`);
+  }
+  if (result.exitCode !== 0) {
+    const code = result.exitCode === null ? '被信号终止' : `退出码 ${result.exitCode}`;
+    const detail = tail(result.stderr) || tail(result.stdout) || '（无输出）';
+    return fail('cli_failed', `wecom-enqueue 入队失败（${code}）：${maskWebhookInText(redact(detail))}`);
+  }
+
+  const parsed = parseResponse(result.stdout);
+  if (parsed === null || typeof parsed !== 'object') {
+    return fail(
+      'bad_output',
+      `wecom-enqueue 输出不是有效 JSON：${maskWebhookInText(redact(tail(result.stdout) || '（空）'))}`,
+    );
+  }
+  const record = parsed as Record<string, unknown>;
+  if (input.dryRun === true && record.dryRun === true) {
+    return { ok: true, id: null, deduped: false, dryRun: true };
+  }
+  if (record.queued === true) {
+    return {
+      ok: true,
+      id: typeof record.id === 'number' ? record.id : null,
+      deduped: record.deduped === true,
+    };
+  }
+  return fail(
+    'bad_output',
+    `wecom-enqueue 未确认 queued=true：${maskWebhookInText(redact(tail(result.stdout)))}`,
+  );
 }

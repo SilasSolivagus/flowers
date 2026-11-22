@@ -1,0 +1,15 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# 时钟推进 + 个人推送（5 分钟一轮；--tick 是 dev→test→live 的唯一入口；经 wecom-enqueue 入队 Outbox）
+*/5 * * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/wecom-dispatch.ts --tick >> /var/log/flowers-push.log 2>&1
+# 群播报：状态变动（经 wecom-enqueue -> flowers_main）
+*/5 * * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/group-dispatch.ts >> /var/log/flowers-group.log 2>&1
+# 待排期 → 企微汇总表
+*/10 * * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/sheet-sync.ts >> /var/log/flowers-sheet.log 2>&1
+# 每半小时自检
+*/30 * * * * root /opt/flowers/scripts/healthcheck.sh --quiet >> /var/log/flowers-health.log 2>&1
+# 告警 P0（失败堆积 / 任务停摆 / 企微授权 / 外部门；6 小时冷却；经 wecom-enqueue -> flowers_alert）
+*/15 * * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/alerts.ts --apply >> /var/log/flowers-alerts.log 2>&1
+# 每日 18:30 版本进展图（主群 flowers_main + 第二群 FLOWERS_GROUP_TAG=bdf1 -> flowers_group2）
+30 18 * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/version-daily-image.ts --send >> /var/log/flowers-group.log 2>&1
+30 18 * * * root cd /opt/flowers && set -a && . ./.env.production && . ./.env.group2 && set +a && FLOWERS_GROUP_TAG=bdf1 npx tsx scripts/version-daily-image.ts --send >> /var/log/flowers-group2.log 2>&1
