@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { filterCards, formatDigest, parseArgs, type Card } from '../scripts/audit-schedule-vs-git.js';
+import { filterCards, formatDigest, parseArgs, synthesizeDigest, type Card } from '../scripts/audit-schedule-vs-git.js';
 
 const now = new Date('2026-11-23T00:00:00Z');
 const card = (overrides: Partial<Card> = {}): Card => ({ number: 8, title: 'Audit', state: 'ready', enteredAt: '2026-11-20T00:00:00Z', dueAt: null, testAt: null, ...overrides });
@@ -18,4 +18,13 @@ describe('audit schedule vs git', () => {
     expect(digest.length).toBeLessThanOrEqual(600);
   });
   it('renders a no-alert state', () => expect(formatDigest([], [], now)).toContain('近期无'));
+  it('uses the bounded factual digest if dsh is unavailable', async () => {
+    const digest = await synthesizeDigest([card({ dueAt: '2026-11-20T00:00:00Z' })], [], now, async () => { throw new Error('missing credential'); });
+    expect(digest).toContain('逾期');
+    expect(digest.length).toBeLessThanOrEqual(600);
+  });
+  it('accepts concise dsh output and truncates oversized output', async () => {
+    const digest = await synthesizeDigest([], [], now, async () => ({ stdout: 'x'.repeat(700) }));
+    expect(digest).toHaveLength(600);
+  });
 });

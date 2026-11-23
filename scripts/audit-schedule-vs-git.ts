@@ -47,7 +47,10 @@ export function formatDigest(cards: Card[], commits: Commit[], now = new Date())
   return `${full.slice(0, MAX_DIGEST_CHARS - 1).replace(/\s+$/, '')}…`;
 }
 
-export async function synthesizeDigest(cards: Card[], commits: Commit[], now = new Date()): Promise<string> {
+export async function synthesizeDigest(
+  cards: Card[], commits: Commit[], now = new Date(),
+  runner: (command: string, args: string[]) => Promise<{ stdout: string }> = (command, args) => exec(command, args, { timeout: 120_000, maxBuffer: 128 * 1024 }),
+): Promise<string> {
   const facts = formatDigest(cards, commits, now);
   const prompt = `根据以下排期与提交事实写简洁中文 Markdown 审计摘要，突出可疑的无提交、逾期/静默卡。不得添加事实，最多 600 字符。\n${facts}`;
   const binary = process.env.DSH_BIN ?? 'dsh';
@@ -59,7 +62,9 @@ export async function synthesizeDigest(cards: Card[], commits: Commit[], now = n
     const info = statSync(resolved);
     if ((info.mode & 0o111) === 0) { command = process.execPath; args = [path.resolve(path.dirname(resolved), readlinkSync(resolved)), 'headless', prompt]; }
   } catch { /* let execFile report a missing/unusable configured binary */ }
-  const { stdout } = await exec(command, args, { timeout: 120_000, maxBuffer: 128 * 1024 });
+  let stdout: string;
+  try { ({ stdout } = await runner(command, args)); }
+  catch { return facts; } // Keep the scheduled audit useful when the optional LLM credential is unavailable.
   const text = stdout.trim();
   return text.length <= MAX_DIGEST_CHARS ? text : `${text.slice(0, MAX_DIGEST_CHARS - 1).replace(/\s+$/, '')}…`;
 }
