@@ -80,9 +80,7 @@ function enqueueDigest(digest: string, dateKey: string): Promise<void> {
   });
 }
 
-function loadProductionEnv(): void {
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const file = path.join(root, '.env.production');
+function loadEnvFile(file: string): void {
   if (!existsSync(file)) return;
   for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
     const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)\s*$/.exec(line);
@@ -91,6 +89,12 @@ function loadProductionEnv(): void {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
     process.env[match[1]!] = value;
   }
+}
+
+function loadProductionEnv(): void {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  loadEnvFile(path.join(root, '.env.production'));
+  loadEnvFile(path.join(process.env.DSH_HOME ?? '/root/.dsh', 'dsh.env'));
 }
 
 export async function scanMirrors(roots: string[], since = '7 days ago'): Promise<Commit[]> {
