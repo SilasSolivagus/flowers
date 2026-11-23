@@ -55,8 +55,9 @@ export async function synthesizeDigest(cards: Card[], commits: Commit[], now = n
   // Some installs ship dsh as a Node CLI symlink whose target lacks its executable bit.
   // Run that same CLI through Node so execFile remains shell-free and works in cron too.
   try {
-    const info = statSync(binary);
-    if ((info.mode & 0o111) === 0) { command = process.execPath; args = [path.resolve(path.dirname(binary), readlinkSync(binary)), 'headless', prompt]; }
+    const resolved = binary.includes('/') ? binary : (process.env.PATH ?? '').split(path.delimiter).map(dir => path.join(dir, binary)).find(existsSync) ?? binary;
+    const info = statSync(resolved);
+    if ((info.mode & 0o111) === 0) { command = process.execPath; args = [path.resolve(path.dirname(resolved), readlinkSync(resolved)), 'headless', prompt]; }
   } catch { /* let execFile report a missing/unusable configured binary */ }
   const { stdout } = await exec(command, args, { timeout: 120_000, maxBuffer: 128 * 1024 });
   const text = stdout.trim();
