@@ -13,4 +13,3 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 每日 18:30 版本进展图（主群 flowers_main + 第二群 FLOWERS_GROUP_TAG=bdf1 -> flowers_group2）
 30 18 * * * root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/version-daily-image.ts --send >> /var/log/flowers-group.log 2>&1
 30 18 * * * root cd /opt/flowers && set -a && . ./.env.production && . ./.env.group2 && set +a && FLOWERS_GROUP_TAG=bdf1 npx tsx scripts/version-daily-image.ts --send >> /var/log/flowers-group2.log 2>&1
-30 8 * * 1-5 root cd /opt/flowers && set -a && . ./.env.production && set +a && npx tsx scripts/audit-schedule-vs-git.ts >> /var/log/flowers-git-audit.log 2>&1
