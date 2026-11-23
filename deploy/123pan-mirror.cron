@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TZ=Asia/Shanghai
+# B123 数仓只读快照每日刷新（04:30）
+30 4 * * * root /opt/123pan/tools/_ro/refresh-dw-snapshot.sh >> /var/log/dw-ro-snapshot.log 2>&1
+# 123云盘全量代码裸镜像同步 + Flower 夜间代码索引（05:05；index-nightly.sh 内部串行执行 sync-mirrors.sh -> index-nightly.ts）
+5 5 * * * root MIRROR_ROOT=/srv/123pan-mirror MIRROR_ROOT_GITLAB=/srv/123pan-mirror-gl SYNC_READONLY=0 FLOWERS_INDEX_LOG=/var/log/flowers-index-nightly.log /opt/flowers/scripts/index-nightly.sh

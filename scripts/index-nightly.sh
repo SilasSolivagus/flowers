@@ -25,8 +25,33 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG="${FLOWERS_INDEX_LOG:-$HOME/Library/Application Support/flowers/logs/index-nightly.log}"
-LOCK="${FLOWERS_INDEX_LOCK:-${TMPDIR:-/tmp}/flowers-index-nightly.lock}"
+# 服务器 cron 直调时自动加载 .env.production（获取 DATABASE_URL / MIRROR_ROOT 等），
+# 同时保留调用方在命令行显式覆盖的环境变量。
+if [ -f "$ROOT/.env.production" ]; then
+  _ovr_mirror_root="${MIRROR_ROOT:-}"
+  _ovr_mirror_gl="${MIRROR_ROOT_GITLAB:-}"
+  _ovr_sync_ro="${SYNC_READONLY:-}"
+  _ovr_index_log="${FLOWERS_INDEX_LOG:-}"
+  _ovr_mirror_log="${FLOWERS_MIRROR_LOG:-}"
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.env.production"
+  set +a
+  [ -n "$_ovr_mirror_root" ] && export MIRROR_ROOT="$_ovr_mirror_root"
+  [ -n "$_ovr_mirror_gl" ] && export MIRROR_ROOT_GITLAB="$_ovr_mirror_gl"
+  [ -n "$_ovr_sync_ro" ] && export SYNC_READONLY="$_ovr_sync_ro"
+  [ -n "$_ovr_index_log" ] && export FLOWERS_INDEX_LOG="$_ovr_index_log"
+  [ -n "$_ovr_mirror_log" ] && export FLOWERS_MIRROR_LOG="$_ovr_mirror_log"
+fi
+if [ "$(id -u)" = "0" ]; then
+  DEFAULT_INDEX_LOG="/var/log/flowers-index-nightly.log"
+  DEFAULT_INDEX_LOCK="/var/lock/flowers-index-nightly.lock"
+else
+  DEFAULT_INDEX_LOG="$HOME/Library/Application Support/flowers/logs/index-nightly.log"
+  DEFAULT_INDEX_LOCK="${TMPDIR:-/tmp}/flowers-index-nightly.lock"
+fi
+LOG="${FLOWERS_INDEX_LOG:-$DEFAULT_INDEX_LOG}"
+LOCK="${FLOWERS_INDEX_LOCK:-$DEFAULT_INDEX_LOCK}"
 TSX="$ROOT/node_modules/.bin/tsx"
 
 usage() {
