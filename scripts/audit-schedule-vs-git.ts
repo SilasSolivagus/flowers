@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, readlinkSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,7 +50,15 @@ export function formatDigest(cards: Card[], commits: Commit[], now = new Date())
 export async function synthesizeDigest(cards: Card[], commits: Commit[], now = new Date()): Promise<string> {
   const facts = formatDigest(cards, commits, now);
   const prompt = `根据以下排期与提交事实写简洁中文 Markdown 审计摘要，突出可疑的无提交、逾期/静默卡。不得添加事实，最多 600 字符。\n${facts}`;
-  const { stdout } = await exec(process.env.DSH_BIN ?? 'dsh', ['headless', prompt], { timeout: 120_000, maxBuffer: 128 * 1024 });
+  const binary = process.env.DSH_BIN ?? 'dsh';
+  let command = binary, args = ['headless', prompt];
+  // Some installs ship dsh as a Node CLI symlink whose target lacks its executable bit.
+  // Run that same CLI through Node so execFile remains shell-free and works in cron too.
+  try {
+    const info = statSync(binary);
+    if ((info.mode & 0o111) === 0) { command = process.execPath; args = [path.resolve(path.dirname(binary), readlinkSync(binary)), 'headless', prompt]; }
+  } catch { /* let execFile report a missing/unusable configured binary */ }
+  const { stdout } = await exec(command, args, { timeout: 120_000, maxBuffer: 128 * 1024 });
   const text = stdout.trim();
   return text.length <= MAX_DIGEST_CHARS ? text : `${text.slice(0, MAX_DIGEST_CHARS - 1).replace(/\s+$/, '')}…`;
 }
