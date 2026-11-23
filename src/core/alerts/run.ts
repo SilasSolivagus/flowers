@@ -481,7 +481,7 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       const queued = await enqueueOutbox({
         channel: 'webhook',
         target: 'flowers_alert',
-        type: mentioned.length > 0 ? 'text' : 'markdown',
+        type: 'markdown',
         dedupKey,
         content: text,
       }, { bin: outboxBin });
@@ -499,13 +499,15 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       continue;
     }
 
-    /**
-     * 有要 @ 的人 → 用 **text** 消息（企微只有 text 支持 mentioned_list；markdown 不行），
-     * 没有要 @ 的人 → 仍用 markdown（能加粗、能点链接）。
-     * 这是企微的能力边界，不是我们偷懒。
-     */
+    // 发完整 markdown 告警；企微的 mentioned_list 只支持 text，因此 @ 单独轻量提醒。
+    const result = await send(webhook, text);
+    if (!result.ok) {
+      run.failed.push(`${alert.key}：${result.message ?? '发送失败'}`);
+      continue;
+    }
     if (mentioned.length > 0) {
-      const res = await sendTextWithMentions(webhook, text, mentioned.map((t) => t.userid), send);
+      const res = await sendTextWithMentions(webhook,
+        `告警：${alert.title}，请查看上方告警详情。`, mentioned.map((t) => t.userid), send);
       if (res.ok) {
         await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());
         run.sent.push(alert.key);
@@ -514,13 +516,8 @@ export async function runAlerts(opts: { dryRun?: boolean; deps?: AlertDeps } = {
       }
       continue;
     }
-    const result = await send(webhook, text);
-    if (result.ok) {
-      await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());
-      run.sent.push(alert.key);
-    } else {
-      run.failed.push(`${alert.key}：${result.message ?? '发送失败'}`);
-    }
+    await writeSetting(db, `${ALERT_PREFIX}${alert.key}`, now.toISOString());
+    run.sent.push(alert.key);
   }
   return run;
 }

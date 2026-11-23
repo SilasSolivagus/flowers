@@ -111,7 +111,7 @@ export function sendArgv(userid: string, content: string): string[] {
     'message', 'aibot', 'send',
     '--chat-id', userid,
     '--msg-type', 'markdown',
-    '--markdown', JSON.stringify({ content }),
+    '--markdown', JSON.stringify({ content: clipBytes(content, 3900) }),
   ];
 }
 
@@ -696,12 +696,25 @@ export async function sendWebhook(
 }
 
 /** 按**字节**截断（中文一个字 3 字节，按字符数截会超）。 */
-function clipBytes(text: string, max: number): string {
+export function clipBytes(text: string, max: number): string {
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes <= max) return text;
-  let out = text;
-  while (Buffer.byteLength(out, 'utf8') > max - 1) out = out.slice(0, -1);
-  return `${out}…`;
+  const suffix = '…';
+  const budget = max - Buffer.byteLength(suffix, 'utf8');
+  let out = '';
+  for (const line of text.split('\n')) {
+    const next = out === '' ? line : `${out}\n${line}`;
+    if (Buffer.byteLength(next, 'utf8') > budget) break;
+    out = next;
+  }
+  if (out !== '') return `${out}${suffix}`;
+  let partial = '';
+  for (const char of text) {
+    if (Buffer.byteLength(partial + char, 'utf8') > budget) break;
+    partial += char;
+  }
+  partial = partial.replace(/\*+$/, '').replace(/\[[^\]]*$/, '').replace(/\([^)]*$/, '');
+  return `${partial}${suffix}`;
 }
 
 // ─── 2026-11-22：统一企微本地 Outbox 队列适配（wecom-enqueue）──────────────

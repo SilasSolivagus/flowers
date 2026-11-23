@@ -35,7 +35,7 @@ import {
   writeWatermark,
 } from '../src/core/notify/group.js';
 import {
-  groupDailyDedupKey, groupEventDedupKey, outboxGroupTarget, resolveOutboxBin,
+  groupDailyDedupKey, outboxGroupTarget, resolveOutboxBin, clipBytes,
 } from '../src/core/notify/wecom.js';
 import { listReleases } from '../src/core/read/version.js';
 import { todayInShanghai, versionCards } from '../src/core/read/version-daily.js';
@@ -154,39 +154,42 @@ try {
         .filter((text): text is string => text !== null);
       process.stdout.write(`[dry-run] 将播 ${preview.length} 条：\n${preview.join('\n---\n')}\n`);
     } else {
-      let sent = 0;
-      let failed = 0;
-      for (const item of items) {
-        const content = renderEventMessage(item, baseUrl);
-        const ref = `evt:${item.seq}`;
-        if (content === null) continue;
-
-        // 先落 pending 再发：消息发出去收不回来，记号必须先于发送存在。
-        await db.execute(sql`
-          insert into group_posts (kind, ref, content, status)
-          values (${KIND_EVENTS}, ${ref}, ${content}, 'pending')
-          on conflict (kind, ref) do nothing`);
-        const posted = await postGroup(webhook ?? target, content, {
-          dedupKey: groupEventDedupKey(tag, item.seq),
-          target,
-        });
-        await db.execute(sql`
-          update group_posts
-             set status = ${posted.ok ? 'sent' : 'failed'},
-                 error = ${posted.ok ? null : posted.message},
-                 posted_at = ${posted.ok ? sql`now()` : sql`null`},
-                 attempts = attempts + 1
-           where kind = ${KIND_EVENTS} and ref = ${ref} and status <> 'sent'`);
-        if (posted.ok) {
-          sent += 1;
-          process.stdout.write(`已发：PAN-${item.number} ${item.type}\n`);
-        } else {
-          failed += 1;
-          process.stderr.write(`发送失败：PAN-${item.number} ${posted.message}\n`);
-          process.exitCode = 1;
+      const ready = items.map((item) => ({ item, content: renderEventMessage(item, baseUrl) }))
+        .filter((row): row is { item: typeof items[number]; content: string } => row.content !== null);
+      const chunks: string[] = [];
+      if (ready.length === 1) chunks.push(ready[0]!.content);
+      else {
+        let chunk = `**需求状态变动（${ready.length} 条）**`;
+        for (const row of ready) {
+          const candidate = `${chunk}\n\n---\n\n${row.content}`;
+          if (Buffer.byteLength(candidate, 'utf8') > 3900 && chunk !== `**需求状态变动（${ready.length} 条）**`) {
+            chunks.push(chunk);
+            chunk = `**需求状态变动（${ready.length} 条，续）**\n\n${row.content}`;
+          } else chunk = candidate;
         }
+        if (chunk !== `**需求状态变动（${ready.length} 条）**`) chunks.push(clipBytes(chunk, 3900));
       }
-      process.stdout.write(`本轮：发出 ${sent} 条 · 失败 ${failed} 条\n`);
+      for (const { item, content: eventContent } of ready) {
+        await db.execute(sql`insert into group_posts (kind, ref, content, status)
+          values (${KIND_EVENTS}, ${`evt:${item.seq}`}, ${eventContent}, 'pending')
+          on conflict (kind, ref) do nothing`);
+      }
+      if (ready.length > 0) {
+        let posted: { ok: boolean; message?: string } = { ok: true };
+        for (const [index, digest] of chunks.entries()) {
+          posted = await postGroup(webhook ?? target, digest, {
+            dedupKey: `flowers-group-digest:${ready.map(({ item }) => item.seq).join(',')}:${index}`,
+            target,
+          });
+          if (!posted.ok) break;
+        }
+        for (const { item } of ready) await db.execute(sql`update group_posts
+          set status = ${posted.ok ? 'sent' : 'failed'}, error = ${posted.ok ? null : posted.message},
+              posted_at = ${posted.ok ? sql`now()` : sql`null`}, attempts = attempts + 1
+          where kind = ${KIND_EVENTS} and ref = ${`evt:${item.seq}`} and status <> 'sent'`);
+        if (!posted.ok) { process.stderr.write(`发送失败：${posted.message}\n`); process.exitCode = 1; }
+        process.stdout.write(`本轮：合并 ${ready.length} 条，${posted.ok ? '已发送 1 条' : '发送失败'}\n`);
+      }
     }
   }
 } catch (error) {

@@ -13,7 +13,7 @@ import {
   DEFAULT_PER_MEMBER_LIMIT, dispatchWecom, tickThenDispatch, type DispatchSummary,
 } from '../src/core/notify/dispatch.js';
 import {
-  lookupUserid, messageOf, pickUser, resolveUserid, sendMarkdown,
+  clipBytes, lookupUserid, messageOf, pickUser, resolveUserid, sendMarkdown,
   type Runner,
 } from '../src/core/notify/wecom.js';
 
@@ -279,6 +279,12 @@ describe('名字 → userid：只认后缀/包含，并且不猜', () => {
 // ─── 发送 ────────────────────────────────────────────────────────────────────
 
 describe('发一条 markdown：形状与包装字段', () => {
+  it('截断 markdown 时保持 UTF-8 字节上限并优先停在完整行', () => {
+    const clipped = clipBytes('**标题**\n[完整链接](https://example.com)\n' + '很长'.repeat(3000), 3900);
+    expect(Buffer.byteLength(clipped, 'utf8')).toBeLessThanOrEqual(3900);
+    expect(clipped).toContain('**标题**');
+    expect(clipped).toContain('[完整链接](https://example.com)');
+  });
   it('argv 就是 message aibot send --chat-id … --msg-type markdown --markdown {"content":…}', async () => {
     const sent = await sendMarkdown('wou-123', messageOf('PAN-7「导出任务队列」', '进入待评审，等你签字'));
     expect(sent.ok).toBe(true);
