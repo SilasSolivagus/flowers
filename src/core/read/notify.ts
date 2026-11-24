@@ -246,6 +246,21 @@ export function memberLineOf(type: string, payload: Payload): string {
     return `时钟跳过 ${count} 条需求${range === '' ? '' : `（${range}）`}${tail}——这几行的日期或排期版本坏了，不补就永远不会自己往前走`;
   }
   if (type === 'mirror.stale') {
+    const list = (key: 'failed' | 'stale'): Array<Record<string, unknown>> => Array.isArray(payload[key])
+      ? (payload[key] as unknown[]).filter((v): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)) : [];
+    const failed = list('failed');
+    const stale = list('stale');
+    if (failed.length > 0 || stale.length > 0) {
+      const names = (items: Array<Record<string, unknown>>): string => {
+        const repos = items.map((v) => typeof v.repo === 'string' ? v.repo : '').filter(Boolean);
+        const shown = repos.slice(0, 8).join('、');
+        return repos.length > 8 ? `${shown}… 等 ${repos.length} 个` : shown;
+      };
+      const parts: string[] = [];
+      if (failed.length) parts.push(`同步失败 ${failed.length} 个：${names(failed)}`);
+      if (stale.length) parts.push(`新增停更 ${stale.length} 个：${names(stale)}`);
+      return `镜像新鲜度提醒：${parts.join('；')}`;
+    }
     // 一行说清三件事：哪个仓、停在哪天（几天前）、为什么。**两半的措辞不同**：
     // 同步失败才写「上次同步失败：」这一截；健康但旧（cron 好好跑着、上游就是没有
     // 新提交）写「上游这段时间没有新提交」——把一次成功的同步说成失败，会让人去修

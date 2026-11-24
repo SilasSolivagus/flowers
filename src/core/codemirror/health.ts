@@ -96,8 +96,8 @@ function thresholdOf(thresholds: StaleThresholds | undefined, repo: string): num
   return value === null || value === undefined ? Number.POSITIVE_INFINITY : value;
 }
 
-/** advisory lock 的键前缀：锁按**仓**上，三个仓同时旧应该是三条提醒。 */
-const ALERT_LOCK_PREFIX = 'mirror.stale:';
+const ALERT_LOCK_KEY = 'mirror.freshness.daily';
+const FRESHNESS_STATE_KEY = 'code.mirror.freshness_state';
 
 /** 任意执行器（`db` 或一个事务）：这两个查询在事务里也要能用。 */
 type Exec = Pick<Db, 'execute'>;
@@ -226,24 +226,17 @@ export function judgeMirror(
 }
 
 /** 提醒的正文素材（`read/notify.ts` 的 `memberLineOf` 把这几格拼成一句话）。 */
-function payloadOf(alert: MirrorAlert, day: number): Record<string, unknown> {
-  return {
-    repo: alert.repo,
-    head_date: alert.headDate,
-    days: alert.days,
-    error: alert.error,
-    reason: alert.reason,
-    day,
-  };
+function payloadOf(alerts: readonly MirrorAlert[], failed: readonly MirrorAlert[], stale: readonly MirrorAlert[], day: number): Record<string, unknown> {
+  return { day, failed: failed.map((a) => ({ repo: a.repo, error: a.error, head_date: a.headDate, days: a.days })),
+    stale: stale.map((a) => ({ repo: a.repo, head_date: a.headDate, days: a.days })), count: alerts.length };
 }
 
-/** 这个仓今天是不是已经报过了（按仓 + `payload.day`）。 */
-async function alertedOn(db: Exec, repo: string, day: number): Promise<boolean> {
+/** 这个夜间运行日是不是已经写过汇总。 */
+async function alertedOn(db: Exec, day: number): Promise<boolean> {
   const res = await db.execute<{ seq: number }>(sql`
     select seq
       from events
      where type = ${EVENT_MIRROR_STALE}
-       and (payload::jsonb ->> 'repo') = ${repo}
        and (payload::jsonb ->> 'day')::int = ${day}
      limit 1`);
   return res.rows.length > 0;
@@ -268,43 +261,46 @@ export async function checkMirrorFreshness(
   if (day === null) throw new AppError('invalid', '时钟时间不合法');
   const today = todayInShanghai(input.now);
   if (input.repos.length === 0) return [];
-
-  const res = await db.execute<HealthRow>(sql`
-    select repo, head_sha, head_date, ok, error
-      from mirror_health
-     where repo in (${sql.join(input.repos.map((repo) => sql`${repo}`), sql`, `)})`);
-  const byRepo = new Map(res.rows.map((row) => [row.repo, row]));
-
-  const alerts: MirrorAlert[] = [];
-  for (const repo of input.repos) {
-    const alert = judgeMirror({
-      repo, row: byRepo.get(repo) ?? null, today,
-      ...(input.staleAfterDays === undefined ? {} : { staleAfterDays: thresholdOf(input.staleAfterDays, repo) }),
-    });
-    if (alert !== null) alerts.push(alert);
-  }
-  if (alerts.length === 0) return [];
-
   const written: MirrorAlert[] = [];
   await db.transaction(async (tx) => {
-    for (const alert of alerts) {
-      // 按**仓**上锁：两个索引进程撞在一起时，第二个会等第一个提交，再读到的就是
-      // 「今天这个仓已经有一条」。前缀把它的键空间与成员 id / 时钟那条分开。
-      await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${ALERT_LOCK_PREFIX + alert.repo}))`,
-      );
-      if (await alertedOn(tx, alert.repo, day)) continue;
-
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ALERT_LOCK_KEY}))`);
+    const res = await tx.execute<HealthRow>(sql`select repo, head_sha, head_date, ok, error from mirror_health where repo in (${sql.join(input.repos.map((repo) => sql`${repo}`), sql`, `)})`);
+    const byRepo = new Map(res.rows.map((row) => [row.repo, row]));
+    const setting = await tx.execute<{ value: string }>(sql`select value from app_settings where key = ${FRESHNESS_STATE_KEY}`);
+    let previous: Record<string, 'fresh' | 'stale' | 'failed'> = {};
+    try { const parsed: unknown = JSON.parse(setting.rows[0]?.value ?? '{}'); if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed as typeof previous; } catch { /* recover from malformed setting */ }
+    const next: Record<string, 'fresh' | 'stale' | 'failed'> = {};
+    const alerts: MirrorAlert[] = [];
+    const currentByRepo = new Map<string, { status: 'fresh' | 'stale' | 'failed'; alert: MirrorAlert | null }>();
+    for (const repo of input.repos) {
+      const alert = judgeMirror({ repo, row: byRepo.get(repo) ?? null, today,
+        ...(input.staleAfterDays === undefined ? {} : { staleAfterDays: thresholdOf(input.staleAfterDays, repo) }) });
+      const status = alert === null ? 'fresh' : alert.reason === 'failed' ? 'failed' : 'stale';
+      next[repo] = status;
+      currentByRepo.set(repo, { status, alert });
+      if (status === 'stale' && (previous[repo] === undefined || previous[repo] === 'fresh')) alerts.push(alert!);
+    }
+    const oldFailed = input.repos.filter((repo) => previous[repo] === 'failed').sort();
+    const currentFailed = input.repos.filter((repo) => currentByRepo.get(repo)?.status === 'failed').sort();
+    if (currentFailed.length > 0 && (oldFailed.length !== currentFailed.length || oldFailed.some((repo, i) => repo !== currentFailed[i]))) {
+      for (const repo of currentFailed) {
+        const alert = currentByRepo.get(repo)?.alert;
+        if (alert !== null && alert !== undefined && !alerts.some((item) => item.repo === repo)) alerts.push(alert);
+      }
+    }
+    await tx.execute(sql`insert into app_settings (key, value, updated_at) values (${FRESHNESS_STATE_KEY}, ${JSON.stringify(next)}, now()) on conflict (key) do update set value = excluded.value, updated_at = now()`);
+    if (alerts.length === 0 || await alertedOn(tx, day)) return;
+    const failed = alerts.filter((a) => a.reason === 'failed');
+    const stale = alerts.filter((a) => a.reason !== 'failed');
       await recordEvent(tx, {
         // 没有需求可挂：这是一条**全局级**提醒（说的是镜像，不是某条需求）。
         // 读模型对 `requirement_id is null` 的那一类事件单独扇出给超管。
         requirementId: null,
         actor: 'system',
         type: EVENT_MIRROR_STALE,
-        payload: payloadOf(alert, day),
+        payload: payloadOf(alerts, failed, stale, day),
       });
-      written.push(alert);
-    }
+    written.push(...alerts);
   });
 
   return written;

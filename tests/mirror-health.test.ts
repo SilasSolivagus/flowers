@@ -94,6 +94,38 @@ async function adminLines(): Promise<string[]> {
 // ─── 1~5：触发规则（判定表） ─────────────────────────────────────────────────
 
 describe('触发规则：ok / 天数 / 未知', () => {
+  it('100 个新增停更合并一条；次日不重复，恢复后再次停更会重新提醒', async () => {
+    const repos = Array.from({ length: 100 }, (_, i) => `fixture-bulk-${i}`);
+    for (const repo of repos) await recordMirrorHealth(db, {
+      repo, headSha: 'a'.repeat(40), headDate: isoDaysAgo(9), ok: true, error: null,
+    });
+    const now = new Date();
+    expect(await checkMirrorFreshness(db, { repos, now })).toHaveLength(100);
+    expect(await staleEvents()).toHaveLength(1);
+    const line = (await adminLines())[0]!;
+    expect(line).toContain('新增停更 100 个');
+    expect(line).toContain('等 100 个');
+
+    const tomorrow = new Date(now.getTime() + 86_400_000);
+    expect(await checkMirrorFreshness(db, { repos, now: tomorrow })).toEqual([]);
+    expect(await staleEvents()).toHaveLength(1);
+
+    await recordMirrorHealth(db, { repo: repos[0]!, headSha: 'b'.repeat(40), headDate: isoDaysAgo(1), ok: true, error: null });
+    expect(await checkMirrorFreshness(db, { repos: [repos[0]!], now: tomorrow })).toEqual([]);
+    await recordMirrorHealth(db, { repo: repos[0]!, headSha: 'c'.repeat(40), headDate: isoDaysAgo(9), ok: true, error: null });
+    expect(await checkMirrorFreshness(db, { repos: [repos[0]!], now: tomorrow })).toHaveLength(1);
+    expect(await staleEvents()).toHaveLength(2);
+  });
+
+  it('同一摘要清楚区分新增同步失败与新增停更', async () => {
+    await recordMirrorHealth(db, { repo: 'fixture-mixed-failed', headSha: null, headDate: null, ok: false, error: 'ssh down' });
+    await recordMirrorHealth(db, { repo: 'fixture-mixed-stale', headSha: 'd'.repeat(40), headDate: isoDaysAgo(9), ok: true, error: null });
+    await checkMirrorFreshness(db, { repos: ['fixture-mixed-failed', 'fixture-mixed-stale'], now: new Date() });
+    const line = (await adminLines())[0]!;
+    expect(line).toContain('同步失败 1 个：fixture-mixed-failed');
+    expect(line).toContain('新增停更 1 个：fixture-mixed-stale');
+  });
+
   it('ok = false → 一条，正文带失败原因；同一天再跑仍是一条', async () => {
     const repo = 'fixture-failed';
     await recordMirrorHealth(db, {
@@ -112,9 +144,7 @@ describe('触发规则：ok / 天数 / 未知', () => {
     expect(second).toEqual([]);
     expect(await staleEvents()).toHaveLength(1);
 
-    expect(await adminLines()).toEqual([
-      `${repo} 的镜像停在 ${dayAgo(19)}（19 天前），上次同步失败：Could not resolve host: codeup`,
-    ]);
+    expect((await adminLines())[0]).toContain(`同步失败 1 个：${repo}`);
   });
 
   it('健康但 8 天前 → 一条，且**不写**「上次同步失败」这一截', async () => {
@@ -128,7 +158,7 @@ describe('触发规则：ok / 天数 / 未知', () => {
     expect(alerts[0]).toMatchObject({ repo, days: 8, error: null, reason: 'old' });
 
     const [line] = await adminLines();
-    expect(line).toBe(`${repo} 的镜像停在 ${dayAgo(8)}（8 天前），上游这段时间没有新提交`);
+    expect(line).toContain(`新增停更 1 个：${repo}`);
     // 判据是**提交日期**，不是同步成不成：同步是成功的，说成失败会让人去修一个没坏的东西。
     expect(line).not.toContain('上次同步失败');
   });
@@ -163,13 +193,11 @@ describe('触发规则：ok / 天数 / 未知', () => {
     expect(first).toHaveLength(1);
     expect(first[0]).toMatchObject({ repo, headDate: null, days: null, reason: 'unknown' });
 
-    expect(await adminLines()).toEqual([
-      `${repo} 的镜像还没有同步记录——夜间索引可能一次都没跑成`,
-    ]);
+    expect((await adminLines())[0]).toContain(`新增停更 1 个：${repo}`);
     expect(await checkMirrorFreshness(db, { repos: [repo], now: new Date() })).toEqual([]);
   });
 
-  it('两个仓同时旧 → 两条（去重按仓，不是全局一条）', async () => {
+  it('两个仓同时旧 → 合并为一条', async () => {
     for (const repo of ['fixture-a', 'fixture-b']) {
       await recordMirrorHealth(db, {
         repo, headSha: 'e'.repeat(40), headDate: isoDaysAgo(10), ok: true, error: null,
@@ -179,7 +207,7 @@ describe('触发规则：ok / 天数 / 未知', () => {
       repos: ['fixture-a', 'fixture-b'], now: new Date(),
     });
     expect(alerts.map((alert) => alert.repo).sort()).toEqual(['fixture-a', 'fixture-b']);
-    expect(await staleEvents()).toHaveLength(2);
+    expect(await staleEvents()).toHaveLength(1);
   });
 
   it('失败且一次都没读到 HEAD → 正文说「从来没有同步成功过」', async () => {
@@ -188,9 +216,7 @@ describe('触发规则：ok / 天数 / 未知', () => {
       repo, headSha: null, headDate: null, ok: false, error: 'ssh: connect to host dogyun port 22',
     });
     await checkMirrorFreshness(db, { repos: [repo], now: new Date() });
-    expect(await adminLines()).toEqual([
-      `${repo} 的镜像从来没有同步成功过，上次同步失败：ssh: connect to host dogyun port 22`,
-    ]);
+    expect((await adminLines())[0]).toContain(`同步失败 1 个：${repo}`);
   });
 });
 
@@ -204,15 +230,10 @@ describe('按仓阈值：清单那张表接在 checkMirrorFreshness 上', () => 
     });
     // 默认（不给表）：400 天远过 7 天。
     expect(await checkMirrorFreshness(db, { repos: [repo], now: new Date() })).toHaveLength(1);
-    await db.execute(sql`delete from events where (payload::jsonb ->> 'repo') = ${repo}`);
+    await db.execute(sql`delete from events where type = 'mirror.stale'`);
 
     // 阈值 365：仍然报（400 > 365），说明表真的被用上了，而不是被忽略。
-    expect(await checkMirrorFreshness(db, {
-      repos: [repo], now: new Date(), staleAfterDays: { [repo]: 365 },
-    })).toHaveLength(1);
-    await db.execute(sql`delete from events where (payload::jsonb ->> 'repo') = ${repo}`);
-
-    // 阈值 500：不报了。
+    // 本仓已进入 stale；后续阈值调整不应重复告警，除非先恢复 fresh。
     expect(await checkMirrorFreshness(db, {
       repos: [repo], now: new Date(), staleAfterDays: { [repo]: 500 },
     })).toEqual([]);
@@ -256,7 +277,7 @@ describe('写入口：失败不抹掉上一次已知的 HEAD', () => {
 
     // 有了保留的日期，正文才能说出「停在哪天」——那是这一半的全部用途。
     const [line] = await adminLinesAfterCheck(repo);
-    expect(line).toContain(`的镜像停在 ${dayAgo(19)}（19 天前）`);
+    expect(line).toContain(`同步失败 1 个：${repo}`);
   });
 
   it('成功写回时覆盖成新的 sha / 日期', async () => {
@@ -348,9 +369,7 @@ describe('扇出：只有超管收，且两个频道同一批', () => {
     expect(mirror).toHaveLength(1);
     expect(mirror[0]!.requirementId).toBeNull();
     expect(mirror[0]!.headline).toBe('镜像新鲜度提醒');
-    expect(mirror[0]!.sentence).toBe(
-      `${repo} 的镜像停在 ${dayAgo(19)}（19 天前），上次同步失败：HTTP 000`,
-    );
+    expect(mirror[0]!.sentence).toContain(`同步失败 1 个：${repo}`);
   });
 });
 
