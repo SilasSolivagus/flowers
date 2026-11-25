@@ -144,6 +144,28 @@ describe('跑批：冷却与「发不出去也不炸」', () => {
     });
     expect(run.failed.some((text) => text.startsWith('group_failed'))).toBe(true);
   });
+
+  it('群播报样本只取近 2 小时失败行、不重复拼 evt: 前缀且保留完整报错原因', async () => {
+    const sent: string[] = [];
+    await db.execute(sql`insert into group_posts (kind, ref, status, content, error, created_at)
+      values
+        ('events', 'evt:1625', 'failed', 'old', '发到机器人失败：fetch failed', now() - interval '10 days'),
+        ('daily', 'daily:rel-1:2026-11-25:img', 'failed', 'img', 'wecom-enqueue 入队失败（退出码 2）：database is locked', now())`);
+    const run = await runAlerts({
+      deps: {
+        cronLogs: {},
+        wecomAuthorized: async () => true,
+        probeGate: async () => 302,
+        webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=00000000-0000-0000-0000-000000000000',
+        send: async (_hook: string, text: string) => { sent.push(text); return { ok: true }; },
+      },
+    });
+    expect(run.sent).toContain('group_failed');
+    const groupMsg = sent.find((t) => t.includes('群播报失败')) ?? '';
+    expect(groupMsg).toContain('daily:rel-1:2026-11-25:img · wecom-enqueue 入队失败（退出码 2）：database is locked');
+    expect(groupMsg).not.toContain('evt:daily:');
+    expect(groupMsg).not.toContain('evt:1625');
+  });
 });
 
 describe('门探活参数（2026-11-12 修 hairpin）', () => {

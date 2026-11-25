@@ -257,8 +257,9 @@ export async function buildSnapshot(deps: AlertDeps = {}): Promise<Snapshot> {
          and d.created_at > now() - interval '2 hours'
        limit 3`),
     group_failed: await sample(sql`
-      select 'evt:' || coalesce(ref, '?') || ' · ' || left(coalesce(error, ''), 30) as label
-        from group_posts where status = 'failed'
+      select coalesce(ref, '?') || ' · ' || left(coalesce(error, ''), 120) as label
+        from group_posts
+       where status = 'failed' and created_at > now() - interval '2 hours'
        order by created_at desc limit 3`),
     sheet_failed: await sample(sql`
       select 'PAN-' || r.number || ' ' || left(r.title, 18) as label

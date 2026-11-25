@@ -304,7 +304,7 @@ async function main(): Promise<void> {
       dateKey,
     });
     await db.execute(sent.ok
-      ? sql`update group_posts set status='sent', posted_at=now(), attempts=attempts+1 where kind=${KIND} and ref=${ref}`
+      ? sql`update group_posts set status='sent', error=null, posted_at=now(), attempts=attempts+1 where kind=${KIND} and ref=${ref}`
       : sql`update group_posts set status='failed', error=${sent.message}, attempts=attempts+1 where kind=${KIND} and ref=${ref}`);
     process.stdout.write(`${sent.ok ? '已发' : '失败'}：${releaseName} 日报图（${ref}）${sent.message}\n`);
     if (!sent.ok) process.exitCode = 1;
